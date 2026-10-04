@@ -25,8 +25,8 @@ def register(ctx):
     def working(session_id=None, **kwargs):
         _emit(session_id, "working")
 
-    def finished(session_id=None, completed=False, interrupted=False, **kwargs):
-        _emit(session_id, "done" if completed else "stopped" if interrupted else "error")
+    def finished(session_id=None, completed=False, failed=False, interrupted=False, **kwargs):
+        _emit(session_id, "stopped" if interrupted else "error" if failed else "done" if completed else "stopped")
 
     def approval(session_key=None, **kwargs):
         _emit(session_key, "attention")

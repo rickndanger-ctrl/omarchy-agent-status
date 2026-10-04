@@ -174,6 +174,7 @@ def active_processes():
 def window_workspaces():
     """Map visible agent windows to Hyprland workspace numbers."""
     result = {agent: set() for agent in AGENTS}
+    direct = {agent: set() for agent in AGENTS}
     try:
         clients = json.loads(subprocess.check_output(
             ["hyprctl", "clients", "-j"], text=True, timeout=2))
@@ -200,9 +201,11 @@ def window_workspaces():
         matched = set()
         if name in ("chatgpt", "codex"):
             matched.add("codex")
+            direct["codex"].add(workspace)
         for agent in ("claude", "hermes", "herder"):
             if agent in name or agent in title:
                 matched.add(agent)
+                direct[agent].add(workspace)
         if isinstance(pid, int):
             for process_pid, process_name in processes.items():
                 if process_name not in AGENTS:
@@ -217,6 +220,9 @@ def window_workspaces():
                         break
         for agent in matched:
             result[agent].add(workspace)
+    for agent in AGENTS:
+        if direct[agent]:
+            result[agent] = direct[agent]
     return result
 
 

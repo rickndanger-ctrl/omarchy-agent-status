@@ -113,17 +113,8 @@ BarWidget {
           font.pixelSize: Style.font.bodySmall
         }
         Text {
-          visible: !!modelData.workspace
           anchors.verticalCenter: parent.verticalCenter
-          text: modelData.workspace ? "#" + modelData.workspace : ""
-          color: root.bar.barForeground
-          font.family: root.bar.fontFamily
-          font.bold: true
-          font.pixelSize: Style.font.caption
-        }
-        Text {
-          anchors.verticalCenter: parent.verticalCenter
-          text: modelData.symbol || "○"
+          text: (modelData.workspace ? modelData.workspace + " " : "") + (modelData.symbol || "○")
           color: root.colorFor(modelData.state)
           font.family: root.bar.fontFamily
           font.bold: true
@@ -131,7 +122,8 @@ BarWidget {
         }
         Text {
           anchors.verticalCenter: parent.verticalCenter
-          text: modelData.page || modelData.name || ""
+          text: modelData.page || ""
+          visible: text !== ""
           color: root.bar.barForeground
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
@@ -177,7 +169,7 @@ BarWidget {
           width: panel.width
           spacing: Style.space(8)
           Text {
-            text: (modelData.symbol || "○") + "  " + (modelData.name || "") + (modelData.workspace ? "  #" + modelData.workspace : "")
+            text: (modelData.workspace ? modelData.workspace + " " : "") + (modelData.symbol || "○") + "  " + (modelData.name || "")
             color: root.colorFor(modelData.state)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.body

@@ -23,6 +23,8 @@ python3 ~/.config/omarchy/plugins/rickom1.agent-status/setup_integrations.py
 
 The second command opts in to Claude Code and Hermes event hooks. Use `--claude` or `--hermes` to install only one. Codex reads its local session records without an extra hook. Herder appears as an idle badge and can publish events using the local bridge described below.
 
+Restart any Hermes chat that was already running when the hook was installed. Hermes loads plugins at session startup. The bar shows a workspace number only when the agent has a visible Omarchy window; a detached tmux session has no desktop workspace number until attached to a terminal window.
+
 `omarchy plugin add` installs the plugin but does not run the integration helper automatically. Review the helper before running it. A newly enabled Hermes plugin takes effect in new Hermes sessions.
 
 ## Herder event bridge

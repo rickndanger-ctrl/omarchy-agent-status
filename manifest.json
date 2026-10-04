@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "rickom1.agent-status",
   "name": "Live Agent Status",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "rickndanger-ctrl",
   "description": "Live agent status and workspace badges for Codex, Claude, Hermes, and Herder.",
   "kinds": ["bar-widget"],
