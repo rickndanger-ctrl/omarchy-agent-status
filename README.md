@@ -48,11 +48,12 @@ Accepted states are `working`, `attention`, `done`, `stopped`, `error`, and `idl
 ## Remove
 
 ```sh
+python3 ~/.config/omarchy/plugins/rickom1.agent-status/setup_integrations.py --remove
 omarchy plugin disable rickom1.agent-status
 omarchy plugin remove rickom1.agent-status
 ```
 
-The optional Claude and Hermes hooks are stored in those applications' user configuration and should be removed there separately if no longer wanted.
+The cleanup helper removes only its Claude Code hooks and disables the Hermes plugin. It removes Hermes files only when they still match the installed originals. Use `--remove --claude` or `--remove --hermes` to remove one integration.
 
 ## License
 
