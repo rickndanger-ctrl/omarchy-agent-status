@@ -21,7 +21,7 @@ omarchy plugin add https://github.com/rickndanger-ctrl/omarchy-agent-status.git 
 python3 ~/.config/omarchy/plugins/rickom1.agent-status/setup_integrations.py
 ```
 
-The second command opts in to Claude Code and Hermes event hooks. Use `--claude` or `--hermes` to install only one. Codex reads its local session records without an extra hook. Herder appears as an idle badge and can publish events using the local bridge described below.
+The second command opts in to Claude Code and Hermes event hooks. Use `--claude` or `--hermes` to install only one. Codex reads its local session records without an extra hook. Herdr appears as an idle badge and can publish events using the local bridge described below.
 
 Restart any Hermes chat that was already running when the hook was installed. Hermes loads plugins at session startup. The bar shows a workspace number only when the agent has a visible Omarchy window; a detached tmux session has no desktop workspace number until attached to a terminal window.
 
@@ -54,9 +54,9 @@ Use a stable session ID for each conversation. The accepted states are listed be
 
 `omarchy plugin add` installs the plugin but does not run the integration helper automatically. Review the helper before running it. A newly enabled Hermes plugin takes effect in new Hermes sessions.
 
-## Herder event bridge
+## Herdr event bridge
 
-Herder can send status events without changing the widget:
+Herdr can send status events without changing the widget (the event ID remains `herder`):
 
 ```sh
 python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event herder SESSION_ID working /path/to/project
@@ -71,7 +71,7 @@ Accepted states are `working`, `attention`, `done`, `stopped`, `error`, and `idl
 - Omarchy with Quickshell plugin support, Hyprland, Python 3, and `hyprctl`.
 - `pw-play` plus Freedesktop sound files for audible alerts. Missing files simply leave alerts silent.
 - Codex status comes from local session records. Its approval prompts are not currently observable through those records, so the yellow state is reliable for Claude Code and Hermes hooks, and available to Herder through the event bridge.
-- App images are loaded from locally installed icons when present; the widget falls back to a letter otherwise. No third-party icons are bundled.
+- Claude and Herdr use original bundled icons; Codex and Hermes use local app icons when present. Custom agents can use their own icon path. If an image is unavailable, the widget shows the agent name. No third-party icons are bundled.
 - Plugin code runs with your user permissions inside `omarchy-shell`. Review it before installing.
 
 ## Remove
