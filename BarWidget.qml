@@ -32,7 +32,7 @@ BarWidget {
   function iconFor(agent) {
     if (agent === "codex") return "file:///usr/share/icons/hicolor/256x256/apps/chatgpt.png"
     if (agent === "hermes") return "file:///usr/share/icons/hicolor/256x256/apps/hermes-desktop.png"
-    if (agent === "claude") return "file://" + (Quickshell.env("HOME") || "") + "/.config/omarchy/plugins/rickom1.agent-status/claude-rgba.png"
+    if (agent === "claude") return "file:///usr/share/icons/hicolor/256x256/apps/claude.png"
     return ""
   }
 

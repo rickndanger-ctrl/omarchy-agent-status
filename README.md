@@ -42,7 +42,7 @@ Accepted states are `working`, `attention`, `done`, `stopped`, `error`, and `idl
 - Omarchy with Quickshell plugin support, Hyprland, Python 3, and `hyprctl`.
 - `pw-play` plus Freedesktop sound files for audible alerts. Missing files simply leave alerts silent.
 - Codex status comes from local session records. Its approval prompts are not currently observable through those records, so the yellow state is reliable for Claude Code and Hermes hooks, and available to Herder through the event bridge.
-- The Codex and Hermes images are loaded from locally installed app icons when present; the widget falls back to a letter otherwise. The Claude favicon is sourced from Claude and remains Anthropic's trademark. It is not covered by the code license.
+- App images are loaded from locally installed icons when present; the widget falls back to a letter otherwise. No third-party icons are bundled.
 - Plugin code runs with your user permissions inside `omarchy-shell`. Review it before installing.
 
 ## Remove
