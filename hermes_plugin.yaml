@@ -1,0 +1,3 @@
+name: agent-status
+version: "1.0"
+description: Publish local Hermes turn state to the Omarchy agent status bar
