@@ -1,6 +1,6 @@
 # Live Agent Status for Omarchy
 
-A bar widget for Codex, Claude Code, Hermes, and Herder. The badge shows the agent, its live state, its Omarchy workspace number when a window can be identified, and a short project label. Click the bar widget to choose sounds for state changes.
+A bar widget for Codex, Claude Code, Hermes, Herdr, and agents you add. Each compact badge shows an icon (or name), live status, and its Omarchy workspace number when a window can be identified. Click the widget to see details and choose sounds.
 
 | Badge | Meaning |
 | --- | --- |
@@ -10,7 +10,7 @@ A bar widget for Codex, Claude Code, Hermes, and Herder. The badge shows the age
 | Red dot | Stopped or problem |
 | Gray circle | Idle or no current signal |
 
-The `#N` immediately beside an icon is the Hyprland workspace number. It updates when the window moves. No number is shown when the agent has no identifiable window. This is a desktop workspace number, not a document page number.
+The number beside a status light is the Hyprland workspace number. It updates when the window moves. No number is shown when the agent has no identifiable window. This is a desktop workspace number, not a document page number.
 
 ## Install
 
@@ -24,6 +24,33 @@ python3 ~/.config/omarchy/plugins/rickom1.agent-status/setup_integrations.py
 The second command opts in to Claude Code and Hermes event hooks. Use `--claude` or `--hermes` to install only one. Codex reads its local session records without an extra hook. Herder appears as an idle badge and can publish events using the local bridge described below.
 
 Restart any Hermes chat that was already running when the hook was installed. Hermes loads plugins at session startup. The bar shows a workspace number only when the agent has a visible Omarchy window; a detached tmux session has no desktop workspace number until attached to a terminal window.
+
+## Add an agent
+
+Add an entry to `~/.config/omarchy/agent-status.json`. An icon can be an absolute PNG path, or a filename placed in the plugin directory. `windowMatch` is an optional fragment of the window class or title used to find the workspace. Set `showIdle` to `false` to show the badge only while it has a recent status event.
+
+```json
+{
+  "agents": [
+    {
+      "id": "scout",
+      "name": "Scout",
+      "icon": "/home/YOU/Pictures/scout.png",
+      "windowMatch": "Scout",
+      "showIdle": true
+    }
+  ]
+}
+```
+
+The agent (or its launcher) can send status changes through the bridge:
+
+```sh
+python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event scout SESSION_ID working /path/to/project
+python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event scout SESSION_ID done /path/to/project
+```
+
+Use a stable session ID for each conversation. The accepted states are listed below. The configuration can also override the `name` or `icon` of a built-in badge by using its ID (`codex`, `claude`, `hermes`, or `herder`). This config does not replace an agent's own hook; connect its start, approval, completion, and error events to the bridge.
 
 `omarchy plugin add` installs the plugin but does not run the integration helper automatically. Review the helper before running it. A newly enabled Hermes plugin takes effect in new Hermes sessions.
 

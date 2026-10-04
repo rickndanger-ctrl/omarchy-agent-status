@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -28,7 +29,7 @@ SOUNDS = {
 DEFAULT_SOUNDS = {"working": "Off", "done": "Complete", "attention": "Message",
                   "stopped": "Warning", "error": "Warning"}
 AGENTS = ("codex", "claude", "hermes", "herder")
-LABELS = {"codex": "Codex", "claude": "Claude", "hermes": "Hermes", "herder": "Herder"}
+LABELS = {"codex": "Codex", "claude": "Claude", "hermes": "Hermes", "herder": "Herdr"}
 SYMBOLS = {"working": "●", "done": "✓", "attention": "●", "error": "●", "stopped": "●", "idle": "○"}
 PRIORITY = {"attention": 5, "error": 4, "working": 3, "done": 2, "stopped": 1, "idle": 0}
 
@@ -54,8 +55,37 @@ def label_for(path):
     return name[:32] if name else ""
 
 
+def agent_definitions():
+    """Built-in agents plus user-defined badges from agent-status.json."""
+    definitions = {agent: {"name": LABELS[agent]} for agent in AGENTS}
+    config = read_json(CONFIG, {}) or {}
+    for item in config.get("agents", []):
+        if not isinstance(item, dict):
+            continue
+        agent = item.get("id", "")
+        if not isinstance(agent, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", agent):
+            continue
+        name = item.get("name")
+        name = name[:32] if isinstance(name, str) and name.strip() else LABELS.get(agent, agent)
+        icon = item.get("icon", "")
+        if isinstance(icon, str) and icon:
+            icon_path = pathlib.Path(icon).expanduser()
+            if not icon_path.is_absolute():
+                icon_path = pathlib.Path(__file__).resolve().parent / icon_path
+            icon = str(icon_path) if icon_path.is_file() else ""
+        else:
+            icon = ""
+        match = item.get("windowMatch", [])
+        if isinstance(match, str):
+            match = [match]
+        match = [value.lower() for value in match if isinstance(value, str) and value] if isinstance(match, list) else []
+        definitions[agent] = {"name": name, "icon": icon, "windowMatch": match,
+                              "showIdle": bool(item.get("showIdle", True))}
+    return definitions
+
+
 def write_event(agent, session, state, page="", source="hook"):
-    if agent not in AGENTS or state not in PRIORITY:
+    if agent not in agent_definitions() or state not in PRIORITY:
         return
     key = hashlib.sha256(str(session or agent).encode()).hexdigest()[:20]
     item = {
@@ -171,10 +201,10 @@ def active_processes():
     return found
 
 
-def window_workspaces():
+def window_workspaces(definitions):
     """Map visible agent windows to Hyprland workspace numbers."""
-    result = {agent: set() for agent in AGENTS}
-    direct = {agent: set() for agent in AGENTS}
+    result = {agent: set() for agent in definitions}
+    direct = {agent: set() for agent in definitions}
     try:
         clients = json.loads(subprocess.check_output(
             ["hyprctl", "clients", "-j"], text=True, timeout=2))
@@ -206,6 +236,10 @@ def window_workspaces():
             if agent in name or agent in title:
                 matched.add(agent)
                 direct[agent].add(workspace)
+        for agent, definition in definitions.items():
+            if any(term in name or term in title for term in definition.get("windowMatch", [])):
+                matched.add(agent)
+                direct[agent].add(workspace)
         if isinstance(pid, int):
             for process_pid, process_name in processes.items():
                 if process_name not in AGENTS:
@@ -220,7 +254,7 @@ def window_workspaces():
                         break
         for agent in matched:
             result[agent].add(workspace)
-    for agent in AGENTS:
+    for agent in definitions:
         if direct[agent]:
             result[agent] = direct[agent]
     return result
@@ -228,17 +262,18 @@ def window_workspaces():
 
 def collect():
     now = time.time()
+    definitions = agent_definitions()
     items = codex_sessions()
     if EVENTS.is_dir():
         for path in EVENTS.glob("*/*.json"):
             record = read_json(path)
-            if isinstance(record, dict) and record.get("agent") in AGENTS:
+            if isinstance(record, dict) and record.get("agent") in definitions:
                 if now - float(record.get("at", 0)) < 3600:
                     items.append(record)
     processes = active_processes()
-    workspaces = window_workspaces()
+    workspaces = window_workspaces(definitions)
     selected = {}
-    for agent in AGENTS:
+    for agent, definition in definitions.items():
         pool = [r for r in items if r.get("agent") == agent and
                 now - float(r.get("at", 0)) < 3600]
         if pool:
@@ -250,10 +285,11 @@ def collect():
         else:
             chosen = {"agent": agent, "state": "idle", "page": "", "at": 0, "session": ""}
         age = now - float(chosen.get("at", 0))
-        chosen["visible"] = (agent == "herder" or agent in processes or
+        chosen["visible"] = (definition.get("showIdle", agent == "herder") or agent in processes or
                              (chosen["state"] in ("done", "attention", "error", "stopped") and age < 3600) or
                              (chosen["state"] == "working" and age < 3600))
-        chosen["name"] = LABELS[agent]
+        chosen["name"] = definition["name"]
+        chosen["icon"] = definition.get("icon", "")
         chosen["symbol"] = SYMBOLS[chosen["state"]]
         chosen["workspace"] = ",".join(str(number) for number in sorted(workspaces[agent]))
         selected[agent] = chosen
@@ -280,7 +316,7 @@ def poll():
             continue
         if prior.get("state") != current["state"] and current["state"] in sounds:
             play_sound(sounds[current["state"]])
-    output = {"agents": selected, "sounds": sounds, "at": time.time()}
+    output = {"agents": selected, "order": list(selected), "sounds": sounds, "at": time.time()}
     write_json(SNAPSHOT, output)
     print(json.dumps(output, ensure_ascii=False))
 

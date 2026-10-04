@@ -11,7 +11,7 @@ BarWidget {
   readonly property string script: (Quickshell.env("HOME") || "") + "/.config/omarchy/plugins/rickom1.agent-status/status.py"
   property var snapshot: ({ agents: {}, sounds: {} })
   property bool popupOpen: false
-  readonly property var order: ["codex", "claude", "hermes", "herder"]
+  readonly property var order: snapshot.order || ["codex", "claude", "hermes", "herder"]
   readonly property var soundNames: ["Off", "Complete", "Bell", "Message", "Warning"]
   readonly property var visibleAgents: {
     var result = []
@@ -30,9 +30,11 @@ BarWidget {
   }
 
   function iconFor(agent) {
-    if (agent === "codex") return "file:///usr/share/icons/hicolor/256x256/apps/chatgpt.png"
-    if (agent === "hermes") return "file:///usr/share/icons/hicolor/256x256/apps/hermes-desktop.png"
-    if (agent === "claude") return "file:///usr/share/icons/hicolor/256x256/apps/claude.png"
+    if (agent.icon) return "file://" + agent.icon
+    if (agent.agent === "codex") return "file:///usr/share/icons/hicolor/256x256/apps/chatgpt.png"
+    if (agent.agent === "hermes") return "file:///usr/share/icons/hicolor/256x256/apps/hermes-desktop.png"
+    if (agent.agent === "claude") return Qt.resolvedUrl("claude-icon.png")
+    if (agent.agent === "herder") return Qt.resolvedUrl("herdr-icon.png")
     return ""
   }
 
@@ -99,14 +101,14 @@ BarWidget {
           width: Style.space(17)
           height: Style.space(17)
           anchors.verticalCenter: parent.verticalCenter
-          source: root.iconFor(modelData.agent)
+          source: root.iconFor(modelData)
           fillMode: Image.PreserveAspectFit
           visible: source !== "" && status === Image.Ready
         }
         Text {
           visible: !agentIcon.visible
           anchors.verticalCenter: parent.verticalCenter
-          text: modelData.name ? modelData.name.charAt(0) : "?"
+          text: modelData.name || "?"
           color: root.bar.barForeground
           font.family: root.bar.fontFamily
           font.bold: true
@@ -114,21 +116,11 @@ BarWidget {
         }
         Text {
           anchors.verticalCenter: parent.verticalCenter
-          text: (modelData.workspace ? modelData.workspace + " " : "") + (modelData.symbol || "○")
+          text: (modelData.symbol || "○") + (modelData.workspace ? " " + modelData.workspace : "")
           color: root.colorFor(modelData.state)
           font.family: root.bar.fontFamily
           font.bold: true
           font.pixelSize: Style.font.body
-        }
-        Text {
-          anchors.verticalCenter: parent.verticalCenter
-          text: modelData.page || ""
-          visible: text !== ""
-          color: root.bar.barForeground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-          width: Math.min(90, implicitWidth)
         }
       }
     }
