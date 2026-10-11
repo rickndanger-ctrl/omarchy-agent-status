@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "rickom1.agent-status",
   "name": "Live Agent Status",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "rickndanger-ctrl",
   "description": "Customizable live agent status and workspace badges for Omarchy.",
   "kinds": ["bar-widget"],

@@ -46,9 +46,37 @@ Add an entry to `~/.config/omarchy/agent-status.json`. An icon can be an absolut
 The agent (or its launcher) can send status changes through the bridge:
 
 ```sh
-python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event scout SESSION_ID working /path/to/project
-python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event scout SESSION_ID done /path/to/project
+python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event scout SESSION_ID working project-label
+python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event scout SESSION_ID done project-label
 ```
+
+The positional `event` command exposes its arguments to local process inspection.
+Use it only for non-private identifiers and labels. For private project paths or
+session IDs, send a JSON event through stdin instead. The Hermes hook uses this
+channel automatically:
+
+```sh
+python3 - <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+bridge = Path.home() / ".config/omarchy/plugins/rickom1.agent-status/status.py"
+subprocess.run(
+    [sys.executable, str(bridge), "event-stdin"],
+    input=json.dumps({"agent": "scout", "session": "my-session", "state": "working",
+                      "page": os.getcwd()}).encode("utf-8"),
+    check=True,
+)
+PYTHON
+```
+
+`event-stdin` accepts string fields `agent`, `session`, `state`, and optional
+`page`. The bridge stores only the final project component and a hashed session
+identifier. Stdin keeps this event metadata out of the child command line; it is
+not a sandbox against processes running as your own user or root.
 
 Use a stable session ID for each conversation. The accepted states are listed below. The configuration can also override the `name` or `icon` of a built-in badge by using its ID (`codex`, `claude`, `hermes`, or `herder`). This config does not replace an agent's own hook; connect its start, approval, completion, and error events to the bridge.
 
@@ -59,9 +87,9 @@ Use a stable session ID for each conversation. The accepted states are listed be
 Herdr can send status events without changing the widget (the event ID remains `herder`):
 
 ```sh
-python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event herder SESSION_ID working /path/to/project
-python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event herder SESSION_ID attention /path/to/project
-python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event herder SESSION_ID done /path/to/project
+python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event herder SESSION_ID working project-label
+python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event herder SESSION_ID attention project-label
+python3 ~/.config/omarchy/plugins/rickom1.agent-status/status.py event herder SESSION_ID done project-label
 ```
 
 Accepted states are `working`, `attention`, `done`, `stopped`, `error`, and `idle`. The bridge stores only state, a hashed session identifier, and the final component of the project path. Event records expire from the active display after one hour.
@@ -83,6 +111,16 @@ omarchy plugin remove rickom1.agent-status
 ```
 
 The cleanup helper removes only its Claude Code hooks and disables the Hermes plugin. It removes Hermes files only when they still match the installed originals. Use `--remove --claude` or `--remove --hermes` to remove one integration.
+
+## Checks
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+The regression suite covers the Hermes stdin transport, a real Linux procfs
+command-line check, shortened stored labels, hashed sessions, invalid input,
+legacy event compatibility, and observer timeout handling.
 
 ## License
 
