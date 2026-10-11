@@ -1,5 +1,6 @@
 """Observer-only status hooks for the local Omarchy bar."""
 
+import json
 import os
 import pathlib
 import subprocess
@@ -13,8 +14,10 @@ def _emit(session, state):
         return
     try:
         subprocess.run(
-            [sys.executable, str(SCRIPT), "event", "hermes", str(session or "hermes"), state, os.getcwd()],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [sys.executable, str(SCRIPT), "event-stdin"],
+            input=json.dumps({"agent": "hermes", "session": str(session or "hermes"),
+                              "state": state, "page": os.getcwd()}).encode("utf-8"),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=2, check=False,
         )
     except (OSError, subprocess.SubprocessError):

@@ -111,6 +111,19 @@ def claude_hook(event_name):
         write_event("claude", session, state, page)
 
 
+def stdin_event():
+    """Receive private event metadata without exposing it in process arguments."""
+    try:
+        data = json.load(sys.stdin)
+    except (ValueError, UnicodeError):
+        raise SystemExit("invalid event input") from None
+    if (not isinstance(data, dict) or
+            any(not isinstance(data.get(key), str) for key in ("agent", "session", "state")) or
+            not isinstance(data.get("page", ""), str)):
+        raise SystemExit("invalid event input")
+    write_event(data["agent"], data["session"], data["state"], data.get("page", ""))
+
+
 def reverse_lines(path):
     with path.open("rb") as stream:
         stream.seek(0, 2)
@@ -324,11 +337,13 @@ def poll():
 def main():
     args = sys.argv[1:]
     if not args:
-        raise SystemExit("usage: status.py poll | claude-hook EVENT | event AGENT SESSION STATE [PAGE] | sound STATE NAME | preview NAME")
+        raise SystemExit("usage: status.py poll | claude-hook EVENT | event-stdin | event AGENT SESSION STATE [PAGE] | sound STATE NAME | preview NAME")
     if args[0] == "poll":
         poll()
     elif args[0] == "claude-hook" and len(args) == 2:
         claude_hook(args[1])
+    elif args == ["event-stdin"]:
+        stdin_event()
     elif args[0] == "event" and len(args) >= 4:
         write_event(args[1], args[2], args[3], args[4] if len(args) > 4 else "")
     elif args[0] == "sound" and len(args) == 3 and args[1] in DEFAULT_SOUNDS and args[2] in SOUNDS:
