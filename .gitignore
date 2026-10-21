@@ -1,2 +1,4 @@
-__pycache__/
+.build/
+macos/.build/
 *.pyc
+__pycache__/

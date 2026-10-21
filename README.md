@@ -125,3 +125,8 @@ legacy event compatibility, and observer timeout handling.
 ## License
 
 The code is MIT licensed. See `LICENSE`.
+
+## macOS / OMAC port
+
+`macos/` holds a Swift port of this widget (logic + AppKit bar and popup +
+command-line bridge) for OMAC on the Mac. See `macos/README.md`.
