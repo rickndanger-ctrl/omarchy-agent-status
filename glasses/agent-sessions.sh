@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Keep an always-open Claude and Codex terminal session (tmux, or GNU screen where tmux is missing),
-# so the G2 glasses can prompt them. Run every minute by a LaunchAgent. It starts a session that is
+# so the G2 glasses can prompt them. They run with full access (no approvals) via start-agent.sh. Run every minute by a LaunchAgent. It starts a session that is
 # missing, and restarts the agent inside a session whose agent has exited (e.g. after /exit).
 #   Watch or type yourself:  tmux attach -t claude    (detach: Ctrl-b then d)
 #   Without tmux (the Neo):   screen -r claude          (detach: Ctrl-a then d)
 #   DRY_RUN=1 prints what it would do instead of doing it.
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+here=$(cd "$(dirname "$0")" && pwd)
 dir="${AGENT_SESSIONS_DIR:-$HOME/Projects}"
 [ -d "$dir" ] || dir="$HOME"
 
@@ -29,17 +30,17 @@ for agent in claude codex; do
     root=$(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null | awk -v s="$agent" '$1 == s { print $2; exit }')
     if [ -n "$root" ]; then
       if agent_running "$root" "$agent"; then [ -n "${DRY_RUN:-}" ] && echo "$agent: running"; continue; fi
-      act tmux send-keys -t "$agent" "$agent" Enter
+      act tmux send-keys -t "$agent" "exec bash $here/start-agent.sh $agent ''" Enter
       continue
     fi
-    act tmux new-session -d -s "$agent" -x 200 -y 50 -c "$dir" "$agent; exec \$SHELL -l"
+    act tmux new-session -d -s "$agent" -x 200 -y 50 -c "$dir" bash "$here/start-agent.sh" "$agent" ''
   elif command -v screen >/dev/null 2>&1; then
     root=$(screen -ls 2>/dev/null | sed -n "s/^[[:space:]]*\([0-9][0-9]*\)\.$agent[[:space:]].*/\1/p" | head -1)
     if [ -n "$root" ]; then
       if agent_running "$root" "$agent"; then [ -n "${DRY_RUN:-}" ] && echo "$agent: running"; continue; fi
-      act screen -S "$root.$agent" -p 0 -X stuff "$agent$(printf '\r')"
+      act screen -S "$root.$agent" -p 0 -X stuff "exec bash $here/start-agent.sh $agent ''$(printf '\r')"
       continue
     fi
-    (cd "$dir" && act screen -dmS "$agent" /bin/zsh -lc "$agent; exec \$SHELL -l")
+    (cd "$dir" && act screen -dmS "$agent" bash "$here/start-agent.sh" "$agent" '')
   fi
 done

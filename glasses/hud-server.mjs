@@ -696,7 +696,19 @@ async function codexConversation(pid, cwd) {
     const pids = [String(pid)]
     for (let i = 0; i < pids.length && pids.length < 50; i++) pids.push(...rows.filter(([, pp]) => pp === pids[i]).map(([c]) => c))
     const { stdout } = await run('lsof', ['-a', '-p', pids.join(','), '-Fn'], { timeout: 3000 })
-    file = stdout.split('\n').find(l => /^n.*rollout-.*\.jsonl$/.test(l))?.slice(1) ?? ''
+    const open = [...new Set(stdout.split('\n').filter(l => /^n.*rollout-.*\.jsonl$/.test(l)).map(l => l.slice(1)))]
+    // Codex keeps its sub-agents' logs open too; the conversation is the one that isn't a sub-agent,
+    // or failing that, the parent named in a sub-agent's log.
+    const meta = f => { try { return JSON.parse(readFileSync(f, 'utf8').split('\n', 1)[0]).payload ?? {} } catch { return {} } }
+    file = open.find(f => !meta(f).parent_thread_id) ?? ''
+    if (!file && open.length) {
+      const parent = meta(open[0]).session_id
+      const dir = path.dirname(open[0])
+      try {
+        const { readdirSync } = await import('node:fs')
+        file = readdirSync(dir).filter(n => parent && n.includes(parent)).map(n => path.join(dir, n))[0] ?? ''
+      } catch { /* leave it to the folder search below */ }
+    }
   } catch { /* not open, or no lsof */ }
   if (!file) {
     const { readdirSync } = await import('node:fs')

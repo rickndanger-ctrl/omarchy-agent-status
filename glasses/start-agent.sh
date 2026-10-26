@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start an agent with full access and a first task, for a session Home created from the glasses.
-#   start-agent.sh claude|codex <task-file>
+#   start-agent.sh claude|codex <task-file> [resume-session-id]
 # The task is read from a private file (then deleted) so its words never pass through a shell command line.
 # Full access: Claude runs with --dangerously-skip-permissions, Codex with
 # --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust (Rick chose: trust his own
@@ -8,6 +8,7 @@
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 agent=$1
 task_file=$2
+resume=${3:-}
 task=""
 if [ -f "$task_file" ]; then
   task=$(cat "$task_file")
@@ -18,5 +19,10 @@ case "$agent" in
   codex) flags=(--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust) ;;
   *) echo "start-agent: unknown agent $agent" >&2; exec "${SHELL:-/bin/zsh}" -l ;;
 esac
-if [ -n "$task" ]; then "$agent" "${flags[@]}" "$task"; else "$agent" "${flags[@]}"; fi
+if [ -n "$resume" ]; then
+  # Carry on an existing conversation, now with full access.
+  if [ "$agent" = claude ]; then claude "${flags[@]}" --resume "$resume"; else codex resume "$resume" "${flags[@]}"; fi
+elif [ -n "$task" ]; then "$agent" "${flags[@]}" "$task"
+else "$agent" "${flags[@]}"
+fi
 exec "${SHELL:-/bin/zsh}" -l
