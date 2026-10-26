@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 
 HOME = pathlib.Path.home()
 STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "omarchy/agent-status"
@@ -343,6 +344,59 @@ def sessions():
     return result
 
 
+REMOTE_CACHE = STATE / "remote.json"
+SHORT = {"Mini 1": "M1", "Mini 2": "M2", "Neo": "Neo"}
+
+
+def remote_agents(config):
+    """Agents on the other computers, from a Home hub (agent-status.json "hub": {"urls": [...], "tokenFile": ...}).
+
+    Cached for 8 seconds and fetched with a short timeout, so the bar never waits on the network.
+    """
+    hub = config.get("hub") if isinstance(config.get("hub"), dict) else None
+    if not hub:
+        return []
+    cached = read_json(REMOTE_CACHE, {}) or {}
+    now = time.time()
+    if now - float(cached.get("at", 0)) < 8:
+        return cached.get("sessions", [])
+    try:
+        token = pathlib.Path(str(hub.get("tokenFile", ""))).expanduser().read_text(encoding="utf-8").strip()
+    except OSError:
+        return []
+    for url in hub.get("urls", []):
+        try:
+            request = urllib.request.Request(url.rstrip("/") + "/api/home", headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(request, timeout=1.5) as response:
+                sessions = json.loads(response.read()).get("sessions", [])
+            write_json(REMOTE_CACHE, {"at": now, "sessions": sessions})
+            return sessions
+        except Exception:
+            continue
+    # Hubs unreachable: keep the last answer for a minute, then show nothing rather than stale badges.
+    return cached.get("sessions", []) if now - float(cached.get("at", 0)) < 60 else []
+
+
+def add_remote(selected, config):
+    """One badge per agent per other computer, while it is busy, done, waiting on you or in error."""
+    here = config.get("machine", "")
+    best = {}
+    for s in remote_agents(config):
+        machine, agent, state = s.get("machine", ""), s.get("agent", ""), s.get("state", "")
+        if machine == here or agent not in LABELS or state not in ("attention", "error", "working", "done"):
+            continue
+        key = f"{agent}@{machine}"
+        if key not in best or (PRIORITY[state], s.get("at", 0)) > (PRIORITY[best[key]["state"]], best[key].get("at", 0)):
+            best[key] = s
+    for key, s in sorted(best.items()):
+        machine = s["machine"]
+        selected[key] = {
+            "agent": s["agent"], "session": s.get("session", ""), "state": s["state"], "page": s.get("page", ""),
+            "at": s.get("at", 0), "visible": True, "name": f"{LABELS[s['agent']]} · {machine}", "icon": "",
+            "symbol": SYMBOLS[s["state"]], "workspace": SHORT.get(machine, machine[:3]),
+        }
+
+
 def play_sound(name):
     file = SOUNDS.get(name, "")
     if file and pathlib.Path(file).is_file():
@@ -356,6 +410,7 @@ def poll():
     sounds = dict(DEFAULT_SOUNDS)
     sounds.update(config.get("sounds") or {})
     selected = collect()
+    add_remote(selected, config)
     previous = old.get("agents") or {}
     for agent, current in selected.items():
         prior = previous.get(agent)

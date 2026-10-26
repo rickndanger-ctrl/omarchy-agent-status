@@ -38,6 +38,9 @@ BarWidget {
     return ""
   }
 
+  // PopupCard calls owner.close() when you click outside it; keep popupOpen in sync.
+  function close() { popupOpen = false }
+
   function refresh() {
     if (!pollProcess.running) pollProcess.running = true
   }

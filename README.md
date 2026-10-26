@@ -171,3 +171,8 @@ Your own addresses stay out of git: put the hub list in `glasses/home-app/.env.l
 `glasses/home-app/app.example.json` to `app.json` with the same hosts in its network
 whitelist, and put the health-check hosts in `~/.config/agent-glasses/check.conf`
 (see the top of `glasses/check-all.sh`). Run `bash glasses/check-all.sh` anytime.
+
+**Other computers on the bar:** add a `hub` entry to `~/.config/omarchy/agent-status.json`
+(`{"machine": "Dell", "hub": {"urls": ["https://your-hub/hud"], "tokenFile": "~/.config/agent-glasses/hub.token"}}`)
+and agents on your other computers appear as extra badges tagged with the computer (`✓ M1`) while they are
+busy, done, waiting or in error.
