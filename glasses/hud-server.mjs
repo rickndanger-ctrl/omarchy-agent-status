@@ -665,7 +665,8 @@ async function claudeConversation(pid) {
       if (said.trim() && !said.startsWith('<')) out.push('', `You: ${said.trim()}`)
     } else if (item.type === 'assistant' && Array.isArray(content)) {
       for (const c of content) {
-        if (c.type === 'text' && c.text.trim()) out.push(c.text.trim())
+        // Label replies and leave a blank line before each, so they stand apart from yours on the glasses.
+        if (c.type === 'text' && c.text.trim()) out.push('', `Claude: ${c.text.trim()}`)
         if (c.type === 'tool_use') {
           const detail = c.input?.command ?? c.input?.file_path ?? c.input?.pattern ?? c.input?.url ?? ''
           out.push(`[${c.name}] ${String(detail).split('\n')[0].slice(0, 80)}`)
@@ -753,7 +754,7 @@ async function codexConversation(pid, cwd) {
       // Codex stores its own setup (AGENTS.md, environment) as user messages; skip those.
       if (!text || text.startsWith('<') || text.startsWith('# AGENTS.md')) continue
       if (p.role === 'user') out.push('', `You: ${text}`)
-      else out.push(text)
+      else out.push('', `Codex: ${text}`)
     } else if (p.type === 'function_call' || p.type === 'local_shell_call' || p.type === 'custom_tool_call') {
       let detail = ''
       try {
