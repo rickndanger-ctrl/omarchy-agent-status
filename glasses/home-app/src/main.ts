@@ -2,7 +2,7 @@ import './style.css';
 import { Glasses } from './glasses';
 import { HomeModel, type Action, type HomeData, type Input } from './model';
 
-const BUILD = '2026-10-26-b9';
+const BUILD = '2026-10-26-b10';
 const POLL_MS = 2000;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const store = {
@@ -224,7 +224,7 @@ async function refreshTerminal(): Promise<void> {
   const target = model.terminalTarget();
   if (!target || terminalBusy) return;
   terminalBusy = true;
-  const query = new URLSearchParams({ machine: target.machine, pane: target.pane, ...(target.window ? { window: target.window } : {}) });
+  const query = new URLSearchParams({ machine: target.machine, pane: target.pane, ...(target.window ? { window: target.window } : {}), ...(target.appThread ? { appThread: target.appThread } : {}) });
   try {
     model.setTerminal(target.key, (await api<{ lines: string[] }>(`terminal?${query}`)).lines);
   } catch {
@@ -310,6 +310,13 @@ async function run(action: Action): Promise<void> {
           break;
         }
       }
+    } else if (action.kind === 'continueSession') {
+      const r = await api<{ ok: boolean; pane?: string; error?: string }>('continue', { method: 'POST', body: JSON.stringify(action) })
+        .catch(e => ({ ok: false, error: String(e.message ?? e) } as { ok: boolean; pane?: string; error?: string }));
+      diag('agent.continue', `${action.machine} ok=${r.ok} ${r.error ?? ''}`);
+      model.showFlash(r.ok ? 'Continuing on the glasses' : `Couldn't continue: ${r.error ?? 'error'}`, Date.now());
+      if (r.ok && r.pane) model.expectAgent(action.machine, r.pane, Date.now());
+      void poll();
     } else if (action.kind === 'loadFolders') {
       const r = await api<{ folders: string[] }>(`folders?machine=${encodeURIComponent(action.machine)}`).catch(() => null);
       model.setFolders(action.machine, r?.folders ?? null);

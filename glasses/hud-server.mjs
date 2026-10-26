@@ -303,7 +303,12 @@ async function sessionsWithPanes() {
       sessions.push({ agent: win.agent, name: AGENT_NAMES[win.agent], session: `win${win.window}`, state: 'idle', page: win.page, at: 0, workspace: win.workspace, machine: MACHINE, window: win.window })
     }
   }
-  return sessions
+  // The apps' own threads, so they can be followed (Codex app) or continued (Claude app) from the glasses.
+  const [appThreads, desktops] = await Promise.all([codexAppThreads(), claudeDesktopSessions()])
+  // A desktop session also reports through the status hooks; keep only the desktop row for that folder.
+  const desktopFolders = new Set(desktops.map(d => d.folder))
+  const kept = sessions.filter(x => !(x.agent === 'claude' && !x.pane && !x.window && desktopFolders.has(x.page)))
+  return [...kept, ...appThreads, ...desktops]
 }
 
 /** Hyprland workspaces and their windows (Linux machines only). */
@@ -324,6 +329,150 @@ async function desktop() {
   } catch {
     return null
   }
+}
+
+// ---- app threads: the ChatGPT app's Codex threads and the Claude desktop app's sessions -----------------
+
+// Codex's own engine (the app-server daemon the ChatGPT app uses) speaks JSON-RPC over a WebSocket on a
+// local Unix socket. One short connection per request keeps this simple and robust.
+const CODEX_SOCKET = path.join(HOME, '.codex/app-server-control/app-server-control.sock')
+
+async function codexEngine(calls) {
+  const { default: net } = await import('node:net')
+  const { realpathSync } = await import('node:fs')
+  const socketPath = realpathSync(CODEX_SOCKET)
+  return new Promise((resolve, reject) => {
+    const c = net.connect(socketPath)
+    let buf = Buffer.alloc(0)
+    let upgraded = false
+    let nextId = 1
+    const waiting = new Map()
+    const timer = setTimeout(() => { c.destroy(); reject(new Error('Codex engine did not answer')) }, 20_000)
+    const frame = text => {
+      const body = Buffer.from(text)
+      const mask = randomBytes(4)
+      let head
+      if (body.length < 126) head = Buffer.from([0x81, 0x80 | body.length])
+      else if (body.length < 65536) { head = Buffer.alloc(4); head[0] = 0x81; head[1] = 0x80 | 126; head.writeUInt16BE(body.length, 2) }
+      else { head = Buffer.alloc(10); head[0] = 0x81; head[1] = 0x80 | 127; head.writeBigUInt64BE(BigInt(body.length), 2) }
+      return Buffer.concat([head, mask, Buffer.from(body.map((b, i) => b ^ mask[i % 4]))])
+    }
+    const call = (method, params) => new Promise((ok, fail) => {
+      const id = nextId++
+      waiting.set(id, m => (m.error ? fail(new Error(m.error.message ?? 'Codex error')) : ok(m.result)))
+      c.write(frame(JSON.stringify({ id, method, params })))
+    })
+    c.on('connect', () => c.write(`GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n\r\n`))
+    c.on('error', error => { clearTimeout(timer); reject(error) })
+    c.on('data', async data => {
+      buf = Buffer.concat([buf, data])
+      if (!upgraded) {
+        const end = buf.indexOf('\r\n\r\n')
+        if (end < 0) return
+        buf = buf.slice(end + 4)
+        upgraded = true
+        try {
+          await call('initialize', { clientInfo: { name: 'home-hud', version: '1' } })
+          c.write(frame(JSON.stringify({ method: 'initialized' })))
+          const result = await calls(call)
+          clearTimeout(timer)
+          c.end()
+          resolve(result)
+        } catch (error) {
+          clearTimeout(timer)
+          c.destroy()
+          reject(error)
+        }
+      }
+      while (buf.length >= 2) {
+        let len = buf[1] & 127
+        let off = 2
+        if (len === 126) { len = buf.readUInt16BE(2); off = 4 } else if (len === 127) { len = Number(buf.readBigUInt64BE(2)); off = 10 }
+        if (buf.length < off + len) break
+        const text = buf.slice(off, off + len).toString()
+        buf = buf.slice(off + len)
+        try {
+          const m = JSON.parse(text)
+          if (m.id && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id) }
+        } catch { /* a notification we don't need */ }
+      }
+    })
+  })
+}
+
+const AUTOMATIC = /^Review this change for security vulnerabilities/i
+
+/** The ChatGPT app's recent Codex threads (not automatic reviews, sub-agents or terminal sessions). */
+async function codexAppThreads() {
+  if (DEMO || !existsSync(CODEX_SOCKET)) return []
+  try {
+    const { data } = await codexEngine(call => call('thread/list', { limit: 40, sortKey: 'recency_at', sortDirection: 'desc' }))
+    return data
+      .filter(t => !t.parentThreadId && t.threadSource !== 'subagent' && t.originator !== 'codex-tui' && !AUTOMATIC.test(String(t.name ?? t.preview ?? '')))
+      .slice(0, 6)
+      .map(t => ({
+        agent: 'codex', name: 'Codex app', session: `app:${t.id}`, page: String(t.name || t.preview || 'thread').replace(/\s+/g, ' ').slice(0, 32),
+        state: t.status?.type === 'active' ? 'working' : 'idle', at: Number(t.updatedAt ?? 0) || 0, workspace: '', machine: MACHINE, appThread: t.id,
+      }))
+  } catch {
+    return []
+  }
+}
+
+async function codexThreadView(threadId) {
+  const result = await codexEngine(call => call('thread/read', { threadId, includeTurns: true }))
+  const out = []
+  for (const turn of result.thread?.turns ?? result.turns ?? []) {
+    for (const item of turn.items ?? []) {
+      if (item.type === 'userMessage') {
+        const text = (item.content ?? []).map(c => c.text ?? '').join(' ').trim()
+        if (text && !text.startsWith('<')) out.push('', `You: ${text}`)
+      } else if (item.type === 'agentMessage' && String(item.text ?? '').trim()) out.push('', `Codex: ${String(item.text).trim()}`)
+      else if (item.type === 'commandExecution') out.push(`[exec] ${String(item.command ?? '').split('\n')[0].slice(0, 80)}`)
+      else if (item.type === 'fileChange') out.push('[edit] files')
+    }
+  }
+  return out.slice(-80)
+}
+
+async function codexThreadSend(threadId, text) {
+  // Load the thread in the engine (the app may not have it open), then start a turn: the app shows it live.
+  await codexEngine(async call => {
+    await call('thread/resume', { threadId }).catch(() => null)
+    return call('turn/start', { threadId, input: [{ type: 'text', text, text_elements: [] }] })
+  })
+  return true
+}
+
+/** Claude desktop app sessions on this computer (each records itself in ~/.claude/sessions/<pid>.json). */
+async function claudeDesktopSessions() {
+  if (DEMO) return []
+  const { readdirSync } = await import('node:fs')
+  const dir = path.join(HOME, '.claude/sessions')
+  const found = []
+  let names = []
+  try { names = readdirSync(dir).filter(n => n.endsWith('.json')) } catch { return [] }
+  for (const n of names) {
+    const pid = Number(n.replace('.json', ''))
+    try { process.kill(pid, 0) } catch { continue } // that session isn't running any more
+    const info = readJson(path.join(dir, n))
+    if (info?.entrypoint !== 'claude-desktop' || !info.sessionId) continue
+    found.push({
+      agent: 'claude', name: 'Claude app', session: `desk:${info.sessionId}`, page: String(info.name || path.basename(info.cwd || '') || 'session').slice(0, 32),
+      state: info.status === 'busy' ? 'working' : 'idle', at: 0, workspace: '', machine: MACHINE, desktopSession: info.sessionId,
+      folder: path.basename(info.cwd || ''),
+    })
+  }
+  return found
+}
+
+/** "Continue on glasses": reopen a Claude desktop conversation (same history) in a terminal session Home can drive. */
+async function continueDesktopSession(sessionId) {
+  const { readdirSync } = await import('node:fs')
+  const dir = path.join(HOME, '.claude/sessions')
+  const info = readdirSync(dir).filter(n => n.endsWith('.json')).map(n => readJson(path.join(dir, n))).find(i => i?.sessionId === sessionId && i?.entrypoint === 'claude-desktop')
+  if (!info?.cwd) return { ok: false, error: 'that session is no longer open in the Claude app' }
+  return startAgentIn('claude', info.cwd, '', sessionId)
 }
 
 // ---- starting new agents from the glasses -------------------------------------------------------
@@ -404,9 +553,14 @@ async function acceptFirstRunQuestions(pane) {
 }
 
 async function startAgent(agent, folder, task) {
-  if (!(await canStart()).includes(agent)) return { ok: false, error: `${agent} can't be started here` }
   if (!(await projectFolders()).includes(folder)) return { ok: false, error: 'unknown folder' }
-  const dir = folder === 'Projects' ? PROJECTS : path.join(PROJECTS, folder)
+  return startAgentIn(agent, folder === 'Projects' ? PROJECTS : path.join(PROJECTS, folder), task)
+}
+
+async function startAgentIn(agent, dir, task, resumeId = '') {
+  if (!(await canStart()).includes(agent)) return { ok: false, error: `${agent} can't be started here` }
+  if (resumeId && !/^[\w-]{8,64}$/.test(resumeId)) return { ok: false, error: 'bad session id' }
+  const folder = path.basename(dir)
   const taskFile = path.join(CONFIG_DIR, `task-${randomBytes(6).toString('hex')}.txt`)
   mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
   writeFileSync(taskFile, String(task ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]+/g, ' ').trim().slice(0, 4000), { mode: 0o600 })
@@ -416,7 +570,7 @@ async function startAgent(agent, folder, task) {
     const names = (await run('tmux', ['list-sessions', '-F', '#{session_name}'], { timeout: 3000 }).catch(() => ({ stdout: '' }))).stdout.split('\n')
     let name = base
     for (let n = 2; names.includes(name); n++) name = `${base}-${n}`
-    await run('tmux', ['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', dir, 'bash', START_SCRIPT, agent, taskFile], { timeout: 5000 })
+    await run('tmux', ['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', dir, 'bash', START_SCRIPT, agent, taskFile, resumeId], { timeout: 5000 })
     const pane = (await run('tmux', ['list-panes', '-t', name, '-F', '#{pane_id}'], { timeout: 3000 })).stdout.trim().split('\n')[0]
     void acceptFirstRunQuestions(pane)
     return { ok: true, pane }
@@ -426,8 +580,8 @@ async function startAgent(agent, folder, task) {
   let name = base
   for (let n = 2; taken.has(name); n++) name = `${base}-${n}`
   // Values go in as environment variables, never spliced into the command text.
-  await run('bash', ['-c', 'cd "$HUD_DIR" && screen -dmS "$HUD_NAME" bash "$HUD_SCRIPT" "$HUD_AGENT" "$HUD_TASK"'], {
-    timeout: 5000, env: { ...process.env, HUD_DIR: dir, HUD_NAME: name, HUD_SCRIPT: START_SCRIPT, HUD_AGENT: agent, HUD_TASK: taskFile },
+  await run('bash', ['-c', 'cd "$HUD_DIR" && screen -dmS "$HUD_NAME" bash "$HUD_SCRIPT" "$HUD_AGENT" "$HUD_TASK" "$HUD_RESUME"'], {
+    timeout: 5000, env: { ...process.env, HUD_DIR: dir, HUD_NAME: name, HUD_SCRIPT: START_SCRIPT, HUD_AGENT: agent, HUD_TASK: taskFile, HUD_RESUME: resumeId },
   })
   await new Promise(r => setTimeout(r, 1000))
   const pid = [...(await screens()).matchAll(/(\d+)\.(\S+)\s/g)].find(m => m[2] === name)?.[1]
@@ -587,13 +741,22 @@ async function focus(machine, workspace) {
 }
 
 // Typed into the agent's tmux pane exactly like keyboard input, then Enter.
-async function prompt(machine, pane, text, key, window) {
+async function prompt(machine, pane, text, key, window, appThread) {
   if (machine !== MACHINE && MODE === 'hub') {
     const node = NODES.find(x => x.name === machine)
     if (!node) return false
-    return !!(await call(`${node.url}/api/prompt`, node.token, { method: 'POST', body: JSON.stringify({ machine, pane, text, key, window }), timeout: 8000 })).ok
+    return !!(await call(`${node.url}/api/prompt`, node.token, { method: 'POST', body: JSON.stringify({ machine, pane, text, key, window, appThread }), timeout: 25_000 })).ok
   }
   if (DEMO) return true
+  if (appThread) {
+    if (key || !/^[\w-]{8,64}$/.test(appThread)) return false
+    // Must be a real thread in Codex's engine (not a sub-agent's).
+    const known = await codexEngine(call => call('thread/read', { threadId: appThread, includeTurns: false })).catch(() => null)
+    const thread = known?.thread ?? known
+    if (!thread || thread.parentThreadId || thread.threadSource === 'subagent') return false
+    const clean = String(text ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 4000)
+    return clean ? codexThreadSend(appThread, clean) : false
+  }
   if (window) return typeIntoWindow(String(window), text, key)
   if (String(pane).startsWith('screen:')) return typeIntoScreen(String(pane), text, key)
   if (!(await agentPanes()).some(p => p.pane === pane)) return false
@@ -1009,6 +1172,16 @@ async function handle(req, res) {
       }
       return send(res, 200, { folders: await projectFolders() })
     }
+    if (req.method === 'POST' && p === '/api/continue') {
+      const b = await readBody(req)
+      const machine = String(b.machine)
+      if (machine !== MACHINE && MODE === 'hub') {
+        const node = NODES.find(x => x.name === machine)
+        if (!node) return send(res, 404, { ok: false, error: 'unknown computer' })
+        return send(res, 200, await call(`${node.url}/api/continue`, node.token, { method: 'POST', body: JSON.stringify(b), timeout: 15_000 }))
+      }
+      return send(res, 200, await continueDesktopSession(String(b.session)))
+    }
     if (req.method === 'POST' && p === '/api/start') {
       const b = await readBody(req)
       const machine = String(b.machine)
@@ -1022,7 +1195,7 @@ async function handle(req, res) {
     }
     if (req.method === 'POST' && p === '/api/prompt') {
       const b = await readBody(req)
-      return send(res, 200, { ok: await prompt(String(b.machine), String(b.pane), b.text, b.key, b.window) })
+      return send(res, 200, { ok: await prompt(String(b.machine), String(b.pane), b.text, b.key, b.window, b.appThread) })
     }
     if (req.method === 'GET' && p === '/api/terminal') {
       const machine = String(url.searchParams.get('machine'))
@@ -1034,6 +1207,8 @@ async function handle(req, res) {
         return send(res, 200, await call(`${node.url}/api/terminal?${url.searchParams}`, node.token, { timeout: 6000 }))
       }
       if (DEMO) return send(res, 200, { lines: ['You: run the tests', 'Running the test suite now.', '[Bash] npm test', 'All 15 tests pass.'] })
+      const appThread = url.searchParams.get('appThread') || ''
+      if (appThread) return send(res, 200, { lines: await codexThreadView(appThread) })
       const lines = await terminalView(pane, window)
       return lines ? send(res, 200, { lines }) : send(res, 404, { error: 'agent not found' })
     }

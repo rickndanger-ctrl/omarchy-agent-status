@@ -4,7 +4,7 @@
 
 export type Input = 'up' | 'down' | 'select' | 'back';
 
-export interface Session { agent: string; name: string; session: string; state: string; page: string; at: number; workspace: string; machine: string; pane?: string; window?: string }
+export interface Session { agent: string; name: string; session: string; state: string; page: string; at: number; workspace: string; machine: string; pane?: string; window?: string; appThread?: string; desktopSession?: string }
 export interface Desktop { machine: string; active: number; workspaces: { id: number; windows: string[] }[] }
 export interface Pending { id: string; agent: string; page: string; tool: string; summary: string; at: number; machine: string }
 export interface Chat { id: number; name: string; unread: boolean; when: number; snippet: string; fromMe: boolean }
@@ -27,7 +27,8 @@ export type Action =
   | { kind: 'focus'; machine: string; workspace: string }
   | { kind: 'loadChat'; id: number }
   | { kind: 'loadMuse' }
-  | { kind: 'prompt'; machine: string; pane: string; window?: string; text?: string; key?: 'Escape' }
+  | { kind: 'prompt'; machine: string; pane: string; window?: string; appThread?: string; text?: string; key?: 'Escape' }
+  | { kind: 'continueSession'; machine: string; session: string }
   | { kind: 'startMic' }
   | { kind: 'stopMic' }
   | { kind: 'cancelMic' }
@@ -86,6 +87,8 @@ const APPROVAL_CHOICES = [
 // A [talk] agent is identified by its terminal (pane or window), never by whichever status
 // session happens to match it this poll; otherwise an open page can flip between two chats.
 const sessionKey = (s: Session) => s.pane ? `${s.machine}/${s.pane}` : s.window ? `${s.machine}/${s.window}` : `${s.machine}/${s.agent}/${s.session}`;
+/** Something Home can type into: a terminal pane, a terminal window, or a Codex app thread. */
+const talkable = (s: Session) => Boolean(s.pane || s.window || s.appThread);
 const pendingKey = (p: { machine: string; id: string }) => `${p.machine}/${p.id}`;
 
 export function clip(text: string, width = WIDTH): string {
@@ -235,11 +238,11 @@ export class HomeModel {
   }
 
   /** The agent whose conversation should be fetched for the open agent page, if any. */
-  terminalTarget(): { machine: string; pane: string; window?: string; key: string } | null {
+  terminalTarget(): { machine: string; pane: string; window?: string; appThread?: string; key: string } | null {
     const s = this.screen;
     const x = this.session();
-    if (s.kind !== 'agent' || !x || (!x.pane && !x.window)) return null;
-    return { machine: x.machine, pane: x.pane ?? '', ...(x.window ? { window: x.window } : {}), key: s.key };
+    if (s.kind !== 'agent' || !x || !talkable(x)) return null;
+    return { machine: x.machine, pane: x.pane ?? '', ...(x.window ? { window: x.window } : {}), ...(x.appThread ? { appThread: x.appThread } : {}), key: s.key };
   }
 
   setTerminal(key: string, lines: string[] | null): void {
@@ -365,7 +368,7 @@ export class HomeModel {
     const machines = [...new Set([...(this.data?.machines ?? []).map(m => m.name), ...sessions.map(x => x.machine)])];
     for (const machine of machines) {
       // Fixed order (agent, project, terminal) so rows don't reshuffle on every refresh.
-      const talk = (x: Session) => (x.pane || x.window ? 0 : 1);
+      const talk = (x: Session) => (talkable(x) ? 0 : x.desktopSession ? 1 : 2);
       const mine = sessions.filter(x => x.machine === machine)
         .sort((a, b) => talk(a) - talk(b) || a.name.localeCompare(b.name) || a.page.localeCompare(b.page) || sessionKey(a).localeCompare(sessionKey(b)));
       const online = this.data?.machines.find(m => m.name === machine)?.online ?? true;
@@ -383,7 +386,7 @@ export class HomeModel {
       for (const x of mine) {
         const ws = x.workspace ? `ws${x.workspace.split(',')[0]} · ` : '';
         rows.push({
-          text: clip(`${ws}${MARK[x.state] ?? '-'} ${x.name} · ${x.page || 'no project'} · ${STATE_WORD[x.state] ?? x.state}${x.at ? ` ${age(x.at, nowMs)}` : ''}${x.pane || x.window ? ' [talk]' : ''}`, WIDTH - 2),
+          text: clip(`${ws}${MARK[x.state] ?? '-'} ${x.name} · ${x.page || 'no project'} · ${STATE_WORD[x.state] ?? x.state}${x.at ? ` ${age(x.at, nowMs)}` : ''}${talkable(x) ? ' [talk]' : x.desktopSession ? ' [continue]' : ''}`, WIDTH - 2),
           open: { kind: 'agent', key: sessionKey(x) },
         });
       }
@@ -395,7 +398,8 @@ export class HomeModel {
   private replyChoices(x: Session | undefined): string[] {
     if (!x) return [];
     // "Back" first: swiping down lands here, and a stray tap must not send anything.
-    return ['Back', ...(x.pane || x.window ? QUICK_REPLIES : []), ...(x.workspace ? [`Show on screen (workspace ${x.workspace})`] : [])];
+    const replies = talkable(x) ? (x.appThread ? QUICK_REPLIES.filter(r => r !== 'Stop (Esc)') : QUICK_REPLIES) : [];
+    return ['Back', ...replies, ...(x.workspace ? [`Show on screen (workspace ${x.workspace})`] : [])];
   }
 
   private workspaceRows(): { row: Row; machine: string; id: number }[] {
@@ -551,7 +555,11 @@ export class HomeModel {
         if (this.replyChoices(x).length) this.go({ kind: 'reply', key: s.key });
         return null;
       }
-      if ((x.pane || x.window) && this.data?.voice) { this.go({ kind: 'listen', key: s.key, thinking: false }); return { kind: 'startMic' }; }
+      if (x.desktopSession && input === 'select') {
+        this.showFlash('Opening it on the glasses…', nowMs);
+        return { kind: 'continueSession', machine: x.machine, session: x.desktopSession };
+      }
+      if (talkable(x) && this.data?.voice) { this.go({ kind: 'listen', key: s.key, thinking: false }); return { kind: 'startMic' }; }
       if (this.replyChoices(x).length) this.go({ kind: 'reply', key: s.key });
       return null;
     }
@@ -567,7 +575,7 @@ export class HomeModel {
     if (s.kind === 'reply' || s.kind === 'confirm') {
       const session = this.session();
       if (!session) { this.go({ kind: 'agents' }); return null; }
-      const target = { kind: 'prompt' as const, machine: session.machine, pane: session.pane ?? '', ...(session.window ? { window: session.window } : {}) };
+      const target = { kind: 'prompt' as const, machine: session.machine, pane: session.pane ?? '', ...(session.window ? { window: session.window } : {}), ...(session.appThread ? { appThread: session.appThread } : {}) };
       if (s.kind === 'reply') {
         const text = this.replyChoices(session)[this.cursor];
         this.go({ kind: 'agent', key: s.key });
@@ -649,9 +657,11 @@ export class HomeModel {
       const x = this.session();
       if (!x) lines.push('This session has ended.');
       else {
-        const promptable = Boolean(x.pane || x.window);
+        const promptable = talkable(x);
         lines.splice(0, 2, clip(`${x.name.toUpperCase()} · ${x.machine} · ${x.page || 'no project'} · ${STATE_WORD[x.state] ?? x.state}`));
-        if (!promptable) {
+        if (x.desktopSession) {
+          lines.push('', clip(`"${x.page}" is open in the Claude app on ${x.machine}.`), '', 'Tap to continue it on the glasses: same', 'conversation, in a session Home can reach.', '', 'tap: continue on glasses');
+        } else if (!promptable) {
           lines.push('', clip(`This chat is in the ${x.agent === 'codex' ? 'Codex' : 'Claude'} app, so it can't`), clip(`be shown or prompted here. Use a [talk] agent on ${x.machine}.`));
           if (x.workspace) lines.push('', '▼ swipe down: show on screen');
         } else {

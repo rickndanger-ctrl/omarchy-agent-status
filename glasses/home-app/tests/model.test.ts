@@ -411,3 +411,27 @@ test('computers that cannot start agents have no New agent row', () => {
   m.input('select', NOW);
   assert.doesNotMatch(m.render(NOW), /New agent/);
 });
+
+test('a Codex app thread is talkable: its conversation shows and replies go into the thread', () => {
+  const m = new HomeModel();
+  m.update(tmuxed({ sessions: [{ agent: 'codex', name: 'Codex app', session: 'app:t1', state: 'idle', page: 'Beeper on Even Glasses', at: 0, workspace: '', machine: 'Mini 1', appThread: 't1' }] }));
+  m.input('select', NOW);
+  assert.match(m.render(NOW), /· Codex app · Beeper on Even Glasses · ready \[talk\]/);
+  m.input('select', NOW);
+  assert.deepEqual(m.terminalTarget(), { machine: 'Mini 1', pane: '', appThread: 't1', key: 'Mini 1/codex/app:t1' });
+  m.input('down', NOW);
+  assert.doesNotMatch(m.render(NOW), /Stop \(Esc\)/, 'no Escape key for app threads');
+  m.input('down', NOW);
+  assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Mini 1', pane: '', appThread: 't1', text: 'Continue' });
+});
+
+test('a Claude app session offers Continue on glasses', () => {
+  const m = new HomeModel();
+  m.update(tmuxed({ sessions: [{ agent: 'claude', name: 'Claude app', session: 'desk:s1', state: 'idle', page: 'Story writing', at: 0, workspace: '', machine: 'Mini 1', desktopSession: 's1' }] }));
+  m.input('select', NOW);
+  assert.match(m.render(NOW), /Claude app · Story writing · ready \[continue\]/);
+  m.input('select', NOW);
+  assert.match(m.render(NOW), /tap: continue on glasses/);
+  assert.equal(m.terminalTarget(), null);
+  assert.deepEqual(m.input('select', NOW), { kind: 'continueSession', machine: 'Mini 1', session: 's1' });
+});
