@@ -394,7 +394,8 @@ export class HomeModel {
   /** The "replies" page under an agent: quick replies, then Show on screen. */
   private replyChoices(x: Session | undefined): string[] {
     if (!x) return [];
-    return [...(x.pane || x.window ? QUICK_REPLIES : []), ...(x.workspace ? [`Show on screen (workspace ${x.workspace})`] : [])];
+    // "Back" first: swiping down lands here, and a stray tap must not send anything.
+    return ['Back', ...(x.pane || x.window ? QUICK_REPLIES : []), ...(x.workspace ? [`Show on screen (workspace ${x.workspace})`] : [])];
   }
 
   private workspaceRows(): { row: Row; machine: string; id: number }[] {
@@ -408,7 +409,7 @@ export class HomeModel {
 
   private listRows(nowMs: number): Row[] {
     if (this.screen.kind === 'reply') return this.replyChoices(this.session()).map(text => ({ text }));
-    if (this.screen.kind === 'textReply') return QUICK_TEXTS.map(text => ({ text }));
+    if (this.screen.kind === 'textReply') return ['Back', ...QUICK_TEXTS].map(text => ({ text }));
     if (this.screen.kind === 'newAgent') {
       const s = this.screen;
       if (!s.agent) return (this.data?.machines.find(m => m.name === s.machine)?.canStart ?? []).map(a => ({ text: cap(a) }));
@@ -483,7 +484,8 @@ export class HomeModel {
       return null;
     }
     if (s.kind === 'textReply' && input === 'select') {
-      const text = QUICK_TEXTS[this.cursor];
+      const text = ['Back', ...QUICK_TEXTS][this.cursor];
+      if (text === 'Back') { this.go({ kind: 'chat', id: s.id, name: s.name }); return null; }
       // A text is one and done: if a pop-up brought you here, sending closes it.
       if (this.returnTo && text) this.finish();
       else this.go({ kind: 'chat', id: s.id, name: s.name });
@@ -569,7 +571,7 @@ export class HomeModel {
       if (s.kind === 'reply') {
         const text = this.replyChoices(session)[this.cursor];
         this.go({ kind: 'agent', key: s.key });
-        if (!text) return null;
+        if (!text || text === 'Back') return null;
         if (text.startsWith('Show on screen')) return { kind: 'focus', machine: session.machine, workspace: session.workspace };
         return text === 'Stop (Esc)' ? { ...target, key: 'Escape' } : { ...target, text };
       }

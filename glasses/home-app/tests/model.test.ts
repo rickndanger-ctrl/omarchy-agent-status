@@ -147,6 +147,7 @@ test('a new text pops up; sending a reply from it closes it and returns you', ()
   assert.deepEqual(m.input('select', NOW), { kind: 'loadChat', id: 7 });
   m.setChat([{ from: 'Mom', fromMe: false, when: NOW / 1000, text: 'Call me' }], NOW);
   m.input('down', NOW); // quick texts
+  m.input('down', NOW); // past "Back"
   assert.deepEqual(m.input('select', NOW), { kind: 'sendText', chat: 7, name: 'Mom', text: 'On my way' });
   assert.equal(m.screenKind, 'agents');
 });
@@ -246,12 +247,17 @@ test('swipe down opens replies: quick replies send text, Stop sends Escape, Show
   openAgent(m);
   m.input('down', NOW);
   assert.equal(m.screenKind, 'reply');
+  assert.match(m.render(NOW), /> Back\n  Continue/);
+  assert.equal(m.input('select', NOW), null, 'a stray tap on the first item sends nothing');
+  assert.equal(m.screenKind, 'agent');
+  m.input('down', NOW);
+  m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Mini 1', pane: '%3', text: 'Continue' });
   m.input('down', NOW);
-  for (let i = 0; i < 4; i++) m.input('down', NOW);
+  for (let i = 0; i < 5; i++) m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Mini 1', pane: '%3', key: 'Escape' });
   m.input('down', NOW);
-  for (let i = 0; i < 5; i++) m.input('down', NOW);
+  for (let i = 0; i < 6; i++) m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'focus', machine: 'Mini 1', workspace: '2' });
 });
 
@@ -259,6 +265,7 @@ test('a plain terminal window on the Dell is prompted through its window', () =>
   const m = new HomeModel();
   m.update(base({ sessions: [{ ...base().sessions[0], window: '0xabc' }] }));
   openAgent(m);
+  m.input('down', NOW);
   m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'lap', pane: '', window: '0xabc', text: 'Continue' });
 });
@@ -270,6 +277,7 @@ test('an app chat explains it is status-only, and can still be shown on screen',
   const text = m.render(NOW);
   assert.match(text, /in the Claude app, so it can't/);
   assert.equal(m.terminalTarget(), null);
+  m.input('down', NOW);
   m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'focus', machine: 'lap', workspace: '1' });
 });
@@ -325,6 +333,9 @@ test('texts: swipe down at the newest message opens quick texts', () => {
   openChat(m);
   m.input('down', NOW);
   assert.equal(m.screenKind, 'textReply');
+  assert.equal(m.input('select', NOW), null, 'Back is first');
+  m.input('down', NOW);
+  m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'sendText', chat: 7, name: 'Mom', text: 'On my way' });
 });
 
