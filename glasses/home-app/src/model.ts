@@ -12,7 +12,7 @@ export interface ChatMessage { from: string; fromMe: boolean; when: number; text
 export interface HomeData {
   now: number;
   paused: boolean;
-  machines: { name: string; online: boolean }[];
+  machines: { name: string; online: boolean; canStart?: string[] }[];
   sessions: Session[];
   pending: Pending[];
   messages: Chat[] | null;
@@ -32,7 +32,9 @@ export type Action =
   | { kind: 'stopMic' }
   | { kind: 'cancelMic' }
   | { kind: 'sendText'; chat: number; name: string; text: string }
-  | { kind: 'askMuse'; text: string };
+  | { kind: 'askMuse'; text: string }
+  | { kind: 'loadFolders'; machine: string }
+  | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string };
 
 type Screen =
   | { kind: 'home' }
@@ -45,13 +47,17 @@ type Screen =
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
   | { kind: 'reply'; key: string }
-  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true }
-  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true }
+  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true; start?: StartRef }
+  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true; start?: StartRef }
+  | { kind: 'newAgent'; machine: string; agent?: string; folders?: string[] | null }
   | { kind: 'textReply'; id: number; name: string }
   | { kind: 'alert'; alert: Alert };
 
 /** A pop-up: something that needs you. Tap opens it; when you finish there, Home returns you to where you were. */
 interface Alert { id: string; title: string; detail: string; open: Screen }
+
+/** A new agent to start: which computer, which agent, which folder. */
+type StartRef = { machine: string; agent: string; folder: string };
 
 /** A text conversation as the target of a voice reply or quick text. */
 type ChatRef = { id: number; name: string };
@@ -145,6 +151,7 @@ export class HomeModel {
   private returnTo: Screen | null = null;
   private seenTexts = new Map<number, number>();
   private firstUpdate = true;
+  private waitingFor: { machine: string; pane: string; until: number } | null = null;
 
   get screenKind(): Screen['kind'] { return this.screen.kind; }
 
@@ -177,6 +184,13 @@ export class HomeModel {
       }
     }
     this.lastState = new Map(data.sessions.map(x => [sessionKey(x), x.state]));
+    // A just-started agent: open its page as soon as it shows up.
+    const w = this.waitingFor;
+    if (w && data.now > w.until) this.waitingFor = null;
+    else if (w && data.sessions.some(x => x.machine === w.machine && x.pane === w.pane)) {
+      this.waitingFor = null;
+      if (!['listen', 'confirm', 'reply', 'textReply', 'approval', 'alert'].includes(this.screen.kind)) this.go({ kind: 'agent', key: `${w.machine}/${w.pane}` });
+    }
     this.notices = this.notices.filter(n => data.now - n.at < NOTICE_MS && this.lastState.has(n.key));
     for (const c of data.messages ?? []) {
       const seen = this.seenTexts.get(c.id);
@@ -238,14 +252,23 @@ export class HomeModel {
     return this.terminal.lines.flatMap(line => (line ? wrap(line) : ['']));
   }
 
+  setFolders(machine: string, folders: string[] | null): void {
+    const s = this.screen;
+    if (s.kind === 'newAgent' && s.machine === machine) this.screen = { ...s, folders: folders ?? ['Projects'] };
+  }
+  /** After asking a computer to start an agent: open it when it appears (for up to a minute). */
+  expectAgent(machine: string, pane: string, nowMs: number): void {
+    if (pane) this.waitingFor = { machine, pane, until: nowMs + 60_000 };
+  }
+
   /** Speech-to-text result for the listen screen; empty or null means nothing usable. */
   setTranscript(text: string | null, nowMs: number): void {
     const s = this.screen;
     if (s.kind !== 'listen') return;
-    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}) });
+    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
     else {
       this.showFlash(text === null ? 'Voice failed. Try again' : "Didn't catch that", nowMs);
-      this.go(s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : { kind: 'agent', key: s.key });
+      this.go(s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key });
     }
   }
 
@@ -347,8 +370,12 @@ export class HomeModel {
         .sort((a, b) => talk(a) - talk(b) || a.name.localeCompare(b.name) || a.page.localeCompare(b.page) || sessionKey(a).localeCompare(sessionKey(b)));
       const online = this.data?.machines.find(m => m.name === machine)?.online ?? true;
       const desk = this.data?.desktops?.find(dk => dk.machine === machine);
-      if (!mine.length && !desk && online) continue;
+      const startable = Boolean(this.data?.machines.find(m => m.name === machine)?.canStart?.length);
+      if (!mine.length && !desk && !startable && online) continue;
       rows.push(title(`── ${machine}${online ? '' : ' (offline)'} ──`));
+      if (online && this.data?.machines.find(m => m.name === machine)?.canStart?.length) {
+        rows.push({ text: '+ New agent here', open: { kind: 'newAgent', machine } });
+      }
       if (desk?.workspaces.length) {
         const list = desk.workspaces.map(w => (w.id === desk.active ? `[${w.id}]` : String(w.id))).join(' ');
         rows.push({ text: clip(`Workspaces ${list} →`, WIDTH - 2), open: { kind: 'workspaces', machine } });
@@ -382,6 +409,11 @@ export class HomeModel {
   private listRows(nowMs: number): Row[] {
     if (this.screen.kind === 'reply') return this.replyChoices(this.session()).map(text => ({ text }));
     if (this.screen.kind === 'textReply') return QUICK_TEXTS.map(text => ({ text }));
+    if (this.screen.kind === 'newAgent') {
+      const s = this.screen;
+      if (!s.agent) return (this.data?.machines.find(m => m.name === s.machine)?.canStart ?? []).map(a => ({ text: cap(a) }));
+      return (s.folders ?? []).map(f => ({ text: f === 'Projects' ? 'Projects (all)' : f }));
+    }
     if (this.screen.kind === 'confirm') return CONFIRM_CHOICES.map(text => ({ text }));
     if (this.screen.kind === 'workspaces') return this.workspaceRows().map(w => w.row);
     if (this.screen.kind === 'home') return this.homeRows();
@@ -419,7 +451,7 @@ export class HomeModel {
     // Double-tap out of something a pop-up opened returns to where you were.
     if (input === 'back' && this.returnTo && ['agent', 'chat'].includes(s.kind)) { this.finish(); return null; }
     if (s.kind === 'listen') {
-      if (input === 'back') { this.go(s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : { kind: 'agent', key: s.key }); return { kind: 'cancelMic' }; }
+      if (input === 'back') { this.go(s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key }); return { kind: 'cancelMic' }; }
       if (input === 'select' && !s.thinking) { this.screen = { ...s, thinking: true }; return { kind: 'stopMic' }; }
       return null;
     }
@@ -429,6 +461,7 @@ export class HomeModel {
       else if (s.kind === 'textReply') this.go({ kind: 'chat', id: s.id, name: s.name });
       else if (s.kind === 'confirm' && s.chat) this.go({ kind: 'chat', ...s.chat });
       else if (s.kind === 'confirm' && s.muse) this.go({ kind: 'muse' });
+      else if ((s.kind === 'confirm' && s.start) || s.kind === 'newAgent') this.go({ kind: 'agents' });
       else if (s.kind === 'reply' || s.kind === 'confirm') this.go({ kind: 'agent', key: s.key });
       else this.go({ kind: 'home' });
       return null;
@@ -470,6 +503,28 @@ export class HomeModel {
       if (choice !== 'Send') return null;
       this.museLines = [...wrap(`You: ${s.text}`), '', 'Muse is thinking…'];
       return { kind: 'askMuse', text: s.text };
+    }
+    if (s.kind === 'newAgent' && input === 'select') {
+      if (!s.agent) {
+        const agent = this.data?.machines.find(m => m.name === s.machine)?.canStart?.[this.cursor];
+        if (!agent) return null;
+        this.go({ kind: 'newAgent', machine: s.machine, agent, folders: null });
+        return { kind: 'loadFolders', machine: s.machine };
+      }
+      const folder = s.folders?.[this.cursor];
+      if (!folder) return null;
+      const start = { machine: s.machine, agent: s.agent, folder };
+      if (this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, start }); return { kind: 'startMic' }; }
+      this.go({ kind: 'confirm', key: '', text: '', start });
+      return null;
+    }
+    if (s.kind === 'confirm' && s.start && input === 'select') {
+      const choice = CONFIRM_CHOICES[this.cursor];
+      if (choice === 'Talk again') { this.go({ kind: 'listen', key: '', thinking: false, start: s.start }); return { kind: 'startMic' }; }
+      this.go({ kind: 'agents' });
+      if (choice !== 'Send') return null;
+      this.showFlash(`Starting ${cap(s.start.agent)} on ${s.start.machine}…`, nowMs);
+      return { kind: 'startAgent', ...s.start, text: s.text };
     }
     if (s.kind === 'muse' && input === 'select') {
       if (!this.data?.voice) return null;
@@ -619,6 +674,24 @@ export class HomeModel {
     } else if (s.kind === 'textReply') {
       lines[0] = clip(`QUICK TEXT → ${s.name}`);
       lines.push(...this.list(this.listRows(nowMs)));
+    } else if (s.kind === 'newAgent') {
+      lines[0] = clip(`NEW AGENT · ${s.machine}`);
+      if (s.agent && !s.folders) lines.push('Loading folders…');
+      else {
+        lines.push(s.agent ? `${cap(s.agent)} · pick a folder` : 'Pick an agent');
+        lines.push(...this.list(this.listRows(nowMs)));
+      }
+      lines.push('', 'Full access: it works without asking you');
+    } else if ((s.kind === 'confirm' || s.kind === 'listen') && s.start) {
+      const where = `${cap(s.start.agent)} on ${s.start.machine} · ${s.start.folder}`;
+      if (s.kind === 'listen') {
+        lines[0] = clip(`NEW ${where}`);
+        lines.push(s.thinking ? 'Turning speech into text…' : 'Listening… say what it should do.', '', s.thinking ? '' : 'Tap when done. Double-tap to cancel.');
+      } else {
+        lines[0] = clip(`START ${where.toUpperCase()}?`);
+        lines.push(...(s.text ? wrap(`"${s.text}"`).slice(0, 3) : ['(no task; it will wait for you)']), 'Full access: no approvals', '');
+        lines.push(...this.list(this.listRows(nowMs)));
+      }
     } else if ((s.kind === 'confirm' || s.kind === 'listen') && s.muse) {
       if (s.kind === 'listen') {
         lines[0] = 'ASK MUSE';

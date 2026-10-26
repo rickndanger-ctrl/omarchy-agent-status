@@ -363,3 +363,40 @@ test('home keeps the menu first; waiting items are one row that opens the Needs 
   assert.match(page, /> ! Claude · m1 · Bash: git push origin main/);
   assert.match(page, /\* Claude · Mini 1 finished/);
 });
+
+test('start an agent by voice: computer → agent → folder → speak → confirm full access → it opens', () => {
+  const m = new HomeModel();
+  const data = tmuxed({ machines: [{ name: 'Mini 1', online: true, canStart: ['claude', 'codex'] }] });
+  m.update(data);
+  m.input('select', NOW); // Agents
+  let text = m.render(NOW);
+  assert.match(text, /── Mini 1 ──\n> \+ New agent here/);
+  m.input('select', NOW);
+  assert.equal(m.screenKind, 'newAgent');
+  assert.match(m.render(NOW), /^NEW AGENT · Mini 1\n\nPick an agent\n> Claude\n  Codex/);
+  m.input('down', NOW);
+  assert.deepEqual(m.input('select', NOW), { kind: 'loadFolders', machine: 'Mini 1' });
+  assert.match(m.render(NOW), /Loading folders/);
+  m.setFolders('Mini 1', ['Projects', 'pie-bird']);
+  m.input('down', NOW);
+  assert.deepEqual(m.input('select', NOW), { kind: 'startMic' });
+  assert.match(m.render(NOW), /^NEW Codex on Mini 1 · pie-bird/);
+  m.input('select', NOW);
+  m.setTranscript('fix the login bug', NOW);
+  text = m.render(NOW);
+  assert.match(text, /^START CODEX ON MINI 1 · PIE-BIRD\?/);
+  assert.match(text, /Full access: no approvals/);
+  assert.deepEqual(m.input('select', NOW), { kind: 'startAgent', machine: 'Mini 1', agent: 'codex', folder: 'pie-bird', text: 'fix the login bug' });
+  assert.equal(m.screenKind, 'agents');
+  m.expectAgent('Mini 1', '%7', NOW);
+  m.update({ ...data, sessions: [...data.sessions, { agent: 'codex', name: 'Codex', session: 'tmux%7', state: 'idle', page: 'pie-bird', at: 0, workspace: '', machine: 'Mini 1', pane: '%7' }] });
+  assert.equal(m.screenKind, 'agent');
+  assert.match(m.render(NOW + 5000), /^CODEX · Mini 1 · pie-bird/);
+});
+
+test('computers that cannot start agents have no New agent row', () => {
+  const m = new HomeModel();
+  m.update(base());
+  m.input('select', NOW);
+  assert.doesNotMatch(m.render(NOW), /New agent/);
+});

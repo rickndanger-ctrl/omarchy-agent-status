@@ -2,7 +2,7 @@ import './style.css';
 import { Glasses } from './glasses';
 import { HomeModel, type Action, type HomeData, type Input } from './model';
 
-const BUILD = '2026-10-26-b7';
+const BUILD = '2026-10-26-b8';
 const POLL_MS = 2000;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const store = {
@@ -310,6 +310,16 @@ async function run(action: Action): Promise<void> {
           break;
         }
       }
+    } else if (action.kind === 'loadFolders') {
+      const r = await api<{ folders: string[] }>(`folders?machine=${encodeURIComponent(action.machine)}`).catch(() => null);
+      model.setFolders(action.machine, r?.folders ?? null);
+    } else if (action.kind === 'startAgent') {
+      const r = await api<{ ok: boolean; pane?: string; error?: string }>('start', { method: 'POST', body: JSON.stringify(action) })
+        .catch(e => ({ ok: false, error: String(e.message ?? e) } as { ok: boolean; pane?: string; error?: string }));
+      diag('agent.start', `${action.machine} ${action.agent} ok=${r.ok} ${r.error ?? ''}`);
+      model.showFlash(r.ok ? `Started ${action.agent} on ${action.machine}` : `Couldn't start: ${r.error ?? 'error'}`, Date.now());
+      if (r.ok && r.pane) model.expectAgent(action.machine, r.pane, Date.now());
+      void poll();
     } else if (action.kind === 'loadMuse') {
       model.setMuse(await api<{ question: string; reply: string }>('muse').catch(() => null));
     }

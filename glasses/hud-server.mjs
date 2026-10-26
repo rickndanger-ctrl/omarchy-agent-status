@@ -37,7 +37,8 @@ import { fileURLToPath } from 'node:url'
 
 const run = promisify(execFile)
 // macOS keeps lsof in /usr/sbin, which launchd's default PATH leaves out.
-process.env.PATH = [process.env.PATH, '/usr/sbin', '/sbin'].filter(Boolean).join(':')
+// Agents often live in ~/.local/bin or Homebrew, which launchd's PATH also leaves out.
+process.env.PATH = [path.join(homedir(), '.local/bin'), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH, '/usr/sbin', '/sbin'].filter(Boolean).join(':')
 const here = path.dirname(fileURLToPath(import.meta.url))
 const HOME = homedir()
 const CONFIG_DIR = path.join(HOME, '.config/agent-glasses')
@@ -325,10 +326,120 @@ async function desktop() {
   }
 }
 
+// ---- starting new agents from the glasses -------------------------------------------------------
+
+const PROJECTS = path.join(HOME, 'Projects')
+const START_SCRIPT = path.join(here, 'start-agent.sh')
+const hasCommand = async name => run('bash', ['-c', `command -v ${name}`], { timeout: 4000 }).then(() => true, () => false)
+let canStartCache = { at: 0, list: [] }
+
+/** Which agents this computer can start (installed, plus tmux or screen to run them in). */
+async function canStart() {
+  if (DEMO) return ['claude', 'codex']
+  if (Date.now() - canStartCache.at < 10 * 60_000) return canStartCache.list
+  const runner = (await hasCommand('tmux')) || (await hasCommand('screen'))
+  const list = runner ? (await Promise.all(['claude', 'codex'].map(async a => ((await hasCommand(a)) ? a : null)))).filter(Boolean) : []
+  canStartCache = { at: Date.now(), list }
+  return list
+}
+
+/** "Projects" plus the most recently used folders inside it. */
+async function projectFolders() {
+  if (DEMO) return ['Projects', 'omarchy-agent-status', 'black-team']
+  const { readdirSync } = await import('node:fs')
+  try {
+    const dirs = readdirSync(PROJECTS, { withFileTypes: true })
+      .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+      .map(d => ({ name: d.name, at: statSync(path.join(PROJECTS, d.name)).mtimeMs }))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 8)
+      .map(d => d.name)
+    return ['Projects', ...dirs]
+  } catch {
+    return ['Projects']
+  }
+}
+
+async function screenText(pane) {
+  if (pane.startsWith('screen:')) {
+    const file = path.join(CONFIG_DIR, `.start-${process.pid}.txt`)
+    await run('screen', ['-S', pane.slice(7), '-p', '0', '-X', 'hardcopy', file], { timeout: 3000 })
+    await new Promise(r => setTimeout(r, 200))
+    const text = readFileSync(file, 'utf8')
+    await import('node:fs/promises').then(fs => fs.unlink(file)).catch(() => {})
+    return text
+  }
+  return (await run('tmux', ['capture-pane', '-p', '-t', pane], { timeout: 3000 })).stdout
+}
+
+async function sendKeys(pane, keys) {
+  if (pane.startsWith('screen:')) {
+    const map = { Down: '\x1b[B', Enter: '\r' }
+    for (const k of keys) await run('screen', ['-S', pane.slice(7), '-p', '0', '-X', 'stuff', map[k]], { timeout: 3000 })
+  } else {
+    for (const k of keys) await run('tmux', ['send-keys', '-t', pane, k], { timeout: 3000 })
+  }
+}
+
+/**
+ * The first minute of a new agent: answer the two first-run questions Rick chose "yes" to by asking for a
+ * full-access agent in that folder: Claude's "trust this folder?" and its full-access (bypass) warning.
+ */
+async function acceptFirstRunQuestions(pane) {
+  const answered = new Set()
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 2000))
+    let text = ''
+    try { text = await screenText(pane) } catch { return }
+    if (!answered.has('trust') && /trust this folder/i.test(text) && /Yes, I trust/i.test(text)) {
+      answered.add('trust')
+      await sendKeys(pane, ['Down', 'Enter'])
+      continue
+    }
+    if (!answered.has('bypass') && /Bypass Permissions mode/i.test(text) && /Yes, I accept/i.test(text)) {
+      answered.add('bypass')
+      await sendKeys(pane, ['Down', 'Enter'])
+    }
+  }
+}
+
+async function startAgent(agent, folder, task) {
+  if (!(await canStart()).includes(agent)) return { ok: false, error: `${agent} can't be started here` }
+  if (!(await projectFolders()).includes(folder)) return { ok: false, error: 'unknown folder' }
+  const dir = folder === 'Projects' ? PROJECTS : path.join(PROJECTS, folder)
+  const taskFile = path.join(CONFIG_DIR, `task-${randomBytes(6).toString('hex')}.txt`)
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
+  writeFileSync(taskFile, String(task ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]+/g, ' ').trim().slice(0, 4000), { mode: 0o600 })
+  const slug = folder.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 20)
+  const base = `${agent}-${slug}`
+  if (await hasCommand('tmux')) {
+    const names = (await run('tmux', ['list-sessions', '-F', '#{session_name}'], { timeout: 3000 }).catch(() => ({ stdout: '' }))).stdout.split('\n')
+    let name = base
+    for (let n = 2; names.includes(name); n++) name = `${base}-${n}`
+    await run('tmux', ['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', dir, 'bash', START_SCRIPT, agent, taskFile], { timeout: 5000 })
+    const pane = (await run('tmux', ['list-panes', '-t', name, '-F', '#{pane_id}'], { timeout: 3000 })).stdout.trim().split('\n')[0]
+    void acceptFirstRunQuestions(pane)
+    return { ok: true, pane }
+  }
+  const screens = async () => (await run('screen', ['-ls'], { timeout: 3000 }).catch(e => ({ stdout: e.stdout || '' }))).stdout
+  const taken = new Set([...(await screens()).matchAll(/\d+\.(\S+)\s/g)].map(m => m[1]))
+  let name = base
+  for (let n = 2; taken.has(name); n++) name = `${base}-${n}`
+  // Values go in as environment variables, never spliced into the command text.
+  await run('bash', ['-c', 'cd "$HUD_DIR" && screen -dmS "$HUD_NAME" bash "$HUD_SCRIPT" "$HUD_AGENT" "$HUD_TASK"'], {
+    timeout: 5000, env: { ...process.env, HUD_DIR: dir, HUD_NAME: name, HUD_SCRIPT: START_SCRIPT, HUD_AGENT: agent, HUD_TASK: taskFile },
+  })
+  await new Promise(r => setTimeout(r, 1000))
+  const pid = [...(await screens()).matchAll(/(\d+)\.(\S+)\s/g)].find(m => m[2] === name)?.[1]
+  const pane = pid ? `screen:${pid}.${name}` : ''
+  if (pane) void acceptFirstRunQuestions(pane)
+  return { ok: Boolean(pane), pane }
+}
+
 async function nodeView() {
   expirePending()
-  const [sessions, desk] = await Promise.all([sessionsWithPanes(), desktop()])
-  return { machine: MACHINE, online: true, sessions, pending: publicPending(), desktop: desk }
+  const [sessions, desk, starts] = await Promise.all([sessionsWithPanes(), desktop(), canStart()])
+  return { machine: MACHINE, online: true, sessions, pending: publicPending(), desktop: desk, canStart: starts }
 }
 
 // ---- hub -------------------------------------------------------------------------
@@ -376,7 +487,7 @@ async function home() {
     now: Date.now(),
     mode: MODE,
     paused,
-    machines: views.map(v => ({ name: v.machine, online: v.online })),
+    machines: views.map(v => ({ name: v.machine, online: v.online, canStart: v.canStart ?? [] })),
     sessions,
     pending: views.flatMap(v => v.pending).sort((a, b) => a.at - b.at),
     desktops: views.filter(v => v.desktop).map(v => ({ machine: v.machine, ...v.desktop })),
@@ -602,7 +713,16 @@ async function codexConversation(pid, cwd) {
         return []
       }
     }).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs).slice(0, 25)
+    // Only a log begun after this Codex started can be its own; with two Codexes in one folder,
+    // "newest log for the folder" alone would show the other one's conversation.
+    let started = 0
+    try {
+      started = Date.parse((await run('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 2000 })).stdout.trim()) || 0
+    } catch { /* unknown start: accept none */ }
     for (const candidate of candidates) {
+      const stamp = path.basename(candidate).match(/rollout-(\d{4}-\d\d-\d\d)T(\d\d)-(\d\d)-(\d\d)/)
+      const begun = stamp ? new Date(`${stamp[1]}T${stamp[2]}:${stamp[3]}:${stamp[4]}`).getTime() : 0
+      if (!started || begun < started - 5000) continue
       try {
         const first = JSON.parse(readFileSync(candidate, 'utf8').split('\n', 1)[0])
         if (first.payload?.cwd === cwd) { file = candidate; break }
@@ -866,6 +986,26 @@ async function handle(req, res) {
         }
       }
       return send(res, 200, { ok: true })
+    }
+    if (req.method === 'GET' && p === '/api/folders') {
+      const machine = String(url.searchParams.get('machine'))
+      if (machine !== MACHINE && MODE === 'hub') {
+        const node = NODES.find(x => x.name === machine)
+        if (!node) return send(res, 404, { error: 'unknown computer' })
+        return send(res, 200, await call(`${node.url}/api/folders?${url.searchParams}`, node.token, { timeout: 6000 }))
+      }
+      return send(res, 200, { folders: await projectFolders() })
+    }
+    if (req.method === 'POST' && p === '/api/start') {
+      const b = await readBody(req)
+      const machine = String(b.machine)
+      if (machine !== MACHINE && MODE === 'hub') {
+        const node = NODES.find(x => x.name === machine)
+        if (!node) return send(res, 404, { ok: false, error: 'unknown computer' })
+        return send(res, 200, await call(`${node.url}/api/start`, node.token, { method: 'POST', body: JSON.stringify(b), timeout: 15_000 }))
+      }
+      if (DEMO) return send(res, 200, { ok: true, pane: '%9' })
+      return send(res, 200, await startAgent(String(b.agent), String(b.folder), b.task))
     }
     if (req.method === 'POST' && p === '/api/prompt') {
       const b = await readBody(req)
