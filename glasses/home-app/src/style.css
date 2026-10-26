@@ -1,0 +1,20 @@
+:root { color-scheme: dark; --bg: #0d1512; --panel: #15211c; --green: #5dff9b; --text: #d8efe2; --muted: #86a596; }
+* { box-sizing: border-box; }
+html, body { height: auto; min-height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, sans-serif; }
+main { max-width: 640px; margin: 0 auto; padding: 16px; }
+header { display: flex; justify-content: space-between; align-items: baseline; letter-spacing: .08em; color: var(--green); }
+header span { font-size: 12px; color: var(--muted); }
+.status { color: var(--muted); min-height: 1.4em; }
+.glass { background: #000; color: var(--green); border-radius: 10px; padding: 12px; min-height: 120px; font: 13px/1.35 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pad, .row { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+button { flex: 1; min-width: 120px; background: var(--panel); color: var(--text); border: 1px solid #2b3d34; border-radius: 8px; padding: 10px; font: inherit; }
+details { background: var(--panel); border-radius: 10px; padding: 12px; margin-top: 12px; }
+label { display: block; margin: 10px 0; color: var(--muted); }
+input { display: block; width: 100%; margin-top: 4px; background: var(--bg); color: var(--text); border: 1px solid #2b3d34; border-radius: 6px; padding: 8px; font: inherit; }
+.muted { color: var(--muted); font-size: 13px; }
+.pairbox { background: var(--panel); border: 1px solid var(--green); border-radius: 10px; padding: 12px; margin: 8px 0 12px; }
+.pairbox p { margin: 0 0 8px; }
+.pairbox input { font-size: 24px; letter-spacing: .3em; text-align: center; margin-bottom: 8px; }
+.pairbox button { width: 100%; font-size: 18px; background: var(--green); color: #002b12; }
+.hidden { display: none; }

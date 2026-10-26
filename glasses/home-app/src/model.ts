@@ -1,0 +1,673 @@
+// Screens and navigation for Home, kept free of the SDK and the network so it
+// can be tested on its own. The glasses show one full-screen text block; this
+// file decides what that text is and what each tap or swipe does.
+
+export type Input = 'up' | 'down' | 'select' | 'back';
+
+export interface Session { agent: string; name: string; session: string; state: string; page: string; at: number; workspace: string; machine: string; pane?: string; window?: string }
+export interface Desktop { machine: string; active: number; workspaces: { id: number; windows: string[] }[] }
+export interface Pending { id: string; agent: string; page: string; tool: string; summary: string; at: number; machine: string }
+export interface Chat { id: number; name: string; unread: boolean; when: number; snippet: string; fromMe: boolean }
+export interface ChatMessage { from: string; fromMe: boolean; when: number; text: string }
+export interface HomeData {
+  now: number;
+  paused: boolean;
+  machines: { name: string; online: boolean }[];
+  sessions: Session[];
+  pending: Pending[];
+  messages: Chat[] | null;
+  muse: boolean;
+  desktops?: Desktop[];
+  voice?: boolean;
+  weather?: { temp: number; desc: string; hi: number; lo: number; rainAt: string | null; rainChance: number } | null;
+}
+
+export type Action =
+  | { kind: 'decide'; machine: string; id: string; behavior: 'allow' | 'deny' | 'desk' }
+  | { kind: 'focus'; machine: string; workspace: string }
+  | { kind: 'loadChat'; id: number }
+  | { kind: 'loadMuse' }
+  | { kind: 'prompt'; machine: string; pane: string; window?: string; text?: string; key?: 'Escape' }
+  | { kind: 'startMic' }
+  | { kind: 'stopMic' }
+  | { kind: 'cancelMic' }
+  | { kind: 'sendText'; chat: number; name: string; text: string }
+  | { kind: 'askMuse'; text: string };
+
+type Screen =
+  | { kind: 'home' }
+  | { kind: 'approval'; machine: string; id: string }
+  | { kind: 'agents' }
+  | { kind: 'agent'; key: string }
+  | { kind: 'messages' }
+  | { kind: 'chat'; id: number; name: string }
+  | { kind: 'muse' }
+  | { kind: 'workspaces'; machine?: string }
+  | { kind: 'needs' }
+  | { kind: 'reply'; key: string }
+  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true }
+  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true }
+  | { kind: 'textReply'; id: number; name: string }
+  | { kind: 'alert'; alert: Alert };
+
+/** A pop-up: something that needs you. Tap opens it; when you finish there, Home returns you to where you were. */
+interface Alert { id: string; title: string; detail: string; open: Screen }
+
+/** A text conversation as the target of a voice reply or quick text. */
+type ChatRef = { id: number; name: string };
+
+// A header is a title or divider line; the cursor skips it.
+interface Row { text: string; open?: Screen; header?: boolean }
+const RULE = '─'.repeat(26);
+const title = (text: string): Row => ({ text, header: true });
+
+export const WIDTH = 56; // characters per line; the G2 font fits ~60 narrow characters in 576 px
+// The glasses fit 10 lines. More than that and the glasses scroll the text themselves,
+// which swallows a swipe before Home sees it, so every screen stays within MAX_LINES.
+const MAX_LINES = 10;
+const LIST_ROWS = 7;
+const BODY_LINES = 6;
+const TERM_LINES = 8;
+export const QUICK_TEXTS = ['On my way', "Can't talk right now", 'Call you soon', 'Sounds good', 'Yes', 'No'];
+export const QUICK_REPLIES = ['Continue', 'Yes, go ahead', 'Run the tests', 'Commit it', 'Stop (Esc)'];
+const CONFIRM_CHOICES = ['Send', 'Talk again', 'Cancel'];
+const APPROVAL_CHOICES = [
+  { label: 'Leave for desk', behavior: 'desk' },
+  { label: 'Deny', behavior: 'deny' },
+  { label: 'Allow', behavior: 'allow' },
+] as const;
+
+// A [talk] agent is identified by its terminal (pane or window), never by whichever status
+// session happens to match it this poll; otherwise an open page can flip between two chats.
+const sessionKey = (s: Session) => s.pane ? `${s.machine}/${s.pane}` : s.window ? `${s.machine}/${s.window}` : `${s.machine}/${s.agent}/${s.session}`;
+const pendingKey = (p: { machine: string; id: string }) => `${p.machine}/${p.id}`;
+
+export function clip(text: string, width = WIDTH): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > width ? flat.slice(0, width - 1) + '…' : flat;
+}
+
+export function wrap(text: string, width = WIDTH): string[] {
+  const lines: string[] = [];
+  for (const paragraph of text.split('\n')) {
+    let line = '';
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+      for (let piece = word; piece; piece = piece.slice(width)) {
+        const part = piece.slice(0, width);
+        if (!line) line = part;
+        else if (line.length + 1 + part.length <= width) line += ' ' + part;
+        else { lines.push(line); line = part; }
+      }
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
+export function age(seconds: number, nowMs: number): string {
+  const s = Math.max(0, nowMs / 1000 - seconds);
+  if (s < 60) return 'now';
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+const STATE_WORD: Record<string, string> = { working: 'busy', done: 'done', attention: 'needs you', error: 'error', stopped: 'stopped', idle: 'ready' };
+const MARK: Record<string, string> = { attention: '!', error: '!', working: '•', done: '-', stopped: '-', idle: '·' };
+const NOTICE_MS = 10 * 60_000;
+
+
+
+export function clock(nowMs: number, timeZone?: string): string {
+  const d = new Date(nowMs);
+  const day = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone });
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone });
+  return `${day.replace(',', '')} · ${time}`;
+}
+
+export class HomeModel {
+  data: HomeData | null = null;
+  error = '';
+  battery: number | undefined;
+  hideDone = false;
+  private screen: Screen = { kind: 'home' };
+  private cursor = 0;
+  private scroll = 0;
+  private seenPending = new Set<string>();
+  private chatLines: string[] | null = null;
+  private museLines: string[] | null = null;
+  private flash = { text: '', until: 0 };
+  private lastState = new Map<string, string>();
+  private notices: { key: string; text: string; at: number }[] = [];
+  private terminal: { key: string; lines: string[] } | null = null;
+  private termScroll = 0;
+  private alerts: Alert[] = [];
+  private returnTo: Screen | null = null;
+  private seenTexts = new Map<number, number>();
+  private firstUpdate = true;
+
+  get screenKind(): Screen['kind'] { return this.screen.kind; }
+
+  /** New data from the hub. Anything new that needs you becomes a pop-up. */
+  update(data: HomeData): void {
+    this.data = data;
+    this.error = '';
+    const quiet = this.firstUpdate; // what's already there when Home opens isn't news
+    this.firstUpdate = false;
+    for (const p of data.pending) {
+      if (this.seenPending.has(pendingKey(p))) continue;
+      this.seenPending.add(pendingKey(p));
+      this.queue({ id: `approve:${pendingKey(p)}`, title: `APPROVE? ${cap(p.agent)} · ${p.machine}`, detail: `${p.tool}: ${p.summary}`, open: { kind: 'approval', machine: p.machine, id: p.id } }, true);
+    }
+    // An approval answered elsewhere (at the desk, or it expired) closes its card and its pop-up.
+    this.alerts = this.alerts.filter(a => a.open.kind !== 'approval' || data.pending.some(p => p.machine === (a.open as { machine: string }).machine && p.id === (a.open as { id: string }).id));
+    if (this.screen.kind === 'approval' && !this.currentPending()) this.finish();
+    if (this.screen.kind === 'alert' && !this.alerts.some(a => a.id === (this.screen as { alert: Alert }).alert.id)) this.finish();
+    for (const x of data.sessions) {
+      const key = sessionKey(x);
+      const before = this.lastState.get(key);
+      if (!before || before === x.state) continue;
+      if (x.state === 'done' && before !== 'done') {
+        const text = `${x.name} · ${x.machine} finished · ${x.page}`;
+        this.notices = [{ key, text, at: data.now }, ...this.notices.filter(n => n.key !== key)];
+        this.queue({ id: `agent:${key}`, title: clip(`DONE · ${x.name} · ${x.machine}`), detail: x.page || 'finished', open: { kind: 'agent', key } });
+      }
+      if (x.state === 'attention') {
+        this.queue({ id: `agent:${key}`, title: clip(`NEEDS YOU · ${x.name} · ${x.machine}`), detail: x.page || 'waiting for you', open: { kind: 'agent', key } });
+      }
+    }
+    this.lastState = new Map(data.sessions.map(x => [sessionKey(x), x.state]));
+    this.notices = this.notices.filter(n => data.now - n.at < NOTICE_MS && this.lastState.has(n.key));
+    for (const c of data.messages ?? []) {
+      const seen = this.seenTexts.get(c.id);
+      this.seenTexts.set(c.id, Math.max(seen ?? 0, c.when));
+      if (quiet) continue;
+      if (c.unread && !c.fromMe && c.when > (seen ?? 0)) {
+        this.queue({ id: `text:${c.id}`, title: clip(`TEXT · ${c.name}`), detail: c.snippet, open: { kind: 'chat', id: c.id, name: c.name } });
+      }
+    }
+    this.showNextAlert();
+  }
+
+  /** Add a pop-up (replacing an older one about the same thing). Approvals jump the queue. */
+  private queue(alert: Alert, urgent = false): void {
+    this.alerts = this.alerts.filter(a => a.id !== alert.id);
+    if (urgent) this.alerts.unshift(alert);
+    else this.alerts.push(alert);
+  }
+
+  /** Pop the next alert up, but never in the middle of talking, confirming, or replying. */
+  private showNextAlert(): void {
+    // Already looking at it? Then it isn't news.
+    const here = JSON.stringify(this.screen);
+    this.alerts = this.alerts.filter(a => JSON.stringify(a.open) !== here);
+    const busy = ['listen', 'confirm', 'reply', 'textReply', 'approval', 'alert'].includes(this.screen.kind);
+    if (busy || !this.alerts.length) return;
+    if (!this.returnTo) this.returnTo = this.screen;
+    const alert = this.alerts[0];
+    // An approval is its own card; everything else gets an Open / Later pop-up.
+    if (alert.open.kind === 'approval') {
+      this.alerts.shift();
+      this.go(alert.open);
+    } else this.go({ kind: 'alert', alert });
+  }
+
+  /** Done with what a pop-up opened: back to where you were, then the next pop-up if any. */
+  private finish(): void {
+    const back = this.returnTo ?? { kind: 'home' as const };
+    this.returnTo = null;
+    this.go(back.kind === 'alert' || back.kind === 'approval' ? { kind: 'home' } : back);
+    this.showNextAlert();
+  }
+
+  /** The agent whose conversation should be fetched for the open agent page, if any. */
+  terminalTarget(): { machine: string; pane: string; window?: string; key: string } | null {
+    const s = this.screen;
+    const x = this.session();
+    if (s.kind !== 'agent' || !x || (!x.pane && !x.window)) return null;
+    return { machine: x.machine, pane: x.pane ?? '', ...(x.window ? { window: x.window } : {}), key: s.key };
+  }
+
+  setTerminal(key: string, lines: string[] | null): void {
+    if (this.screen.kind === 'agent' && this.screen.key === key) this.terminal = { key, lines: lines ?? ['(Could not read this agent.)'] };
+  }
+
+  private terminalLines(): string[] | null {
+    const s = this.screen;
+    if (s.kind !== 'agent' || this.terminal?.key !== s.key) return null;
+    return this.terminal.lines.flatMap(line => (line ? wrap(line) : ['']));
+  }
+
+  /** Speech-to-text result for the listen screen; empty or null means nothing usable. */
+  setTranscript(text: string | null, nowMs: number): void {
+    const s = this.screen;
+    if (s.kind !== 'listen') return;
+    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}) });
+    else {
+      this.showFlash(text === null ? 'Voice failed. Try again' : "Didn't catch that", nowMs);
+      this.go(s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : { kind: 'agent', key: s.key });
+    }
+  }
+
+  setError(message: string): void { this.error = message; }
+  goHome(): void { this.goTo('home'); }
+  /** Jump straight to a main page from the long-press menu (not while you're mid-recording). */
+  goTo(kind: 'home' | 'agents' | 'messages' | 'muse'): void {
+    if (this.screen.kind === 'listen') return;
+    this.returnTo = null;
+    this.go({ kind });
+    if (kind === 'muse') this.museLines = null;
+  }
+  setChat(messages: ChatMessage[] | null, nowMs: number): void {
+    this.chatLines = messages === null ? ['Could not load this chat.']
+      : [...messages].reverse().flatMap(m => wrap(`${m.fromMe ? 'Me' : m.from} (${age(m.when, nowMs)}): ${m.text}`));
+    this.scroll = Math.max(0, this.chatLines.length - BODY_LINES);
+  }
+  private chatAtBottom(): boolean { return this.scroll >= Math.max(0, (this.chatLines?.length ?? 0) - BODY_LINES); }
+  /** Show the newest part of a Muse answer (it is long-form; swipe up to read from the start). */
+  setMuseAnswer(question: string, reply: string): void {
+    this.museLines = [...wrap(`You: ${question}`), '', ...wrap(`Muse: ${reply}`)];
+    this.scroll = 0;
+  }
+  /** Muse didn't answer: say why, in the relay's own words. */
+  setMuseProblem(question: string, reason: string): void {
+    this.museLines = [...wrap(`You: ${question}`), '', ...wrap(`Muse didn't get it: ${reason || 'no answer'}.`), '', 'Nothing was typed anywhere else.'];
+    this.scroll = 0;
+  }
+  setMuse(latest: { question: string; reply: string } | null): void {
+    this.museLines = latest === null ? ["Couldn't reach Muse."]
+      : latest.question || latest.reply ? [...wrap(`You: ${latest.question}`), '', ...wrap(`Muse: ${latest.reply}`)] : ['No Muse conversation yet.'];
+    this.scroll = 0;
+  }
+  showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }
+
+  private go(screen: Screen): void {
+    this.screen = screen;
+    this.cursor = 0;
+    this.scroll = 0;
+    this.termScroll = 0;
+  }
+
+  private currentPending(): Pending | undefined {
+    const s = this.screen;
+    return s.kind === 'approval' ? this.data?.pending.find(p => p.machine === s.machine && p.id === s.id) : undefined;
+  }
+
+  private visibleSessions(): Session[] {
+    const all = this.data?.sessions ?? [];
+    return this.hideDone ? all.filter(s => s.state !== 'done' && s.state !== 'stopped') : all;
+  }
+
+  /** Home: the agent status bar, the menu of pages, and one row for anything waiting on you. */
+  private homeRows(): Row[] {
+    const d = this.data;
+    if (!d) return [];
+    const counts = new Map<string, number>();
+    for (const x of d.sessions) counts.set(x.state, (counts.get(x.state) ?? 0) + 1);
+    const summary = ['attention', 'error', 'working', 'done', 'stopped', 'idle']
+      .filter(state => counts.get(state))
+      .map(state => `${counts.get(state)} ${STATE_WORD[state]}`)
+      .join(' · ');
+    const rows: Row[] = [title(clip(`AGENTS │ ${summary || 'none running'}`, WIDTH - 2)), title(RULE)];
+    // The menu always comes first; anything waiting is one row that opens its own page.
+    const waiting = d.pending.length + this.notices.length;
+    rows.push(title('MENU'));
+    const online = d.machines.filter(m => m.online).length;
+    rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
+    if (d.messages) {
+      const unread = d.messages.filter(c => c.unread).length;
+      const top = d.messages[0];
+      const latest = top ? `${top.fromMe ? 'You' : top.name}: ${top.snippet}` : 'no recent texts';
+      rows.push({ text: clip(`Messages${unread ? ` · ${unread} new` : ''} · ${latest}`, WIDTH - 2), open: { kind: 'messages' } });
+    }
+    if (d.muse) rows.push({ text: 'Muse · latest reply', open: { kind: 'muse' } });
+    if (waiting) rows.push({ text: clip(`! Needs you · ${waiting}${d.pending.length ? ` (${d.pending.length} approval${d.pending.length === 1 ? '' : 's'})` : ''}`, WIDTH - 2), open: { kind: 'needs' } });
+    return rows;
+  }
+
+  /** Everything waiting on you: approvals first, then agents that finished. */
+  private needsRows(): Row[] {
+    const d = this.data;
+    if (!d) return [];
+    return [
+      ...d.pending.map(p => ({ text: clip(`! ${cap(p.agent)} · ${p.machine} · ${p.tool}: ${p.summary}`, WIDTH - 2), open: { kind: 'approval' as const, machine: p.machine, id: p.id } })),
+      ...this.notices.map(n => ({ text: clip(`* ${n.text}`, WIDTH - 2), open: { kind: 'agent' as const, key: n.key } })),
+    ];
+  }
+
+  /** One section per computer: its workspaces (if it has them), then agents you can talk to, then the rest. */
+  private agentRows(nowMs: number): Row[] {
+    const rows: Row[] = [];
+    const sessions = this.visibleSessions();
+    const machines = [...new Set([...(this.data?.machines ?? []).map(m => m.name), ...sessions.map(x => x.machine)])];
+    for (const machine of machines) {
+      // Fixed order (agent, project, terminal) so rows don't reshuffle on every refresh.
+      const talk = (x: Session) => (x.pane || x.window ? 0 : 1);
+      const mine = sessions.filter(x => x.machine === machine)
+        .sort((a, b) => talk(a) - talk(b) || a.name.localeCompare(b.name) || a.page.localeCompare(b.page) || sessionKey(a).localeCompare(sessionKey(b)));
+      const online = this.data?.machines.find(m => m.name === machine)?.online ?? true;
+      const desk = this.data?.desktops?.find(dk => dk.machine === machine);
+      if (!mine.length && !desk && online) continue;
+      rows.push(title(`── ${machine}${online ? '' : ' (offline)'} ──`));
+      if (desk?.workspaces.length) {
+        const list = desk.workspaces.map(w => (w.id === desk.active ? `[${w.id}]` : String(w.id))).join(' ');
+        rows.push({ text: clip(`Workspaces ${list} →`, WIDTH - 2), open: { kind: 'workspaces', machine } });
+      }
+      for (const x of mine) {
+        const ws = x.workspace ? `ws${x.workspace.split(',')[0]} · ` : '';
+        rows.push({
+          text: clip(`${ws}${MARK[x.state] ?? '-'} ${x.name} · ${x.page || 'no project'} · ${STATE_WORD[x.state] ?? x.state}${x.at ? ` ${age(x.at, nowMs)}` : ''}${x.pane || x.window ? ' [talk]' : ''}`, WIDTH - 2),
+          open: { kind: 'agent', key: sessionKey(x) },
+        });
+      }
+    }
+    return rows;
+  }
+
+  /** The "replies" page under an agent: quick replies, then Show on screen. */
+  private replyChoices(x: Session | undefined): string[] {
+    if (!x) return [];
+    return [...(x.pane || x.window ? QUICK_REPLIES : []), ...(x.workspace ? [`Show on screen (workspace ${x.workspace})`] : [])];
+  }
+
+  private workspaceRows(): { row: Row; machine: string; id: number }[] {
+    const only = this.screen.kind === 'workspaces' ? this.screen.machine : undefined;
+    return (this.data?.desktops ?? []).filter(desk => !only || desk.machine === only).flatMap(desk => desk.workspaces.map(w => ({
+      machine: desk.machine,
+      id: w.id,
+      row: { text: clip(`${desk.machine} ${w.id}${w.id === desk.active ? ' (here)' : ''} · ${w.windows[0] ?? ''}${w.windows.length > 1 ? ` +${w.windows.length - 1}` : ''}`, WIDTH - 2) },
+    })));
+  }
+
+  private listRows(nowMs: number): Row[] {
+    if (this.screen.kind === 'reply') return this.replyChoices(this.session()).map(text => ({ text }));
+    if (this.screen.kind === 'textReply') return QUICK_TEXTS.map(text => ({ text }));
+    if (this.screen.kind === 'confirm') return CONFIRM_CHOICES.map(text => ({ text }));
+    if (this.screen.kind === 'workspaces') return this.workspaceRows().map(w => w.row);
+    if (this.screen.kind === 'home') return this.homeRows();
+    if (this.screen.kind === 'needs') return this.needsRows();
+    if (this.screen.kind === 'agents') return this.agentRows(nowMs);
+    if (this.screen.kind === 'messages') {
+      return (this.data?.messages ?? []).map(c => ({
+        text: clip(`${c.unread ? '*' : ' '} ${c.name} ${age(c.when, nowMs)}: ${c.fromMe ? 'You: ' : ''}${c.snippet}`, WIDTH - 2),
+        open: { kind: 'chat', id: c.id, name: c.name },
+      }));
+    }
+    if (this.screen.kind === 'approval') return APPROVAL_CHOICES.map(c => ({ text: c.label }));
+    return [];
+  }
+
+  private session(): Session | undefined {
+    const s = this.screen;
+    const key = 'key' in s ? s.key : undefined;
+    return key ? this.data?.sessions.find(x => sessionKey(x) === key) : undefined;
+  }
+
+  /** Apply one tap or swipe. Returns work for the network layer, if any. */
+  input(input: Input, nowMs: number): Action | null {
+    const s = this.screen;
+    if (s.kind === 'alert') {
+      this.alerts = this.alerts.filter(a => a.id !== s.alert.id);
+      if (input === 'back' || (input === 'select' && this.cursor === 1)) { this.finish(); return null; }
+      if (input === 'up' || input === 'down') { this.cursor = input === 'down' ? 1 : 0; this.alerts.unshift(s.alert); return null; }
+      const target = s.alert.open;
+      if (target.kind === 'agent') this.notices = this.notices.filter(n => n.key !== target.key);
+      this.go(target);
+      if (target.kind === 'chat') { this.chatLines = null; return { kind: 'loadChat', id: target.id }; }
+      return null;
+    }
+    // Double-tap out of something a pop-up opened returns to where you were.
+    if (input === 'back' && this.returnTo && ['agent', 'chat'].includes(s.kind)) { this.finish(); return null; }
+    if (s.kind === 'listen') {
+      if (input === 'back') { this.go(s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : { kind: 'agent', key: s.key }); return { kind: 'cancelMic' }; }
+      if (input === 'select' && !s.thinking) { this.screen = { ...s, thinking: true }; return { kind: 'stopMic' }; }
+      return null;
+    }
+    if (input === 'back') {
+      // One double-tap always gets you home; only a chat and the reply/confirm steps go back one level.
+      if (s.kind === 'chat') this.go({ kind: 'messages' });
+      else if (s.kind === 'textReply') this.go({ kind: 'chat', id: s.id, name: s.name });
+      else if (s.kind === 'confirm' && s.chat) this.go({ kind: 'chat', ...s.chat });
+      else if (s.kind === 'confirm' && s.muse) this.go({ kind: 'muse' });
+      else if (s.kind === 'reply' || s.kind === 'confirm') this.go({ kind: 'agent', key: s.key });
+      else this.go({ kind: 'home' });
+      return null;
+    }
+    if (s.kind === 'chat') {
+      // A text conversation: tap replies by voice, swipe scrolls, swipe down at the newest opens quick texts.
+      const chat = { id: s.id, name: s.name };
+      if (input === 'select') {
+        if (this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, chat }); return { kind: 'startMic' }; }
+        this.go({ kind: 'textReply', ...chat });
+        return null;
+      }
+      const max = Math.max(0, (this.chatLines?.length ?? 0) - BODY_LINES);
+      if (input === 'up') this.scroll = Math.max(0, this.scroll - 3);
+      if (input === 'down') {
+        if (this.chatAtBottom()) this.go({ kind: 'textReply', ...chat });
+        else this.scroll = Math.min(max, this.scroll + 3);
+      }
+      return null;
+    }
+    if (s.kind === 'textReply' && input === 'select') {
+      const text = QUICK_TEXTS[this.cursor];
+      // A text is one and done: if a pop-up brought you here, sending closes it.
+      if (this.returnTo && text) this.finish();
+      else this.go({ kind: 'chat', id: s.id, name: s.name });
+      return text ? { kind: 'sendText', chat: s.id, name: s.name, text } : null;
+    }
+    if (s.kind === 'confirm' && s.chat && input === 'select') {
+      const choice = CONFIRM_CHOICES[this.cursor];
+      if (choice === 'Talk again') { this.go({ kind: 'listen', key: '', thinking: false, chat: s.chat }); return { kind: 'startMic' }; }
+      if (choice === 'Send' && this.returnTo) this.finish();
+      else this.go({ kind: 'chat', ...s.chat });
+      return choice === 'Send' ? { kind: 'sendText', chat: s.chat.id, name: s.chat.name, text: s.text } : null;
+    }
+    if (s.kind === 'confirm' && s.muse && input === 'select') {
+      const choice = CONFIRM_CHOICES[this.cursor];
+      if (choice === 'Talk again') { this.go({ kind: 'listen', key: '', thinking: false, muse: true }); return { kind: 'startMic' }; }
+      this.go({ kind: 'muse' });
+      if (choice !== 'Send') return null;
+      this.museLines = [...wrap(`You: ${s.text}`), '', 'Muse is thinking…'];
+      return { kind: 'askMuse', text: s.text };
+    }
+    if (s.kind === 'muse' && input === 'select') {
+      if (!this.data?.voice) return null;
+      this.go({ kind: 'listen', key: '', thinking: false, muse: true });
+      return { kind: 'startMic' };
+    }
+    if (s.kind === 'muse') {
+      const lines = this.museLines ?? [];
+      const max = Math.max(0, lines.length - BODY_LINES);
+      if (input === 'up') this.scroll = Math.max(0, this.scroll - 3);
+      if (input === 'down') this.scroll = Math.min(max, this.scroll + 3);
+      return null;
+    }
+    if (s.kind === 'agent') {
+      // Terminal view: tap talks, swipe up scrolls back, swipe down at the bottom opens replies.
+      const x = this.session();
+      if (!x) return null;
+      const total = this.terminalLines()?.length ?? 0;
+      if (input === 'up') { this.termScroll = Math.min(this.termScroll + 3, Math.max(0, total - TERM_LINES)); return null; }
+      if (input === 'down') {
+        if (this.termScroll > 0) { this.termScroll = Math.max(0, this.termScroll - 3); return null; }
+        if (this.replyChoices(x).length) this.go({ kind: 'reply', key: s.key });
+        return null;
+      }
+      if ((x.pane || x.window) && this.data?.voice) { this.go({ kind: 'listen', key: s.key, thinking: false }); return { kind: 'startMic' }; }
+      if (this.replyChoices(x).length) this.go({ kind: 'reply', key: s.key });
+      return null;
+    }
+    const rows = this.listRows(nowMs).filter(r => !r.header);
+    if (input === 'up') { this.cursor = Math.max(0, this.cursor - 1); return null; }
+    if (input === 'down') { this.cursor = Math.min(Math.max(0, rows.length - 1), this.cursor + 1); return null; }
+    // select
+    if (s.kind === 'approval') {
+      const choice = APPROVAL_CHOICES[this.cursor];
+      this.finish();
+      return choice ? { kind: 'decide', machine: s.machine, id: s.id, behavior: choice.behavior } : null;
+    }
+    if (s.kind === 'reply' || s.kind === 'confirm') {
+      const session = this.session();
+      if (!session) { this.go({ kind: 'agents' }); return null; }
+      const target = { kind: 'prompt' as const, machine: session.machine, pane: session.pane ?? '', ...(session.window ? { window: session.window } : {}) };
+      if (s.kind === 'reply') {
+        const text = this.replyChoices(session)[this.cursor];
+        this.go({ kind: 'agent', key: s.key });
+        if (!text) return null;
+        if (text.startsWith('Show on screen')) return { kind: 'focus', machine: session.machine, workspace: session.workspace };
+        return text === 'Stop (Esc)' ? { ...target, key: 'Escape' } : { ...target, text };
+      }
+      const choice = CONFIRM_CHOICES[this.cursor];
+      if (choice === 'Send') { this.go({ kind: 'agent', key: s.key }); return { ...target, text: s.text }; }
+      if (choice === 'Talk again') { this.go({ kind: 'listen', key: s.key, thinking: false }); return { kind: 'startMic' }; }
+      this.go({ kind: 'agent', key: s.key });
+      return null;
+    }
+    if (s.kind === 'workspaces') {
+      const w = this.workspaceRows()[this.cursor];
+      return w ? { kind: 'focus', machine: w.machine, workspace: String(w.id) } : null;
+    }
+    const target = rows[this.cursor]?.open;
+    if (!target) return null;
+    if (target.kind === 'agent') this.notices = this.notices.filter(n => n.key !== target.key);
+    this.go(target);
+    if (target.kind === 'chat') { this.chatLines = null; return { kind: 'loadChat', id: target.id }; }
+    if (target.kind === 'muse') { this.museLines = null; return { kind: 'loadMuse' }; }
+    return null;
+  }
+
+  private header(nowMs: number, timeZone?: string): string {
+    if (this.flash.text && nowMs < this.flash.until) return this.flash.text;
+    const parts = [clock(nowMs, timeZone)];
+    const w = this.data?.weather;
+    if (w) parts.push(`${w.temp}° ${w.desc}${w.rainAt ? ` · rain ${w.rainAt}` : ''}`);
+    if (this.battery !== undefined) parts.push(`${this.battery}%`);
+    if (this.data?.paused) parts.push('approvals paused');
+    return clip(parts.join('   '));
+  }
+
+  private list(rows: Row[]): string[] {
+    const items = rows.filter(r => !r.header);
+    this.cursor = Math.min(this.cursor, Math.max(0, items.length - 1));
+    const selected = rows.indexOf(items[this.cursor]);
+    const start = Math.min(Math.max(0, selected - Math.floor(LIST_ROWS / 2)), Math.max(0, rows.length - LIST_ROWS));
+    return rows.slice(start, start + LIST_ROWS).map((r, i) => r.header ? r.text : `${start + i === selected ? '>' : ' '} ${r.text}`);
+  }
+
+  private body(lines: string[] | null, loading: string): string[] {
+    if (lines === null) return [loading];
+    const view = lines.slice(this.scroll, this.scroll + BODY_LINES);
+    if (this.scroll + BODY_LINES < lines.length) view.push('  ▼');
+    return view;
+  }
+
+  /** The full text block for the glasses. */
+  render(nowMs: number, timeZone?: string): string {
+    const lines = [this.header(nowMs, timeZone), ''];
+    const s = this.screen;
+    if (!this.data) {
+      lines.push(this.error || 'Connecting to your computers…');
+      return lines.join('\n');
+    }
+    if (s.kind === 'home') {
+      lines.push(...this.list(this.homeRows()));
+      const offline = this.data.machines.filter(m => !m.online).map(m => m.name);
+      if (this.error) lines.push(clip(`Offline: ${this.error}`));
+      else if (offline.length) lines.push(`Offline: ${offline.join(', ')}`);
+    } else if (s.kind === 'needs') {
+      lines[0] = 'HOME › NEEDS YOU';
+      const rows = this.needsRows();
+      lines.push(...(rows.length ? this.list(rows) : ['Nothing is waiting on you.']));
+    } else if (s.kind === 'agents') {
+      lines[0] = 'HOME › AGENTS';
+      const rows = this.agentRows(nowMs);
+      lines.push(...(rows.some(r => !r.header) ? this.list(rows) : ['No agents running right now.']));
+    } else if (s.kind === 'approval') {
+      const p = this.currentPending();
+      lines[0] = clip(`APPROVE? ${cap(p?.agent ?? '')} on ${s.machine} · ${p?.page ?? ''}`);
+      lines.push(...wrap(`${p?.tool ?? ''}: ${p?.summary ?? ''}`).slice(0, 4), '');
+      lines.push(...this.list(this.listRows(nowMs)));
+    } else if (s.kind === 'agent') {
+      const x = this.session();
+      if (!x) lines.push('This session has ended.');
+      else {
+        const promptable = Boolean(x.pane || x.window);
+        lines.splice(0, 2, clip(`${x.name.toUpperCase()} · ${x.machine} · ${x.page || 'no project'} · ${STATE_WORD[x.state] ?? x.state}`));
+        if (!promptable) {
+          lines.push('', clip(`This chat is in the ${x.agent === 'codex' ? 'Codex' : 'Claude'} app, so it can't`), clip(`be shown or prompted here. Use a [talk] agent on ${x.machine}.`));
+          if (x.workspace) lines.push('', '▼ swipe down: show on screen');
+        } else {
+          const all = this.terminalLines();
+          if (all === null) lines.push('Loading…');
+          else {
+            const end = all.length - this.termScroll;
+            const view = all.slice(Math.max(0, end - TERM_LINES), end);
+            lines.push(...view, ...Array(TERM_LINES - view.length).fill(''));
+          }
+          lines.push(this.termScroll ? 'swipe up: scroll · down: newer' : `${this.data.voice ? 'tap: talk · ' : ''}swipe up: scroll · down: quick replies`);
+        }
+      }
+    } else if (s.kind === 'workspaces') {
+      lines[0] = `AGENTS › ${s.machine ? `${s.machine.toUpperCase()} ` : ''}WORKSPACES`;
+      const rows = this.listRows(nowMs);
+      lines.push(...(rows.length ? this.list(rows) : ['No workspaces reported.']));
+    } else if (s.kind === 'alert') {
+      const more = this.alerts.filter(a => a.id !== s.alert.id).length;
+      lines[0] = clip(`${s.alert.title}${more ? `  (+${more})` : ''}`);
+      lines.push(...wrap(s.alert.detail).slice(0, 4), '', `${this.cursor === 0 ? '>' : ' '} Open`, `${this.cursor === 1 ? '>' : ' '} Later`, '', 'tap: open · double-tap: later');
+    } else if (s.kind === 'textReply') {
+      lines[0] = clip(`QUICK TEXT → ${s.name}`);
+      lines.push(...this.list(this.listRows(nowMs)));
+    } else if ((s.kind === 'confirm' || s.kind === 'listen') && s.muse) {
+      if (s.kind === 'listen') {
+        lines[0] = 'ASK MUSE';
+        lines.push(s.thinking ? 'Turning speech into text…' : 'Listening… ask Muse anything.', '', s.thinking ? '' : 'Tap when done. Double-tap to cancel.');
+      } else {
+        lines[0] = 'ASK MUSE?';
+        lines.push(...wrap(`"${s.text}"`).slice(0, 4), '');
+        lines.push(...this.list(this.listRows(nowMs)));
+      }
+    } else if ((s.kind === 'confirm' || s.kind === 'listen') && s.chat) {
+      if (s.kind === 'listen') {
+        lines[0] = clip(`TEXT → ${s.chat.name}`);
+        lines.push(s.thinking ? 'Turning speech into text…' : 'Listening… speak your text.', '', s.thinking ? '' : 'Tap when done. Double-tap to cancel.');
+      } else {
+        lines[0] = clip(`TEXT TO ${s.chat.name.toUpperCase()}?`);
+        lines.push(...wrap(`"${s.text}"`).slice(0, 4), '');
+        lines.push(...this.list(this.listRows(nowMs)));
+      }
+    } else if (s.kind === 'reply' || s.kind === 'confirm' || s.kind === 'listen') {
+      const x = this.session();
+      const who = x ? `${x.name} · ${x.machine}` : 'agent';
+      if (s.kind === 'reply') {
+        lines[0] = clip(`QUICK REPLY → ${who}`);
+        lines.push(...this.list(this.listRows(nowMs)));
+      } else if (s.kind === 'listen') {
+        lines[0] = clip(`TALK → ${who}`);
+        lines.push(s.thinking ? 'Turning speech into text…' : 'Listening… speak now.', '', s.thinking ? '' : 'Tap when done. Double-tap to cancel.');
+      } else {
+        lines[0] = clip(`SEND TO ${who.toUpperCase()}?`);
+        lines.push(...wrap(`"${s.text}"`).slice(0, 4), '');
+        lines.push(...this.list(this.listRows(nowMs)));
+      }
+    } else if (s.kind === 'messages') {
+      lines[0] = 'HOME › MESSAGES';
+      const rows = this.listRows(nowMs);
+      lines.push(...(rows.length ? this.list(rows) : ['No recent texts.']));
+      lines.push('Tap a chat to read and reply');
+    } else if (s.kind === 'chat') {
+      lines[0] = clip(`MESSAGES › ${s.name}`);
+      lines.push(...this.body(this.chatLines, 'Loading…'));
+      if (this.chatLines) lines.push(this.chatAtBottom() ? `${this.data.voice ? 'tap: reply by voice · ' : ''}swipe up: scroll · down: quick texts` : 'swipe up/down: scroll');
+    } else if (s.kind === 'muse') {
+      lines[0] = 'HOME › MUSE';
+      lines.push(...this.body(this.museLines, 'Reading Muse…'), this.data.voice ? 'tap: ask Muse by voice · swipe: scroll' : 'swipe: scroll');
+    }
+    // Short confirmations ("Sent", "Allowed", "… finished") replace the title on every page.
+    if (this.flash.text && nowMs < this.flash.until) lines[0] = clip(this.flash.text);
+    return lines.slice(0, MAX_LINES).join('\n');
+  }
+}
+
+function cap(text: string): string { return text ? text[0].toUpperCase() + text.slice(1) : text; }

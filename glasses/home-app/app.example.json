@@ -1,0 +1,30 @@
+{
+  "package_id": "com.piebird.home",
+  "edition": "202601",
+  "name": "Home",
+  "version": "0.3.6",
+  "min_app_version": "2.2.10",
+  "min_sdk_version": "0.0.16",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Reads agent status, approvals and your message list from your own computers over your private Tailscale network.",
+      "whitelist": [
+        "https://your-hub-1.your-tailnet.ts.net",
+        "https://your-hub-2.your-tailnet.ts.net"
+      ]
+    },
+    {
+      "name": "g2-microphone",
+      "desc": "Lets you speak a prompt to one of your agents. Audio goes only to your own computer, which turns it into text."
+    },
+    {
+      "name": "location",
+      "desc": "Shows the weather for where you are on the top line. Your location goes only to your own computer, rounded to about a kilometer."
+    }
+  ],
+  "supported_languages": [
+    "en"
+  ]
+}

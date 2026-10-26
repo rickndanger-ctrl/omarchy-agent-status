@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# ag: start an agent inside tmux so the G2 glasses can send it prompts.
+#   ag claude [args…]    ag codex [args…]    ag hermes [args…]
+# It runs in this terminal window as usual; tmux just lets Home type into it.
+# Inside tmux already? It simply runs the agent.
+set -euo pipefail
+if [ $# -lt 1 ]; then
+  echo "usage: ag claude|codex|hermes [args…]" >&2
+  exit 2
+fi
+agent=$1
+if ! command -v "$agent" >/dev/null 2>&1; then
+  echo "ag: $agent is not installed or not on PATH" >&2
+  exit 127
+fi
+if [ -n "${TMUX:-}" ] || ! command -v tmux >/dev/null 2>&1; then
+  exec "$@"
+fi
+base="$agent-$(basename "$PWD" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-24)"
+name=$base
+n=2
+while tmux has-session -t "=$name" 2>/dev/null; do
+  name="$base-$n"
+  n=$((n + 1))
+done
+exec tmux new-session -s "$name" -c "$PWD" "$(printf '%q ' "$@")"

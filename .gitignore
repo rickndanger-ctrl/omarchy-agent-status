@@ -2,3 +2,8 @@
 macos/.build/
 *.pyc
 __pycache__/
+glasses/home-app/node_modules/
+glasses/home-app/dist/
+*.ehpk
+glasses/home-app/.env.local
+glasses/home-app/app.json

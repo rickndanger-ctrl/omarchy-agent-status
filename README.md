@@ -130,3 +130,44 @@ The code is MIT licensed. See `LICENSE`.
 
 `macos/` holds a Swift port of this widget (logic + AppKit bar and popup +
 command-line bridge) for OMAC on the Mac. See `macos/README.md`.
+
+## Even G2 glasses: Home
+
+`glasses/` adds a home screen for Even Realities G2 glasses: the day and time,
+every agent session on every machine, Claude Code permission prompts you can
+allow or deny with a tap, your recent texts (read-only), and Muse's latest
+reply (read-only, fetched only when you open it).
+
+- `glasses/hud-server.mjs`: one small Node server per machine (`node` mode)
+  plus one `hub` (Mac mini 1) that gathers the nodes over Tailscale. No
+  dependencies. Approvals are kept in memory only.
+- `glasses/approve_hook.py`: a Claude Code `PermissionRequest` hook. It waits
+  for the glasses only while the Home app is open and polling; otherwise it
+  exits at once and the terminal prompt works as before. The terminal prompt
+  stays usable while it waits, and answering there clears the glasses card.
+- `glasses/home-app/`: the Even Hub app (Vite + `@evenrealities/even_hub_sdk`).
+
+Install on a machine (adds the hook and starts the server on port 5182):
+
+```sh
+python3 setup_integrations.py --glasses --machine lap        # laptop
+python3 setup_integrations.py --glasses --machine m1 --hub   # Mac mini 1
+python3 setup_integrations.py --glasses --remove             # undo
+```
+
+Build and try the app:
+
+```sh
+cd glasses/home-app && npm ci && npm run build   # the server serves dist/
+npx evenhub qr -e --url "http://<tailscale-ip>:5182/?t=$(cat ~/.config/agent-glasses/token)"
+```
+
+On the glasses: swipe to move, tap to open, double-tap to go back, long press
+for Refresh / Pause approvals / Hide finished agents. Approval cards put
+"Leave for desk" first, so a stray tap never approves anything.
+
+Your own addresses stay out of git: put the hub list in `glasses/home-app/.env.local`
+(`VITE_HUBS=https://hub-1.your-tailnet.ts.net/hud/,https://hub-2.…/hud/`), copy
+`glasses/home-app/app.example.json` to `app.json` with the same hosts in its network
+whitelist, and put the health-check hosts in `~/.config/agent-glasses/check.conf`
+(see the top of `glasses/check-all.sh`). Run `bash glasses/check-all.sh` anytime.

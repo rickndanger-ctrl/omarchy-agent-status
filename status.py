@@ -309,6 +309,40 @@ def collect():
     return selected
 
 
+def sessions():
+    """Every recent session, not just one per agent: the glasses list shows them all."""
+    now = time.time()
+    definitions = agent_definitions()
+    items = codex_sessions()
+    if EVENTS.is_dir():
+        for path in EVENTS.glob("*/*.json"):
+            # Event files only matter for an hour; drop week-old ones so the folder never grows without bound.
+            try:
+                if now - path.stat().st_mtime > 7 * 86400:
+                    path.unlink()
+                    continue
+            except OSError:
+                continue
+            record = read_json(path)
+            if isinstance(record, dict) and record.get("agent") in definitions:
+                items.append(record)
+    workspaces = window_workspaces(definitions)
+    result = []
+    for record in items:
+        at = float(record.get("at", 0))
+        state = record.get("state")
+        if now - at > 3600 or state not in PRIORITY or state == "idle":
+            continue
+        agent = record["agent"]
+        result.append({
+            "agent": agent, "name": definitions[agent]["name"], "session": record.get("session", ""),
+            "state": state, "page": record.get("page", ""), "at": at,
+            "workspace": ",".join(str(number) for number in sorted(workspaces[agent])),
+        })
+    result.sort(key=lambda r: (PRIORITY[r["state"]], r["at"]), reverse=True)
+    return result
+
+
 def play_sound(name):
     file = SOUNDS.get(name, "")
     if file and pathlib.Path(file).is_file():
@@ -337,9 +371,11 @@ def poll():
 def main():
     args = sys.argv[1:]
     if not args:
-        raise SystemExit("usage: status.py poll | claude-hook EVENT | event-stdin | event AGENT SESSION STATE [PAGE] | sound STATE NAME | preview NAME")
+        raise SystemExit("usage: status.py poll | sessions | claude-hook EVENT | event-stdin | event AGENT SESSION STATE [PAGE] | sound STATE NAME | preview NAME")
     if args[0] == "poll":
         poll()
+    elif args == ["sessions"]:
+        print(json.dumps({"sessions": sessions(), "at": time.time()}, ensure_ascii=False))
     elif args[0] == "claude-hook" and len(args) == 2:
         claude_hook(args[1])
     elif args == ["event-stdin"]:
