@@ -34,12 +34,18 @@ let recording: Uint8Array[] | null = null;
 let status = 'Starting…';
 
 const MENU = { refresh: 1, pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7 };
+let lastDevice = '';
 const glasses = new Glasses({
   onInput: input => handle(input),
   onMenu: id => void menu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
   onForeground: on => { foreground = on; if (on) void poll(); },
-  onDevice: d => { if (d.battery !== undefined) model.battery = d.battery; paint(); },
+  onDevice: d => {
+    // Log what the Even app reports when it changes, so a missing battery level can be traced.
+    if (d.raw !== lastDevice) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
+    if (typeof d.battery === 'number') model.battery = d.battery;
+    paint();
+  },
   onLifecycle: event => diag('lifecycle', event),
   onSlowRender: ms => diag('render.slow', `${ms} ms on ${model.screenKind}`),
   onAudio: pcm => {

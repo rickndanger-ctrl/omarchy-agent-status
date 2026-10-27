@@ -24,7 +24,8 @@ export interface GlassesOptions {
   onMenu: (id: number) => void;
   onStatus: (status: string) => void;
   onForeground: (foreground: boolean) => void;
-  onDevice: (device: { battery?: number; wearing?: boolean }) => void;
+  /** `raw` is what the Even app sent, for diagnostics. */
+  onDevice: (device: { battery?: number; wearing?: boolean; raw: string }) => void;
   onAudio: (pcm: Uint8Array) => void;
   onSlowRender?: (ms: number) => void;
   onLifecycle?: (event: string) => void;
@@ -69,6 +70,7 @@ export class Glasses {
   private renderBlocked = false;
   private lastRenderAt = -Infinity;
   private pressing = false;
+  private deviceTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly options: GlassesOptions, private readonly menu: MenuItem[]) {}
 
@@ -94,11 +96,14 @@ export class Glasses {
       this.sdk = await bounded(waitForEvenAppBridge(), stage);
       if (epoch !== this.epoch) return false;
       this.sdk.onEvenHubEvent(event => this.onEvent(event));
-      this.sdk.onDeviceStatusChanged(status => this.options.onDevice({ battery: status.batteryLevel, wearing: status.isWearing }));
-      void this.sdk.getDeviceInfo().then(info => {
+      this.sdk.onDeviceStatusChanged(status => this.options.onDevice({ battery: status.batteryLevel, wearing: status.isWearing, raw: JSON.stringify(status) }));
+      // The status push may only come on a change, so also ask now and every minute (battery drains quietly).
+      const ask = () => this.sdk?.getDeviceInfo().then(info => {
         const status = (info as unknown as { status?: { batteryLevel?: number; isWearing?: boolean } } | null)?.status;
-        if (status) this.options.onDevice({ battery: status.batteryLevel, wearing: status.isWearing });
-      }).catch(() => {});
+        this.options.onDevice({ battery: status?.batteryLevel, wearing: status?.isWearing, raw: JSON.stringify(info) });
+      }).catch(error => this.options.onDevice({ raw: `error: ${reason(error)}` }));
+      void ask();
+      if (!this.deviceTimer) this.deviceTimer = setInterval(() => void ask(), 60_000);
       stage = this.pageCreated ? 'Glasses display resume' : 'Glasses display startup';
       const displayed = this.content;
       const text = new TextContainerProperty({
