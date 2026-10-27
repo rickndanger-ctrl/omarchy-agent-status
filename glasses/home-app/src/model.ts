@@ -243,7 +243,11 @@ export class HomeModel {
     if (alert.open.kind === 'approval') {
       this.alerts.shift();
       this.go(alert.open);
-    } else this.go({ kind: 'alert', alert });
+    } else {
+      this.go({ kind: 'alert', alert });
+      // "Later" is selected, so a stray touch on the glasses' arm dismisses the pop-up instead of opening a chat.
+      this.cursor = 1;
+    }
   }
 
   /** Done with what a pop-up opened: back to where you were, then the next pop-up if any. */
@@ -742,7 +746,7 @@ export class HomeModel {
     } else if (s.kind === 'alert') {
       const more = this.alerts.filter(a => a.id !== s.alert.id).length;
       lines[0] = clip(`${s.alert.title}${more ? `  (+${more})` : ''}`);
-      lines.push(...wrap(s.alert.detail).slice(0, 4), '', `${this.cursor === 0 ? '>' : ' '} Open`, `${this.cursor === 1 ? '>' : ' '} Later`, '', 'tap: open · double-tap: later');
+      lines.push(...wrap(s.alert.detail).slice(0, 4), '', `${this.cursor === 0 ? '>' : ' '} Open`, `${this.cursor === 1 ? '>' : ' '} Later`, '', this.cursor === 0 ? 'tap: open · double-tap: later' : 'swipe up: Open · tap: later');
     } else if (s.kind === 'textReply') {
       lines[0] = clip(`QUICK TEXT → ${s.name}`);
       lines.push(...this.list(this.listRows(nowMs)));

@@ -115,7 +115,9 @@ test('a finished agent pops up; Open goes to it, and double-tap returns to where
   assert.equal(m.screenKind, 'alert');
   let text = m.render(NOW + 5000);
   assert.match(text, /^DONE · Claude · Mini 1/);
-  assert.match(text, /> Open\n  Later/);
+  assert.match(text, /  Open\n> Later/, 'Later is selected, so a stray touch does not open a chat');
+  m.input('up', NOW + 5000);
+  assert.match(m.render(NOW + 5000), /> Open\n  Later/);
   m.input('select', NOW + 5000);
   assert.equal(m.screenKind, 'agent');
   m.input('back', NOW + 5000);
@@ -143,6 +145,7 @@ test('a new text pops up; sending a reply from it closes it and returns you', ()
   m.update(withChat().messages ? { ...withChat(), messages: [{ id: 7, name: 'Mom', unread: true, when: NOW / 1000 + 5, snippet: 'Call me', fromMe: false }] } : withChat());
   assert.equal(m.screenKind, 'alert');
   assert.match(m.render(NOW), /^TEXT · Mom\n\nCall me\n/);
+  m.input('up', NOW); // to Open
   assert.deepEqual(m.input('select', NOW), { kind: 'loadChat', id: 7 });
   m.setChat([{ from: 'Mom', fromMe: false, when: NOW / 1000, text: 'Call me' }], NOW);
   m.input('down', NOW); // quick texts

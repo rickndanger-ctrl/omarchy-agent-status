@@ -70,6 +70,8 @@ export class Glasses {
   private renderBlocked = false;
   private lastRenderAt = -Infinity;
   private pressing = false;
+  /** Taps before this time are dropped: the tap that brings Home back to the front isn't meant for Home. */
+  private quietUntil = 0;
   private deviceTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly options: GlassesOptions, private readonly menu: MenuItem[]) {}
@@ -185,6 +187,7 @@ export class Glasses {
     if (system?.eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
       this.options.onLifecycle?.('foreground-enter');
       this.foreground = true;
+      this.quietUntil = Date.now() + 1000;
       this.renderBlocked = false;
       this.options.onForeground(true);
       this.scheduleRender();
@@ -220,12 +223,15 @@ export class Glasses {
       this.options.onLifecycle?.('foreground-assumed');
       this.options.onForeground(true);
       this.scheduleRender();
+      // That tap is what brought Home back (closing the glasses menu, waking the display): don't act on it.
+      this.quietUntil = Date.now() + 1000;
     }
     if (event.menuItemClickEvent?.itemID) {
       this.options.onMenu(event.menuItemClickEvent.itemID);
       return;
     }
     if (!this.connected || !this.foreground || system?.imuData) return;
+    if (Date.now() < this.quietUntil) { this.options.onLifecycle?.('input-ignored (just came to front)'); return; }
     // Official minimal template: taps normally arrive as sysEvent, scrolling as textEvent.
     // Only default to a click inside an actual envelope; empty or audio events aren't taps.
     const types = [event.sysEvent, event.textEvent, event.listEvent]

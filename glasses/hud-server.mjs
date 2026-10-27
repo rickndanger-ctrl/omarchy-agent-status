@@ -1280,11 +1280,11 @@ async function handle(req, res) {
       if (pcm.length < 3200) return send(res, 200, { text: '' })
       return send(res, 200, { text: await transcribe(pcm) })
     }
-    // Step-by-step app diagnostics (names and sizes only, never audio or words), last 100 in memory.
+    // Step-by-step app diagnostics (names and sizes only, never audio or words), last 1000 in memory.
     if (req.method === 'POST' && p === '/api/diag') {
       const b = await readBody(req)
       diagnostics.push({ at: new Date().toISOString(), name: clip(b.name, 40), detail: clip(b.detail, 160) })
-      if (diagnostics.length > 100) diagnostics.shift()
+      if (diagnostics.length > 1000) diagnostics.shift()
       return send(res, 200, { ok: true })
     }
     if (req.method === 'GET' && p === '/api/diag') return send(res, 200, { diagnostics })
