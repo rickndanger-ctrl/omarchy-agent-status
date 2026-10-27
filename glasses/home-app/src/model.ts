@@ -361,36 +361,51 @@ export class HomeModel {
     ];
   }
 
-  /** One section per computer: its workspaces (if it has them), then agents you can talk to, then the rest. */
+  /**
+   * Three sections, so the chats you talk to are never buried:
+   *   Talk     the live terminal agents (Claude/Codex sessions Home types into), every computer
+   *   Threads  app threads and other chats, to read (Codex app threads can still be answered)
+   *   Computers  + New agent, and workspaces
+   * Order is fixed (computer, agent, project) so rows don't reshuffle on every refresh.
+   */
   private agentRows(nowMs: number): Row[] {
     const rows: Row[] = [];
     const sessions = this.visibleSessions();
     const machines = [...new Set([...(this.data?.machines ?? []).map(m => m.name), ...sessions.map(x => x.machine)])];
+    const order = (a: Session, b: Session) => machines.indexOf(a.machine) - machines.indexOf(b.machine) ||
+      a.name.localeCompare(b.name) || a.page.localeCompare(b.page) || sessionKey(a).localeCompare(sessionKey(b));
+    const when = (x: Session) => `${STATE_WORD[x.state] ?? x.state}${x.at ? ` ${age(x.at, nowMs)}` : ''}`;
+    const terminal = (x: Session) => Boolean(x.pane || x.window);
+
+    const talk = sessions.filter(terminal).sort(order);
+    if (talk.length) rows.push(title('── Talk ──'));
+    for (const x of talk) {
+      const ws = x.workspace && x.window ? ` ws${x.workspace.split(',')[0]}` : '';
+      rows.push({ text: clip(`${MARK[x.state] ?? '-'} ${x.name} · ${x.machine}${ws} · ${x.page || 'no project'} · ${when(x)}`, WIDTH - 2), open: { kind: 'agent', key: sessionKey(x) } });
+    }
+
+    const kind = (x: Session) => (x.appThread ? 0 : x.desktopSession ? 1 : 2);
+    const threads = sessions.filter(x => !terminal(x)).sort((a, b) => machines.indexOf(a.machine) - machines.indexOf(b.machine) || kind(a) - kind(b) || order(a, b));
+    if (threads.length) rows.push(title('── Threads ──'));
+    for (const x of threads) {
+      // Threads are mostly idle; only say the state when it isn't ("ready" would just crowd the line).
+      const state = x.state === 'idle' ? (x.at ? ` · ${age(x.at, nowMs)}` : '') : ` · ${when(x)}`;
+      const tag = x.desktopSession ? ' [continue]' : '';
+      rows.push({ text: clip(`${MARK[x.state] ?? '-'} ${x.name} · ${x.machine} · ${x.page || 'no project'}${tag}${state}`, WIDTH - 2), open: { kind: 'agent', key: sessionKey(x) } });
+    }
+
+    const computer: Row[] = [];
     for (const machine of machines) {
-      // Fixed order (agent, project, terminal) so rows don't reshuffle on every refresh.
-      const talk = (x: Session) => (talkable(x) ? 0 : x.desktopSession ? 1 : 2);
-      const mine = sessions.filter(x => x.machine === machine)
-        .sort((a, b) => talk(a) - talk(b) || a.name.localeCompare(b.name) || a.page.localeCompare(b.page) || sessionKey(a).localeCompare(sessionKey(b)));
-      const online = this.data?.machines.find(m => m.name === machine)?.online ?? true;
+      const info = this.data?.machines.find(m => m.name === machine);
+      if (info && !info.online) { computer.push(title(`${machine}: offline`)); continue; }
+      if (info?.canStart?.length) computer.push({ text: `+ New agent on ${machine}`, open: { kind: 'newAgent', machine } });
       const desk = this.data?.desktops?.find(dk => dk.machine === machine);
-      const startable = Boolean(this.data?.machines.find(m => m.name === machine)?.canStart?.length);
-      if (!mine.length && !desk && !startable && online) continue;
-      rows.push(title(`── ${machine}${online ? '' : ' (offline)'} ──`));
-      if (online && this.data?.machines.find(m => m.name === machine)?.canStart?.length) {
-        rows.push({ text: '+ New agent here', open: { kind: 'newAgent', machine } });
-      }
       if (desk?.workspaces.length) {
         const list = desk.workspaces.map(w => (w.id === desk.active ? `[${w.id}]` : String(w.id))).join(' ');
-        rows.push({ text: clip(`Workspaces ${list} →`, WIDTH - 2), open: { kind: 'workspaces', machine } });
-      }
-      for (const x of mine) {
-        const ws = x.workspace ? `ws${x.workspace.split(',')[0]} · ` : '';
-        rows.push({
-          text: clip(`${ws}${MARK[x.state] ?? '-'} ${x.name} · ${x.page || 'no project'} · ${STATE_WORD[x.state] ?? x.state}${x.at ? ` ${age(x.at, nowMs)}` : ''}${talkable(x) ? ' [talk]' : x.desktopSession ? ' [continue]' : ''}`, WIDTH - 2),
-          open: { kind: 'agent', key: sessionKey(x) },
-        });
+        computer.push({ text: clip(`${machine} workspaces ${list} →`, WIDTH - 2), open: { kind: 'workspaces', machine } });
       }
     }
+    if (computer.length) rows.push(title('── Computers ──'), ...computer);
     return rows;
   }
 
@@ -662,7 +677,7 @@ export class HomeModel {
         if (x.desktopSession) {
           lines.push('', clip(`"${x.page}" is open in the Claude app on ${x.machine}.`), '', 'Tap to continue it on the glasses: same', 'conversation, in a session Home can reach.', '', 'tap: continue on glasses');
         } else if (!promptable) {
-          lines.push('', clip(`This chat is in the ${x.agent === 'codex' ? 'Codex' : 'Claude'} app, so it can't`), clip(`be shown or prompted here. Use a [talk] agent on ${x.machine}.`));
+          lines.push('', clip(`This chat is in the ${x.agent === 'codex' ? 'Codex' : 'Claude'} app, so it can't`), clip(`be shown or prompted here. Use one under Talk.`));
           if (x.workspace) lines.push('', '▼ swipe down: show on screen');
         } else {
           const all = this.terminalLines();

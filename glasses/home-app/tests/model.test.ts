@@ -25,8 +25,7 @@ test('home shows time and an Agents page summary; the page lists each session', 
   assert.equal(m.screenKind, 'agents');
   const page = m.render(NOW);
   assert.match(page, /^HOME › AGENTS/);
-  assert.match(page, /── lap ──\n> ws1 · • Claude · agent-status · busy 2m/);
-  assert.match(page, /── m1 ──\n  - Codex · black-team · done 10m/);
+  assert.match(page, /── Threads ──\n> • Claude · lap · agent-status · busy 2m\n  - Codex · m1 · black-team · done 10m/);
   for (const line of page.split('\n')) assert.ok(line.length <= WIDTH, line);
 });
 
@@ -161,7 +160,7 @@ test('pop-ups wait while you are talking', () => {
   assert.equal(m.screenKind, 'listen');
 });
 
-test('the Agents page has a section per computer, with its workspaces inside and [talk] agents first', () => {
+test('the Agents page puts chats you can talk to first, then threads to read, then computers', () => {
   const m = new HomeModel();
   m.update(base({
     desktops: [{ machine: 'lap', active: 1, workspaces: [{ id: 1, windows: ['Alacritty: claude'] }, { id: 3, windows: ['Alacritty: codex', 'Chromium: docs'] }] }],
@@ -170,8 +169,8 @@ test('the Agents page has a section per computer, with its workspaces inside and
   assert.doesNotMatch(m.render(NOW), /Workspaces/, 'no separate Workspaces row on the main menu');
   m.input('select', NOW);
   const page = m.render(NOW);
-  assert.match(page, /── lap ──\n> Workspaces \[1\] 3 →\n  ws1 · • Claude · agent-status · busy 2m/);
-  assert.match(page, /── m1 ──\n  · Claude · Projects · ready \[talk\]\n  - Codex · black-team · done 10m/);
+  assert.match(page, /^── Talk ──\n> · Claude · m1 · Projects · ready\n── Threads ──\n  • Claude · lap · agent-status · busy 2m\n  - Codex · m1 · black-team · done 10m\n── Computers ──\n  lap workspaces \[1\] 3 →$/m);
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
   m.input('select', NOW);
   assert.equal(m.screenKind, 'workspaces');
   assert.match(m.render(NOW), /^AGENTS › LAP WORKSPACES/);
@@ -381,7 +380,8 @@ test('start an agent by voice: computer → agent → folder → speak → confi
   m.update(data);
   m.input('select', NOW); // Agents
   let text = m.render(NOW);
-  assert.match(text, /── Mini 1 ──\n> \+ New agent here/);
+  assert.match(text, /── Computers ──\n  \+ New agent on Mini 1/);
+  m.input('down', NOW);
   m.input('select', NOW);
   assert.equal(m.screenKind, 'newAgent');
   assert.match(m.render(NOW), /^NEW AGENT · Mini 1\n\nPick an agent\n> Claude\n  Codex/);
@@ -416,7 +416,7 @@ test('a Codex app thread is talkable: its conversation shows and replies go into
   const m = new HomeModel();
   m.update(tmuxed({ sessions: [{ agent: 'codex', name: 'Codex app', session: 'app:t1', state: 'idle', page: 'Beeper on Even Glasses', at: 0, workspace: '', machine: 'Mini 1', appThread: 't1' }] }));
   m.input('select', NOW);
-  assert.match(m.render(NOW), /· Codex app · Beeper on Even Glasses · ready \[talk\]/);
+  assert.match(m.render(NOW), /── Threads ──\n> · Codex app · Mini 1 · Beeper on Even Glasses/);
   m.input('select', NOW);
   assert.deepEqual(m.terminalTarget(), { machine: 'Mini 1', pane: '', appThread: 't1', key: 'Mini 1/codex/app:t1' });
   m.input('down', NOW);
@@ -429,7 +429,7 @@ test('a Claude app session offers Continue on glasses', () => {
   const m = new HomeModel();
   m.update(tmuxed({ sessions: [{ agent: 'claude', name: 'Claude app', session: 'desk:s1', state: 'idle', page: 'Story writing', at: 0, workspace: '', machine: 'Mini 1', desktopSession: 's1' }] }));
   m.input('select', NOW);
-  assert.match(m.render(NOW), /Claude app · Story writing · ready \[continue\]/);
+  assert.match(m.render(NOW), /Claude app · Mini 1 · Story writing \[continue\]/);
   m.input('select', NOW);
   assert.match(m.render(NOW), /tap: continue on glasses/);
   assert.equal(m.terminalTarget(), null);
