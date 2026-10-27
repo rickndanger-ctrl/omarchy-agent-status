@@ -99,7 +99,9 @@ export class Glasses {
       this.sdk.onDeviceStatusChanged(status => this.options.onDevice({ battery: status.batteryLevel, wearing: status.isWearing, raw: JSON.stringify(status) }));
       // The status push may only come on a change, so also ask now and every minute (battery drains quietly).
       const ask = () => this.sdk?.getDeviceInfo().then(info => {
-        const status = (info as unknown as { status?: { batteryLevel?: number; isWearing?: boolean } } | null)?.status;
+        // Documented as DeviceInfo { status: {...} }, but the Even app answers with the status itself.
+        type Status = { batteryLevel?: number; isWearing?: boolean };
+        const status = (info as unknown as (Status & { status?: Status }) | null)?.status ?? (info as unknown as Status | null);
         this.options.onDevice({ battery: status?.batteryLevel, wearing: status?.isWearing, raw: JSON.stringify(info) });
       }).catch(error => this.options.onDevice({ raw: `error: ${reason(error)}` }));
       void ask();
