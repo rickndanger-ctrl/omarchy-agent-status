@@ -94,6 +94,20 @@ const sessionKey = (s: Session) => s.pane ? `${s.machine}/${s.pane}` : s.window 
 const talkable = (s: Session) => Boolean(s.pane || s.window || s.appThread);
 const pendingKey = (p: { machine: string; id: string }) => `${p.machine}/${p.id}`;
 
+/** "6:42:15 PM": the phone's local time, with seconds. */
+export function timeWithSeconds(ms: number): string {
+  return new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+}
+
+const SPEAKER: Record<string, string> = { you: 'YOU', claude: 'CLAUDE', codex: 'CODEX' };
+const BAR = 40; // shorter than WIDTH: = and - are wider than the average character on the G2 font
+/** A message's title bar: thick (=) for the agent, thin (-) for you, so each reply stands out while scrolling. */
+export function messageBar(who: string, ms: number): string {
+  const rule = who === 'you' ? '-' : '=';
+  return `${rule.repeat(3)} ${SPEAKER[who] ?? who.toUpperCase()}${ms ? ` · ${timeWithSeconds(ms)}` : ''} `.padEnd(BAR, rule);
+}
+const BAR_TIME = /^[=-]{3} \w+ · (\d+:\d\d:\d\d [AP]M) [=-]+$/;
+
 export function clip(text: string, width = WIDTH): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > width ? flat.slice(0, width - 1) + '…' : flat;
@@ -255,7 +269,14 @@ export class HomeModel {
   private terminalLines(): string[] | null {
     const s = this.screen;
     if (s.kind !== 'agent' || this.terminal?.key !== s.key) return null;
-    return this.terminal.lines.flatMap(line => (line ? wrap(line) : ['']));
+    return this.terminal.lines.flatMap(line => {
+      const header = line.match(/^::msg (\w+) (\d+)$/);
+      if (header) return [messageBar(header[1], Number(header[2]))];
+      // What the agent ran ("[Bash] cd … && …"): one short line marked ›, so the replies stand out.
+      const tool = line.match(/^\[([\w.-]+)\] (.*)$/);
+      if (tool) return [clip(`› ${tool[1]} ${tool[2]}`, BAR)];
+      return line ? wrap(line) : [''];
+    });
   }
 
   setFolders(machine: string, folders: string[] | null): void {
@@ -692,10 +713,17 @@ export class HomeModel {
           if (all === null) lines.push('Loading…');
           else {
             const end = all.length - this.termScroll;
-            const view = all.slice(Math.max(0, end - TERM_LINES), end);
+            const start = Math.max(0, end - TERM_LINES);
+            const view = all.slice(start, end);
             lines.push(...view, ...Array(TERM_LINES - view.length).fill(''));
+            // Scrolled back: the time of the message on screen and of the newest one, so you can tell how far back you are.
+            const timeAt = (i: number) => { for (; i >= 0; i--) { const t = all[i].match(BAR_TIME); if (t) return t[1]; } return ''; };
+            const firstBar = view.findIndex(l => BAR_TIME.test(l));
+            const reading = timeAt(firstBar >= 0 ? start + firstBar : start);
+            const newest = timeAt(all.length - 1);
+            if (this.termScroll) lines.push(reading && newest ? `${reading} · newest ${newest} · ▼ newer` : 'swipe up: scroll · down: newer');
           }
-          lines.push(this.termScroll ? 'swipe up: scroll · down: newer' : `${this.data.voice ? 'tap: talk · ' : ''}swipe up: scroll · down: quick replies`);
+          if (!this.termScroll || all === null) lines.push(`${this.data.voice ? 'tap: talk · ' : ''}swipe up: scroll · down: quick replies`);
         }
       }
     } else if (s.kind === 'workspaces') {

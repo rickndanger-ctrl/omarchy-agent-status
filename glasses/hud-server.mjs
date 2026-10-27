@@ -452,15 +452,15 @@ async function listCodexAppThreads() {
   }
 }
 
-async function codexThreadView(threadId) {
+async function codexThreadView(threadId, stamps = false) {
   const result = await codexEngine(call => call('thread/read', { threadId, includeTurns: true }))
   const out = []
   for (const turn of result.thread?.turns ?? result.turns ?? []) {
     for (const item of turn.items ?? []) {
       if (item.type === 'userMessage') {
         const text = (item.content ?? []).map(c => c.text ?? '').join(' ').trim()
-        if (text && !text.startsWith('<')) out.push('', `You: ${text}`)
-      } else if (item.type === 'agentMessage' && String(item.text ?? '').trim()) out.push('', `Codex: ${String(item.text).trim()}`)
+        if (text && !text.startsWith('<')) said(out, 'you', text, item.createdAt ?? turn.startedAt ?? turn.createdAt, stamps)
+      } else if (item.type === 'agentMessage' && String(item.text ?? '').trim()) said(out, 'codex', String(item.text).trim(), item.createdAt ?? turn.completedAt ?? turn.startedAt, stamps)
       else if (item.type === 'commandExecution') out.push(`[exec] ${String(item.command ?? '').split('\n')[0].slice(0, 80)}`)
       else if (item.type === 'fileChange') out.push('[edit] files')
     }
@@ -832,8 +832,24 @@ function cleanScreen(text) {
   return out.slice(-80)
 }
 
+/** A time (ISO text, seconds or ms) as ms since 1970; 0 when unknown. */
+function toMs(t) {
+  if (typeof t === 'number') return t < 1e12 ? t * 1000 : t
+  return Date.parse(t ?? '') || 0
+}
+
+/**
+ * One message in a conversation view. With `stamps` (newer glasses apps ask for it), a "::msg <who> <ms>"
+ * header line comes first (no blank line: the bar is the gap) and the app draws it as a bar with the speaker
+ * and time; otherwise "Claude: …" after a blank line.
+ */
+function said(out, who, text, time, stamps) {
+  if (stamps) out.push(`::msg ${who} ${toMs(time)}`, text)
+  else out.push('', `${who === 'you' ? 'You' : who === 'claude' ? 'Claude' : 'Codex'}: ${text}`)
+}
+
 /** Claude's own record of the conversation: ~/.claude/sessions/<pid>.json points to the transcript. */
-async function claudeConversation(pid) {
+async function claudeConversation(pid, stamps = false) {
   const info = readJson(path.join(HOME, '.claude/sessions', `${pid}.json`))
   if (!info?.sessionId || !info.cwd) return null
   const dir = path.join(HOME, '.claude/projects', info.cwd.replace(/[^A-Za-z0-9]/g, '-'))
@@ -857,12 +873,12 @@ async function claudeConversation(pid) {
     if (item.isMeta || item.isSidechain) continue
     const content = item.message?.content
     if (item.type === 'user') {
-      const said = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(c => c.type === 'text').map(c => c.text).join(' ') : ''
-      if (said.trim() && !said.startsWith('<')) out.push('', `You: ${said.trim()}`)
+      const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(c => c.type === 'text').map(c => c.text).join(' ') : ''
+      if (text.trim() && !text.startsWith('<')) said(out, 'you', text.trim(), item.timestamp, stamps)
     } else if (item.type === 'assistant' && Array.isArray(content)) {
       for (const c of content) {
         // Label replies and leave a blank line before each, so they stand apart from yours on the glasses.
-        if (c.type === 'text' && c.text.trim()) out.push('', `Claude: ${c.text.trim()}`)
+        if (c.type === 'text' && c.text.trim()) said(out, 'claude', c.text.trim(), item.timestamp, stamps)
         if (c.type === 'tool_use') {
           const detail = c.input?.command ?? c.input?.file_path ?? c.input?.pattern ?? c.input?.url ?? ''
           out.push(`[${c.name}] ${String(detail).split('\n')[0].slice(0, 80)}`)
@@ -885,7 +901,7 @@ async function readTail(file, limit = 600_000) {
 }
 
 /** Codex's own log: the rollout file it has open, else the newest one for the same folder. */
-async function codexConversation(pid, cwd) {
+async function codexConversation(pid, cwd, stamps = false) {
   let file = ''
   try {
     // The open log may belong to a child (e.g. node launcher → native codex), so include descendants.
@@ -949,8 +965,7 @@ async function codexConversation(pid, cwd) {
       const text = (p.content ?? []).map(c => c.text ?? '').join(' ').trim()
       // Codex stores its own setup (AGENTS.md, environment) as user messages; skip those.
       if (!text || text.startsWith('<') || text.startsWith('# AGENTS.md')) continue
-      if (p.role === 'user') out.push('', `You: ${text}`)
-      else out.push('', `Codex: ${text}`)
+      said(out, p.role === 'user' ? 'you' : 'codex', text, item.timestamp, stamps)
     } else if (p.type === 'function_call' || p.type === 'local_shell_call' || p.type === 'custom_tool_call') {
       let detail = ''
       try {
@@ -963,12 +978,12 @@ async function codexConversation(pid, cwd) {
   return out.slice(-80)
 }
 
-async function terminalView(pane, window) {
+async function terminalView(pane, window, stamps = false) {
   const all = [...(await agentPanes()), ...(await agentScreens()), ...(await agentWindows())]
   const target = all.find(t => (pane && t.pane === pane) || (window && t.window === window))
   if (!target) return null
-  const conversation = target.agent === 'claude' ? await claudeConversation(target.pid)
-    : target.agent === 'codex' ? await codexConversation(target.pid, target.cwd).catch(() => null)
+  const conversation = target.agent === 'claude' ? await claudeConversation(target.pid, stamps)
+    : target.agent === 'codex' ? await codexConversation(target.pid, target.cwd, stamps).catch(() => null)
     : null
   if (conversation?.length) return conversation
   try {
@@ -1255,8 +1270,9 @@ async function handle(req, res) {
       }
       if (DEMO) return send(res, 200, { lines: ['You: run the tests', 'Running the test suite now.', '[Bash] npm test', 'All 15 tests pass.'] })
       const appThread = url.searchParams.get('appThread') || ''
-      if (appThread) return send(res, 200, { lines: await codexThreadView(appThread) })
-      const lines = await terminalView(pane, window)
+      const stamps = url.searchParams.get('stamps') === '1'
+      if (appThread) return send(res, 200, { lines: await codexThreadView(appThread, stamps) })
+      const lines = await terminalView(pane, window, stamps)
       return lines ? send(res, 200, { lines }) : send(res, 404, { error: 'agent not found' })
     }
     if (req.method === 'POST' && p === '/api/transcribe') {

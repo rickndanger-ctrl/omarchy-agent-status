@@ -224,7 +224,7 @@ async function refreshTerminal(): Promise<void> {
   const target = model.terminalTarget();
   if (!target || terminalBusy) return;
   terminalBusy = true;
-  const query = new URLSearchParams({ machine: target.machine, pane: target.pane, ...(target.window ? { window: target.window } : {}), ...(target.appThread ? { appThread: target.appThread } : {}) });
+  const query = new URLSearchParams({ machine: target.machine, pane: target.pane, ...(target.window ? { window: target.window } : {}), ...(target.appThread ? { appThread: target.appThread } : {}), stamps: '1' });
   try {
     model.setTerminal(target.key, (await api<{ lines: string[] }>(`terminal?${query}`)).lines);
   } catch {
