@@ -2,7 +2,7 @@ import './style.css';
 import { Glasses } from './glasses';
 import { HomeModel, type Action, type HomeData, type Input } from './model';
 
-const BUILD = '2026-10-26-b11';
+const BUILD = '2026-10-26-b12';
 const POLL_MS = 2000;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const store = {

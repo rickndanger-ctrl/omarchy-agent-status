@@ -68,6 +68,9 @@ interface Row { text: string; open?: Screen; header?: boolean }
 const RULE = '─'.repeat(26);
 const title = (text: string): Row => ({ text, header: true });
 
+// Rick's order for computers on the Agents page; any other computer follows in the hub's order.
+const MACHINE_ORDER = ['Mini 1', 'Mini 2', 'Dell', 'Neo'];
+
 export const WIDTH = 56; // characters per line; the G2 font fits ~60 narrow characters in 576 px
 // The glasses fit 10 lines. More than that and the glasses scroll the text themselves,
 // which swallows a swipe before Home sees it, so every screen stays within MAX_LINES.
@@ -362,37 +365,42 @@ export class HomeModel {
   }
 
   /**
-   * Three sections, so the chats you talk to are never buried:
-   *   Talk     the live terminal agents (Claude/Codex sessions Home types into), every computer
-   *   Threads  app threads and other chats, to read (Codex app threads can still be answered)
-   *   Computers  + New agent, and workspaces
-   * Order is fixed (computer, agent, project) so rows don't reshuffle on every refresh.
+   * Two big sections, each grouped by computer, so the chats you talk to are never buried:
+   *   TALK      the live terminal agents Home types into (Mini 1: its Claude and Codex, Mini 2: ...)
+   *   THREADS   app threads and other chats, to read (Codex app threads can still be answered)
+   * then COMPUTERS: + New agent and workspaces. Order is fixed (computer, agent, project) so rows don't
+   * reshuffle on every refresh.
    */
   private agentRows(nowMs: number): Row[] {
     const rows: Row[] = [];
     const sessions = this.visibleSessions();
-    const machines = [...new Set([...(this.data?.machines ?? []).map(m => m.name), ...sessions.map(x => x.machine)])];
-    const order = (a: Session, b: Session) => machines.indexOf(a.machine) - machines.indexOf(b.machine) ||
-      a.name.localeCompare(b.name) || a.page.localeCompare(b.page) || sessionKey(a).localeCompare(sessionKey(b));
+    const known = [...new Set([...(this.data?.machines ?? []).map(m => m.name), ...sessions.map(x => x.machine)])];
+    const rank = (m: string) => { const i = MACHINE_ORDER.indexOf(m); return i < 0 ? MACHINE_ORDER.length + known.indexOf(m) : i; };
+    const machines = [...known].sort((a, b) => rank(a) - rank(b));
     const when = (x: Session) => `${STATE_WORD[x.state] ?? x.state}${x.at ? ` ${age(x.at, nowMs)}` : ''}`;
     const terminal = (x: Session) => Boolean(x.pane || x.window);
-
-    const talk = sessions.filter(terminal).sort(order);
-    if (talk.length) rows.push(title('── Talk ──'));
-    for (const x of talk) {
-      const ws = x.workspace && x.window ? ` ws${x.workspace.split(',')[0]}` : '';
-      rows.push({ text: clip(`${MARK[x.state] ?? '-'} ${x.name} · ${x.machine}${ws} · ${x.page || 'no project'} · ${when(x)}`, WIDTH - 2), open: { kind: 'agent', key: sessionKey(x) } });
-    }
-
     const kind = (x: Session) => (x.appThread ? 0 : x.desktopSession ? 1 : 2);
-    const threads = sessions.filter(x => !terminal(x)).sort((a, b) => machines.indexOf(a.machine) - machines.indexOf(b.machine) || kind(a) - kind(b) || order(a, b));
-    if (threads.length) rows.push(title('── Threads ──'));
-    for (const x of threads) {
+    const order = (a: Session, b: Session) => kind(a) - kind(b) || a.name.localeCompare(b.name) || a.page.localeCompare(b.page) || sessionKey(a).localeCompare(sessionKey(b));
+    const section = (heading: string, pick: (x: Session) => boolean, text: (x: Session) => string) => {
+      const out: Row[] = [];
+      for (const machine of machines) {
+        const mine = sessions.filter(x => x.machine === machine && pick(x)).sort(order);
+        if (!mine.length) continue;
+        out.push(title(`── ${machine} ──`));
+        for (const x of mine) out.push({ text: clip(text(x), WIDTH - 2), open: { kind: 'agent', key: sessionKey(x) } });
+      }
+      if (out.length) rows.push(title(heading), ...out);
+    };
+
+    section('TALK', terminal, x => {
+      const ws = x.workspace && x.window ? ` ws${x.workspace.split(',')[0]}` : '';
+      return `${MARK[x.state] ?? '-'} ${x.name}${ws} · ${x.page || 'no project'} · ${when(x)}`;
+    });
+    section('THREADS', x => !terminal(x), x => {
       // Threads are mostly idle; only say the state when it isn't ("ready" would just crowd the line).
       const state = x.state === 'idle' ? (x.at ? ` · ${age(x.at, nowMs)}` : '') : ` · ${when(x)}`;
-      const tag = x.desktopSession ? ' [continue]' : '';
-      rows.push({ text: clip(`${MARK[x.state] ?? '-'} ${x.name} · ${x.machine} · ${x.page || 'no project'}${tag}${state}`, WIDTH - 2), open: { kind: 'agent', key: sessionKey(x) } });
-    }
+      return `${MARK[x.state] ?? '-'} ${x.name} · ${x.page || 'no project'}${x.desktopSession ? ' [continue]' : ''}${state}`;
+    });
 
     const computer: Row[] = [];
     for (const machine of machines) {
@@ -405,7 +413,7 @@ export class HomeModel {
         computer.push({ text: clip(`${machine} workspaces ${list} →`, WIDTH - 2), open: { kind: 'workspaces', machine } });
       }
     }
-    if (computer.length) rows.push(title('── Computers ──'), ...computer);
+    if (computer.length) rows.push(title('COMPUTERS'), ...computer);
     return rows;
   }
 
