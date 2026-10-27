@@ -204,19 +204,32 @@ test('messages get a bar with who and the time (seconds); scrolled back, the foo
   m.update(tmuxed());
   openAgent(m);
   const t0 = new Date(2026, 9, 26, 18, 41, 58).getTime();
-  const lines = ['::msg you ' + t0, 'how is it going', '::msg claude ' + (t0 + 17_000), '[Bash] cd ~/Projects/omarchy-agent-status/glasses && npm test -- --long-flag', ...Array.from({ length: 12 }, (_, i) => `reply ${i + 1}`)];
+  const lines = ['::msg you ' + t0, 'how is it going', '::msg claude ' + (t0 + 17_000), ...Array.from({ length: 12 }, (_, i) => `reply ${i + 1}`)];
   m.setTerminal('Mini 1/%3', lines);
   let text = m.render(NOW);
   assert.match(text, /reply 12\ntap: talk/);
-  m.input('up', NOW);
-  m.input('up', NOW);
-  m.input('up', NOW);
+  for (let i = 0; i < 3; i++) m.input('up', NOW);
   text = m.render(NOW);
   assert.match(text, /^--- YOU · 6:41:58 PM -+$/m);
   assert.match(text, /^=== CLAUDE · 6:42:15 PM =+$/m);
-  assert.match(text, /^› Bash cd ~\/Projects\/[^\n]{1,20}…$/m, 'a command is one short line');
   assert.match(text, /\n6:41:58 PM · newest 6:42:15 PM · ▼ newer$/);
   for (const line of text.split('\n')) assert.ok(line.length <= 56, line);
+});
+
+test('a conversation shows no commands, and one reply per turn: progress notes give way to the answer', () => {
+  const m = new HomeModel();
+  m.update(tmuxed());
+  openAgent(m);
+  const t0 = new Date(2026, 9, 26, 18, 0, 0).getTime();
+  m.setTerminal('Mini 1/%3', [
+    '::msg you ' + t0, 'fix it',
+    '::msg claude ' + (t0 + 5_000), 'Looking at the code:', '[Bash] grep -n foo src/*.ts',
+    '::msg claude ' + (t0 + 9_000), 'Running the tests:', '[Bash] npm test',
+    '::msg claude ' + (t0 + 12_000), 'Fixed.', '', 'All tests pass.',
+  ]);
+  const text = m.render(NOW);
+  assert.match(text, /--- YOU · 6:00:00 PM -+\nfix it\n=== CLAUDE · 6:00:12 PM =+\nFixed\.\n\nAll tests pass\./);
+  assert.doesNotMatch(text, /Bash|grep|Looking at|Running the tests/);
 });
 
 test('every screen fits the glasses, so a swipe is never eaten by native scrolling', () => {

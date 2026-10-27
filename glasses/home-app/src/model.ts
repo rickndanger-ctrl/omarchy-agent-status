@@ -269,14 +269,22 @@ export class HomeModel {
   private terminalLines(): string[] | null {
     const s = this.screen;
     if (s.kind !== 'agent' || this.terminal?.key !== s.key) return null;
-    return this.terminal.lines.flatMap(line => {
+    const raw = this.terminal.lines;
+    // Without message headers (a plain terminal screen), show what the terminal shows.
+    if (!raw.some(line => line.startsWith('::msg '))) return raw.flatMap(line => (line ? wrap(line) : ['']));
+    // A conversation: what was said only, no commands. An agent's run of messages between two of
+    // yours is one reply: each progress note replaces the last, so a finished reply is just the answer.
+    const said: { who: string; ms: number; text: string[] }[] = [];
+    for (const line of raw) {
       const header = line.match(/^::msg (\w+) (\d+)$/);
-      if (header) return [messageBar(header[1], Number(header[2]))];
-      // What the agent ran ("[Bash] cd … && …"): one short line marked ›, so the replies stand out.
-      const tool = line.match(/^\[([\w.-]+)\] (.*)$/);
-      if (tool) return [clip(`› ${tool[1]} ${tool[2]}`, BAR)];
-      return line ? wrap(line) : [''];
-    });
+      if (header) {
+        const [, who, ms] = header;
+        const last = said.at(-1);
+        if (last && who !== 'you' && last.who === who) Object.assign(last, { ms: Number(ms), text: [] });
+        else said.push({ who, ms: Number(ms), text: [] });
+      } else if (said.length && !/^\[[\w.-]+\] /.test(line)) said.at(-1)!.text.push(line);
+    }
+    return said.flatMap(m => [messageBar(m.who, m.ms), ...m.text.join('\n').trim().split('\n').flatMap(line => (line ? wrap(line) : ['']))]);
   }
 
   setFolders(machine: string, folders: string[] | null): void {
