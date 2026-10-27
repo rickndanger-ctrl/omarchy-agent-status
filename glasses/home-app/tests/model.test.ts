@@ -472,3 +472,33 @@ test('a Claude app session offers Continue on glasses', () => {
   assert.equal(m.terminalTarget(), null);
   assert.deepEqual(m.input('select', NOW), { kind: 'continueSession', machine: 'Mini 1', session: 's1' });
 });
+test('studio row opens a scrolling page of computers and the conversation', () => {
+  const m = new HomeModel();
+  const studio = {
+    at: NOW / 1000,
+    machines: [
+      { name: 'Laptop', line: 'Reverser · step 5 · How PAIR talks to engines', busy: true },
+      { name: 'Mini 1', line: 'standing by', busy: false },
+    ],
+    feed: Array.from({ length: 6 }, (_, i) => ({ t: NOW / 1000 - 60 * (i + 1), text: `Claude → Reader: note number ${i} with enough words to wrap past one glasses line easily`, kind: 'say' })),
+  };
+  m.update(base({ sessions: [], studio }));
+  assert.match(m.render(NOW), /  Studio · 1 working · Laptop: Reverser · step 5/);
+  m.input('down', NOW);
+  m.input('select', NOW);
+  assert.equal(m.screenKind, 'studio');
+  const page = m.render(NOW);
+  assert.match(page, /^HOME › STUDIO/);
+  assert.match(page, /> Laptop: Reverser · step 5 · How PAIR talks to engines/);
+  assert.match(page, /- Mini 1: standing by/);
+  assert.match(page, /1m Claude → Reader: note number 0/);
+  for (const line of page.split('\n')) assert.ok(line.length <= WIDTH, line);
+  assert.ok(page.split('\n').length <= 10);
+  m.input('down', NOW);
+  assert.notEqual(m.render(NOW), page, 'swipe down scrolls');
+});
+test('without Studio Routing there is no studio row', () => {
+  const m = new HomeModel();
+  m.update(base({ sessions: [], studio: null }));
+  assert.doesNotMatch(m.render(NOW), /Studio/);
+});

@@ -20,7 +20,10 @@ export interface HomeData {
   desktops?: Desktop[];
   voice?: boolean;
   weather?: { temp: number; desc: string; hi: number; lo: number; rainAt: string | null; rainChance: number } | null;
+  /** Studio Routing on the laptop: what each computer's workers are doing, and what they said to each other. */
+  studio?: Studio | null;
 }
+export interface Studio { at: number; machines: { name: string; line: string; busy: boolean }[]; feed: { t: number; text: string; kind: string }[] }
 
 export type Action =
   | { kind: 'decide'; machine: string; id: string; behavior: 'allow' | 'deny' | 'desk' }
@@ -45,6 +48,7 @@ type Screen =
   | { kind: 'messages' }
   | { kind: 'chat'; id: number; name: string }
   | { kind: 'muse' }
+  | { kind: 'studio' }
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
   | { kind: 'reply'; key: string }
@@ -384,6 +388,10 @@ export class HomeModel {
       rows.push({ text: clip(`Messages${unread ? ` · ${unread} new` : ''} · ${latest}`, WIDTH - 2), open: { kind: 'messages' } });
     }
     if (d.muse) rows.push({ text: 'Muse · latest reply', open: { kind: 'muse' } });
+    if (d.studio) {
+      const busy = d.studio.machines.filter(m => m.busy);
+      rows.push({ text: clip(`Studio · ${busy.length ? `${busy.length} working · ${busy[0].name}: ${busy[0].line}` : 'standing by'}`, WIDTH - 2), open: { kind: 'studio' } });
+    }
     if (waiting) rows.push({ text: clip(`! Needs you · ${waiting}${d.pending.length ? ` (${d.pending.length} approval${d.pending.length === 1 ? '' : 's'})` : ''}`, WIDTH - 2), open: { kind: 'needs' } });
     return rows;
   }
@@ -594,6 +602,13 @@ export class HomeModel {
       this.go({ kind: 'listen', key: '', thinking: false, muse: true });
       return { kind: 'startMic' };
     }
+    if (s.kind === 'studio') {
+      const lines = this.studioLines(nowMs) ?? [];
+      const max = Math.max(0, lines.length - BODY_LINES);
+      if (input === 'up') this.scroll = Math.max(0, this.scroll - 3);
+      if (input === 'down') this.scroll = Math.min(max, this.scroll + 3);
+      return null;
+    }
     if (s.kind === 'muse') {
       const lines = this.museLines ?? [];
       const max = Math.max(0, lines.length - BODY_LINES);
@@ -675,6 +690,16 @@ export class HomeModel {
     const selected = rows.indexOf(items[this.cursor]);
     const start = Math.min(Math.max(0, selected - Math.floor(LIST_ROWS / 2)), Math.max(0, rows.length - LIST_ROWS));
     return rows.slice(start, start + LIST_ROWS).map((r, i) => r.header ? r.text : `${start + i === selected ? '>' : ' '} ${r.text}`);
+  }
+
+  /** Studio: one line per computer, then the conversation, newest first, in plain English. */
+  private studioLines(nowMs: number): string[] | null {
+    const st = this.data?.studio;
+    if (!st) return null;
+    const lines = st.machines.map(m => clip(`${m.busy ? '>' : '-'} ${m.name}: ${m.line}`));
+    lines.push(RULE);
+    for (const e of st.feed) lines.push(...wrap(`${age(e.t, nowMs)} ${e.text}`));
+    return lines;
   }
 
   private body(lines: string[] | null, loading: string): string[] {
@@ -809,6 +834,9 @@ export class HomeModel {
       lines[0] = clip(`MESSAGES › ${s.name}`);
       lines.push(...this.body(this.chatLines, 'Loading…'));
       if (this.chatLines) lines.push(this.chatAtBottom() ? `${this.data.voice ? 'tap: reply by voice · ' : ''}swipe up: scroll · down: quick texts` : 'swipe up/down: scroll');
+    } else if (s.kind === 'studio') {
+      lines[0] = 'HOME › STUDIO';
+      lines.push(...this.body(this.studioLines(nowMs), 'Studio Routing is not running on the laptop.'), 'swipe: scroll');
     } else if (s.kind === 'muse') {
       lines[0] = 'HOME › MUSE';
       lines.push(...this.body(this.museLines, 'Reading Muse…'), this.data.voice ? 'tap: ask Muse by voice · swipe: scroll' : 'swipe: scroll');

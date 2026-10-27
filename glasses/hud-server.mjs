@@ -625,11 +625,42 @@ async function startAgentIn(agent, dir, task, resumeId = '') {
 
 async function nodeView() {
   expirePending()
-  const [sessions, desk, starts] = await Promise.all([sessionsWithPanes(), desktop(), canStart()])
-  return { machine: MACHINE, online: true, sessions, pending: publicPending(), desktop: desk, canStart: starts }
+  const [sessions, desk, starts, studio] = await Promise.all([sessionsWithPanes(), desktop(), canStart(), studioSummary()])
+  return { machine: MACHINE, online: true, sessions, pending: publicPending(), desktop: desk, canStart: starts, studio }
+}
+
+// Studio Routing (re-studio/viewer on the laptop) serves a short summary for the glasses; any node running it reports it.
+const STUDIO_URL = process.env.STUDIO_URL || 'http://127.0.0.1:8765/api/studio'
+async function studioSummary() {
+  if (DEMO) return { at: Date.now() / 1000, machines: [{ name: 'Laptop', line: 'Reverser · step 4 · engines', busy: true }, { name: 'Mini 2', line: 'standing by', busy: false }],
+    feed: [{ t: Date.now() / 1000 - 60, text: 'Claude → Reverser: write up the engine manager now', kind: 'say' }] }
+  try {
+    const res = await fetch(STUDIO_URL, { signal: AbortSignal.timeout(1500) })
+    return res.ok ? await res.json() : null
+  } catch {
+    return null
+  }
 }
 
 // ---- hub -------------------------------------------------------------------------
+
+// Hands a question to the first Muse, from index `start` on, that is up and
+// whose text box is ready. Returns {id, muse} or null.
+async function askMuse(text, start) {
+  for (const [i, muse] of MUSES.entries()) {
+    if (i < start) continue
+    try {
+      const health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 })
+      if (!health.ok || !health.composer) continue
+      const r = await call(`${muse.url}/ask`, muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
+      return { id: `${i}-${r.id}`, muse: muse.name }
+    } catch { /* try the next Muse */ }
+  }
+  return null
+}
+// Glasses id → id of the same question re-asked on a later Muse.
+const museMoved = new Map()
+const museMoving = new Set() // ids being handed on right now (the glasses poll fast)
 
 async function call(url, token, options = {}) {
   const res = await fetch(url, {
@@ -682,6 +713,7 @@ async function home() {
     weather: DEMO ? { temp: 62, desc: 'Cloudy', hi: 68, lo: 51, rainAt: '4 PM', rainChance: 70 } : weather,
     messages: MODE === 'hub' || DEMO ? await messagesSummary() : null,
     muse: MODE === 'hub' ? MUSES.length > 0 : DEMO,
+    studio: views.find(v => v.studio)?.studio ?? null,
   }
 }
 
@@ -1316,23 +1348,32 @@ async function handle(req, res) {
       if (DEMO) return send(res, 200, { id: 'demo' })
       if (MODE !== 'hub' || !MUSES.length || !text) return send(res, 400, { error: 'cannot ask Muse' })
       // First Muse that is up and whose text box is ready gets the question; the id remembers which.
-      for (const [i, muse] of MUSES.entries()) {
-        try {
-          const health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 })
-          if (!health.ok || !health.composer) continue
-          const r = await call(`${muse.url}/ask`, muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
-          return send(res, 200, { id: `${i}-${r.id}`, muse: muse.name })
-        } catch { /* try the next Muse */ }
-      }
+      const r = await askMuse(text, 0)
+      if (r) return send(res, 200, r)
       return send(res, 502, { error: 'no Muse is ready right now' })
     }
     if (req.method === 'GET' && p === '/api/muse/reply') {
-      const id = String(url.searchParams.get('id') ?? '')
+      let id = String(url.searchParams.get('id') ?? '')
+      // A question handed on to another Muse is followed there (see below).
+      while (museMoved.has(id)) id = museMoved.get(id)
       if (DEMO) return send(res, 200, { status: 'done', question: 'demo question', reply: 'Here is what Muse would say.' })
       const [, index, job] = id.match(/^(\d+)-(\w{1,40})$/) ?? []
       const muse = MUSES[Number(index)]
       if (MODE !== 'hub' || !muse || !job) return send(res, 400, { error: 'bad id' })
       const r = await call(`${muse.url}/reply/${job}`, muse.token, { timeout: 6000 })
+      // musectl failed before anything was typed (Muse windowed, box not
+      // clickable…): the question never reached this Muse, so hand it to the
+      // next one that is ready. The glasses keep polling the same id.
+      if (r.status === 'error' && /^Command failed/.test(String(r.error ?? '')) && r.question) {
+        if (museMoving.has(id)) return send(res, 200, { status: 'sending', question: clip(r.question, 300), reply: '', error: '' })
+        museMoving.add(id)
+        const next = await askMuse(String(r.question), Number(index) + 1).finally(() => museMoving.delete(id))
+        if (next) {
+          museMoved.set(id, next.id)
+          setTimeout(() => museMoved.delete(id), 10 * 60_000).unref()
+          return send(res, 200, { status: 'sending', question: clip(r.question, 300), reply: '', error: '' })
+        }
+      }
       return send(res, 200, { status: String(r.status ?? ''), question: clip(r.question, 300), reply: String(r.reply ?? '').slice(0, 2000), error: clip(r.error, 120) })
     }
     if (req.method === 'GET' && p === '/api/muse') {
