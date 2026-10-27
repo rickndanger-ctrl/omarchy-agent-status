@@ -982,8 +982,20 @@ async function typeIntoScreen(pane, text, key) {
 }
 
 /** Focus the agent's terminal window, check it really has focus, then type like a keyboard. */
+/** Is the screen locked? Closing the lid locks Omarchy; the lock screen then has the keyboard, even though
+ * Hyprland still reports the agent's window as active. Asks Omarchy's shell, and also looks for Hyprland's
+ * session-lock marker on any monitor. Either one saying "locked" counts. */
+async function screenLocked() {
+  const shell = await run('quickshell', ['ipc', '-p', '/usr/share/omarchy/shell', 'call', 'lock', 'isLocked'], { timeout: 2000 })
+    .then(r => r.stdout.trim() === 'true', () => false)
+  if (shell) return true
+  return run('hyprctl', ['-j', 'monitors'], { timeout: 2000 })
+    .then(r => JSON.parse(r.stdout).some(m => (m.solitaryBlockedBy ?? []).includes('LOCK')), () => false)
+}
+
 async function typeIntoWindow(address, text, key) {
   if (!/^0x[0-9a-f]+$/.test(address) || !(await agentWindows()).some(w => w.window === address)) return false
+  if (await screenLocked()) return false // keystrokes would go into the lock screen's password box
   if (key && key !== 'Escape') return false
   const clean = String(text ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 4000)
   if (!key && !clean) return false
@@ -995,12 +1007,14 @@ async function typeIntoWindow(address, text, key) {
   await new Promise(r => setTimeout(r, 250))
   const active = JSON.parse((await run('hyprctl', ['activewindow', '-j'], { timeout: 2000 })).stdout)
   if (active.address !== address) return false // never type into the wrong window
+  if (await screenLocked()) return false // locked while we were focusing
   if (key) {
     await run('wtype', ['-k', 'Escape'], { timeout: 3000 })
     return true
   }
   await run('wtype', ['--', clean], { timeout: 15_000 })
   await new Promise(r => setTimeout(r, 150))
+  if (await screenLocked()) return false // locked mid-typing: don't press Enter (that would submit a password)
   await run('wtype', ['-k', 'Return'], { timeout: 3000 })
   return true
 }
