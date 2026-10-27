@@ -402,9 +402,20 @@ async function codexEngine(calls) {
 
 const AUTOMATIC = /^Review this change for security vulnerabilities/i
 
-/** The ChatGPT app's recent Codex threads (not automatic reviews, sub-agents or terminal sessions). */
+// Codex's engine can take over a second to list threads, longer than the hub waits for a node. So the
+// list is kept in memory and refreshed in the background (at most every 5 s); callers get the last one.
+let appThreadsCache = { list: [], at: 0, loading: null }
 async function codexAppThreads() {
   if (DEMO || !existsSync(CODEX_SOCKET)) return []
+  if (!appThreadsCache.loading && Date.now() - appThreadsCache.at > 5_000) {
+    appThreadsCache.loading = listCodexAppThreads().then(list => { appThreadsCache = { list, at: Date.now(), loading: null } })
+    if (!appThreadsCache.at) await appThreadsCache.loading // first call: wait once so the list isn't empty
+  }
+  return appThreadsCache.list
+}
+
+/** The ChatGPT app's recent Codex threads (not automatic reviews, sub-agents or terminal sessions). */
+async function listCodexAppThreads() {
   try {
     const { data } = await codexEngine(call => call('thread/list', { limit: 40, sortKey: 'recency_at', sortDirection: 'desc' }))
     return data

@@ -24,6 +24,13 @@ agent_running() {
     }'
 }
 
+# Codex's shared engine (the app-server daemon the ChatGPT app and Home both talk to). Start it if it
+# isn't running, so Codex app threads stay reachable from the glasses after a reboot.
+daemon="$HOME/.codex/packages/app-server-daemon/current/bin/codex"
+if [ -x "$daemon" ] && ! pgrep -f -- 'app-server .*--managed-daemon' >/dev/null 2>&1; then
+  act "$daemon" app-server daemon start >/dev/null 2>&1
+fi
+
 for agent in claude codex; do
   command -v "$agent" >/dev/null 2>&1 || continue
   if command -v tmux >/dev/null 2>&1; then
