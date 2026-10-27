@@ -41,8 +41,8 @@ const glasses = new Glasses({
   onStatus: text => { status = text; diag('status', text); paint(); },
   onForeground: on => { foreground = on; if (on) void poll(); },
   onDevice: d => {
-    // Log what the Even app reports when it changes, so a missing battery level can be traced.
-    if (d.raw !== lastDevice) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
+    // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
+    if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
     if (typeof d.battery === 'number') model.battery = d.battery;
     paint();
   },
