@@ -228,7 +228,7 @@ test('a conversation shows no commands, and one reply per turn: progress notes g
     '::msg claude ' + (t0 + 12_000), 'Fixed.', '', 'All tests pass.',
   ]);
   const text = m.render(NOW);
-  assert.match(text, /--- YOU · 6:00:00 PM -+\nfix it\n=== CLAUDE · 6:00:12 PM =+\nFixed\.\n\nAll tests pass\./);
+  assert.match(text, /--- YOU · 6:00:00 PM -+\nfix it\n\n=== CLAUDE · 6:00:12 PM =+\nFixed\.\n\nAll tests pass\./);
   assert.doesNotMatch(text, /Bash|grep|Looking at|Running the tests/);
 });
 

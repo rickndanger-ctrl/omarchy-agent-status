@@ -284,7 +284,8 @@ export class HomeModel {
         else said.push({ who, ms: Number(ms), text: [] });
       } else if (said.length && !/^\[[\w.-]+\] /.test(line)) said.at(-1)!.text.push(line);
     }
-    return said.flatMap(m => [messageBar(m.who, m.ms), ...m.text.join('\n').trim().split('\n').flatMap(line => (line ? wrap(line) : ['']))]);
+    // A blank line above every bar but the first keeps your messages and the agent's apart.
+    return said.flatMap((m, i) => [...(i ? [''] : []), messageBar(m.who, m.ms), ...m.text.join('\n').trim().split('\n').flatMap(line => (line ? wrap(line) : ['']))]);
   }
 
   setFolders(machine: string, folders: string[] | null): void {
