@@ -30,7 +30,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { homedir, hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -281,18 +281,40 @@ async function agentScreens() {
 }
 
 /** Status sessions, each linked to its tmux pane when it has one; idle agents in tmux are listed too. */
+/** The key status.py gives this Claude process's conversation (see status.py: sha256(session_id)[:20]). */
+function claudeStatusKey(pid) {
+  try {
+    const { sessionId } = JSON.parse(readFileSync(path.join(homedir(), '.claude', 'sessions', `${pid}.json`), 'utf8'))
+    return sessionId ? createHash('sha256').update(String(sessionId)).digest('hex').slice(0, 20) : ''
+  } catch {
+    return ''
+  }
+}
+
 async function sessionsWithPanes() {
   const [sessions, tmuxPanes, screens, windows] = await Promise.all([localSessions(), DEMO ? [] : agentPanes(), DEMO ? [] : agentScreens(), DEMO ? [] : agentWindows()])
   const panes = [...tmuxPanes, ...screens]
   const byRecency = [...sessions].sort((a, b) => b.at - a.at)
+  // Exact match first: a Claude process records its conversation id, and status.py names that session
+  // sha256(id)[:20]. Matching by folder alone fails once Claude works in a different folder than it was
+  // started in, which left a second, un-openable copy of the chat (and its "finished" alerts pointed there).
+  const sameChat = (s, term) => term.agent === 'claude' && s.session === claudeStatusKey(term.pid)
+  for (const term of [...panes, ...windows]) {
+    const match = byRecency.find(s => !s.pane && !s.window && sameChat(s, term))
+    if (!match) continue
+    if (term.window) Object.assign(match, { window: term.window, workspace: term.workspace || match.workspace })
+    else match.pane = term.pane
+    term.matched = true
+  }
   for (const pane of panes) {
+    if (pane.matched) continue
     const match = byRecency.find(s => !s.pane && s.agent === pane.agent && s.page === pane.page)
     if (match) match.pane = pane.pane
     else sessions.push({ agent: pane.agent, name: AGENT_NAMES[pane.agent], session: `tmux${pane.pane}`, state: 'idle', page: pane.page, at: 0, workspace: '', machine: MACHINE, pane: pane.pane })
   }
   // Agents in a plain terminal window (no tmux): prompt them by typing into that window.
   for (const win of windows) {
-    if (sessions.some(s => s.window === win.window)) continue
+    if (win.matched || sessions.some(s => s.window === win.window)) continue
     // Same project folder first; otherwise the newest live session of that agent on the same workspace
     // (Claude reports the folder it last worked in, which can differ from where it was started).
     const free = s => !s.pane && !s.window && s.agent === win.agent
