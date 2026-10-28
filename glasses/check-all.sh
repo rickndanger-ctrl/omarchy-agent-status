@@ -35,6 +35,18 @@ print(("  OK    " if d.get("messages") is not None else "  FAIL  ") + "  message
 print(("  OK    " if d.get("muse") else "  FAIL  ") + "  Muse")
 print(("  OK    " if d.get("weather") else "  --    ") + "  weather" + ("" if d.get("weather") else " (appears after the phone shares its location)"))
 '
+  # Reminders: a read-only GET; 404 means this hub has no Reminders relay configured.
+  rem=$(curl -s -m 10 -w '\n%{http_code}' "https://$hub.$TS/hud/api/reminders" -H "Authorization: Bearer $T")
+  rcode=${rem##*$'\n'}
+  rbody=${rem%$'\n'*}
+  if [ "$rcode" = 404 ]; then
+    printf '  --    reminders on %s (not configured)\n' "$hub"
+  elif [ "$rcode" = 200 ]; then
+    n=$(printf '%s' "$rbody" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["reminders"]))' 2>/dev/null)
+    if [ -n "$n" ]; then ok "$n open reminders on $hub"; else bad "reminders on $hub: unreadable reply"; fi
+  else
+    bad "reminders on $hub (HTTP $rcode)"
+  fi
 done
 
 echo "Relays"
