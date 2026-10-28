@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sortReminders, Tiles, TILE_LINES, TILE_WIDTH, PAGE_COUNT, DEFAULT_LAYOUT, availableWidgets, normalizeLayout, widgetFor } from '../src/tiles';
+import { resetAgentMemory, sortReminders, Tiles, TILE_LINES, TILE_WIDTH, PAGE_COUNT, DEFAULT_LAYOUT, availableWidgets, normalizeLayout, widgetFor } from '../src/tiles';
 import type { TileContext } from '../src/tiles';
 import type { HomeData } from '../src/model';
 
@@ -184,4 +184,71 @@ test('reminders tile shows the list name only when it is not Reminders, and Adde
   assert.deepEqual(w.body(ctx({ reminders: () => withNote }), 27).slice(0, 2), ['Added: Eggs', '']);
   const stale = [{ id: 'just-added', title: 'Eggs', due: null, list: '', added: NOW - 6000 }, ...list];
   assert.deepEqual(w.body(ctx({ reminders: () => stale }), 27), ['• Milk', '• Bin · Errands']);
+});
+
+// ---- pinned agent tiles (0.4.2) ----
+const sess = (over: object) => ({ agent: 'claude', name: 'Claude', session: 's', state: 'idle', page: 'proj', at: 100, workspace: 'w', machine: 'Dell', ...over });
+const pinned = (sessions: object[], now = NOW) => ({ c: ctx({ data: { ...data, sessions: sessions as HomeData['sessions'] }, now }) });
+const target = (c: ReturnType<typeof ctx>, id: string) => widgetFor(id).needs(c).map(n => (n.kind === 'terminal' ? n.window || n.pane || n.appThread : null));
+
+test('pinned agent: the exact window wins, and wins again when it comes back', () => {
+  resetAgentMemory();
+  const id = 'agent:Dell/0xAA';
+  const win = sess({ window: '0xAA', state: 'idle', at: 1 });
+  const other = sess({ window: '0xBB', state: 'working', at: 999 });
+  assert.deepEqual(target(pinned([win, other]).c, id), ['0xAA']);
+  assert.deepEqual(target(pinned([other]).c, id), ['0xBB']);
+  assert.deepEqual(target(pinned([win, other]).c, id), ['0xAA']);
+});
+
+test('pinned agent: after the window closes a working Claude beats a newer idle one', () => {
+  resetAgentMemory();
+  const id = 'agent:Dell/0xAA';
+  target(pinned([sess({ window: '0xAA' })]).c, id); // seen once
+  const idleNewer = sess({ window: '0xCC', state: 'idle', at: 500 });
+  const working = sess({ window: '0xDD', state: 'working', at: 50 });
+  assert.deepEqual(target(pinned([idleNewer, working]).c, id), ['0xDD']);
+});
+
+test('pinned agent: a window or pane beats an app thread', () => {
+  resetAgentMemory();
+  const thread = sess({ appThread: 'thr1', state: 'working', at: 900 });
+  const window = sess({ window: '0xEE', state: 'working', at: 10 });
+  assert.deepEqual(target(pinned([thread, window]).c, 'agent:Dell/0xAA'), ['0xEE']);
+});
+
+test('pinned agent: the kind is remembered, so a pinned codex falls back to codex', () => {
+  resetAgentMemory();
+  const id = 'agent:Dell/0xCX';
+  target(pinned([sess({ agent: 'codex', name: 'Codex', window: '0xCX' })]).c, id);
+  const claude = sess({ window: '0xAA', state: 'working', at: 999 });
+  const codex = sess({ agent: 'codex', name: 'Codex', window: '0xCY', state: 'idle', at: 1 });
+  assert.deepEqual(target(pinned([claude, codex]).c, id), ['0xCY']);
+});
+
+test('pinned agent: "(moved to <page>)" shows for 60 s from the move, then the plain title', () => {
+  resetAgentMemory();
+  const id = 'agent:Dell/0xAA';
+  const w = widgetFor(id);
+  w.title(pinned([sess({ window: '0xAA' })]).c);
+  const other = sess({ window: '0xBB', state: 'working', page: 'other-proj' });
+  assert.match(w.title(pinned([other], NOW).c), /^Claude · busy \(moved to other-proj\)$/);
+  assert.match(w.title(pinned([other], NOW + 59_000).c), /moved to other-proj/);
+  assert.equal(w.title(pinned([other], NOW + 61_000).c), 'Claude · busy');
+});
+
+test('a plain agent name keeps the 0.4.1 behaviour and never says moved', () => {
+  resetAgentMemory();
+  const old = sess({ window: '0xOLD', at: 1 });
+  const pane = sess({ pane: 'p7', at: 0 });
+  const c = pinned([old, pane]).c;
+  assert.deepEqual(target(c, 'agent:Dell/claude'), ['p7']);
+  assert.doesNotMatch(widgetFor('agent:Dell/claude').title(c), /moved/);
+});
+
+test('editor lists each live window and pane with its page and machine', () => {
+  const labels = availableWidgets({ ...data, sessions: [sess({ window: '0xAA', page: 're-studio' }), sess({ pane: 'p2', page: 'api', machine: 'Mini 1', at: 5 }), sess({ session: 'roll', page: 'old' })] as HomeData['sessions'] });
+  assert.ok(labels.some(l => l.id === 'agent:Dell/0xAA' && l.label === 'Claude · re-studio (Dell)'));
+  assert.ok(labels.some(l => l.id === 'agent:Mini 1/p2' && l.label === 'Claude · api (Mini 1)'));
+  assert.ok(!labels.some(l => l.label.includes('(Dell)') && l.label.includes('old')));
 });

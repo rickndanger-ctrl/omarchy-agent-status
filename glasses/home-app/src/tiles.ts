@@ -132,31 +132,65 @@ function empty(id: WidgetId, kind: WidgetKind, title: string): Widget {
   return { id, kind, title: () => title, body: () => [], actions: () => [], act: () => null, needs: noNeeds };
 }
 
-/** The session an agent:<machine>/<name> tile follows: a pane or window first, else that agent's newest session there. */
-function findSession(data: HomeData | null, ref: string): Session | undefined {
-  if (!data) return undefined;
+// What a pinned agent tile remembers between frames: which kind of agent its session was, and when it moved.
+const kindSeen = new Map<string, string>();
+const movedAt = new Map<string, number>();
+const MOVED_NOTE_MS = 60_000;
+/** For tests: forget what pinned tiles remember. */
+export function resetAgentMemory(): void { kindSeen.clear(); movedAt.clear(); }
+
+const AGENT_KINDS = ['claude', 'codex', 'hermes'];
+const live = (s: Session) => Boolean(s.pane || s.window);
+
+/**
+ * The session an agent:<machine>/<ref> tile follows.
+ *  - The exact pane, window or session wins whenever it exists (and is remembered as that kind of agent).
+ *  - A plain agent name (claude, codex): that agent's best session there: a pane, then a window, then an app thread,
+ *    then a finished rollout; newest among equals.
+ *  - A pinned ref whose session is gone falls back to the same kind of agent on that machine: working or needing you,
+ *    then idle, then the rest; a pane or window before an app thread; newest. `moved` says it is no longer the pinned one.
+ */
+function findSession(data: HomeData | null, ref: string, now: number): { session?: Session; moved: boolean } {
+  if (!data) return { moved: false };
   const exact = data.sessions.find(s => sessionKey(s) === ref || (s.pane && `${s.machine}/${s.pane}` === ref) || (s.window && `${s.machine}/${s.window}` === ref));
-  if (exact) return exact;
+  if (exact) {
+    kindSeen.set(ref, exact.agent.toLowerCase());
+    movedAt.delete(ref);
+    return { session: exact, moved: false };
+  }
   const slash = ref.indexOf('/');
   const machine = ref.slice(0, slash);
-  const agent = ref.slice(slash + 1).toLowerCase();
-  // A live terminal (pane, then window, then Codex app thread) beats a finished rollout; newest among equals.
-  const rank = (s: Session) => (s.pane ? 0 : s.window ? 1 : s.appThread ? 2 : 3);
-  return data.sessions
-    .filter(s => s.machine === machine && (s.agent.toLowerCase() === agent || s.name.toLowerCase() === agent))
-    .sort((a, b) => rank(a) - rank(b) || b.at - a.at)[0];
+  const name = ref.slice(slash + 1).toLowerCase();
+  const onMachine = data.sessions.filter(s => s.machine === machine);
+  const byName = onMachine.filter(s => s.agent.toLowerCase() === name || s.name.toLowerCase() === name);
+  if (byName.length || AGENT_KINDS.includes(name)) {
+    const rank = (s: Session) => (s.pane ? 0 : s.window ? 1 : s.appThread ? 2 : 3);
+    return { session: byName.sort((a, b) => rank(a) - rank(b) || b.at - a.at)[0], moved: false };
+  }
+  const kind = kindSeen.get(ref) ?? 'claude';
+  const state = (s: Session) => (s.state === 'working' || s.state === 'attention' ? 0 : s.state === 'idle' ? 1 : 2);
+  const rank = (s: Session) => (live(s) ? 0 : s.appThread ? 1 : 2);
+  const session = onMachine
+    .filter(s => s.agent.toLowerCase() === kind)
+    .sort((a, b) => state(a) - state(b) || rank(a) - rank(b) || b.at - a.at)[0];
+  if (session && !movedAt.has(ref)) movedAt.set(ref, now);
+  if (!session) movedAt.delete(ref);
+  return { session, moved: Boolean(session) };
 }
 
 function agentWidget(id: WidgetId): Widget {
   const ref = id.slice('agent:'.length);
-  const find = (ctx: TileContext) => findSession(ctx.data, ref);
+  const resolve = (ctx: TileContext) => findSession(ctx.data, ref, ctx.now);
+  const find = (ctx: TileContext) => resolve(ctx).session;
   const talkable = (s: Session) => Boolean(s.pane || s.window || s.appThread);
   const target = (s: Session) => ({ machine: s.machine, pane: s.pane ?? '', ...(s.window ? { window: s.window } : {}), ...(s.appThread ? { appThread: s.appThread } : {}) });
   return {
     id, kind: 'agent',
     title: ctx => {
-      const s = find(ctx);
-      return s ? `${s.name || s.agent} · ${STATE_WORD[s.state] ?? s.state}` : ref.slice(ref.indexOf('/') + 1);
+      const { session: s, moved } = resolve(ctx);
+      if (!s) return ref.slice(ref.indexOf('/') + 1);
+      const note = moved && ctx.now - (movedAt.get(ref) ?? ctx.now) < MOVED_NOTE_MS ? ` (moved to ${s.page})` : '';
+      return `${s.name || s.agent} · ${STATE_WORD[s.state] ?? s.state}${note}`;
     },
     body: (ctx, width) => {
       const s = find(ctx);
@@ -387,6 +421,11 @@ export function availableWidgets(data: HomeData | null): { id: WidgetId; label: 
     for (const s of [...data.sessions].sort((a, b) => b.at - a.at)) {
       const id = `agent:${s.machine}/${s.agent.toLowerCase()}`;
       if (!seen.has(id)) { seen.add(id); out.push({ id, label: `${s.agent} on ${s.machine}` }); }
+    }
+    // Each live terminal on its own, to pin a tile to that very window or pane.
+    for (const s of [...data.sessions].filter(live).sort((a, b) => b.at - a.at)) {
+      const id = `agent:${s.machine}/${s.window || s.pane}`;
+      if (!seen.has(id)) { seen.add(id); out.push({ id, label: `${s.name || s.agent} · ${s.page} (${s.machine})` }); }
     }
     out.push({ id: 'chat:recent', label: 'Latest chat' });
     for (const c of data.messages ?? []) out.push({ id: `chat:${c.id}`, label: `Chat: ${c.name}` });
