@@ -225,7 +225,7 @@ async function refreshTiles(): Promise<void> {
         } else if (need.kind === 'reminders') {
           tileData.reminders = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
         } else if (need.kind === 'url') {
-          tileData.urls.set(need.endpoint, await api<UrlTile>(`tile?endpoint=${encodeURIComponent(need.endpoint)}`));
+          tileData.urls.set(need.endpoint, await api<UrlTile>(`tile?url=${encodeURIComponent(need.endpoint)}`));
         }
       } catch { /* keep what the tile showed; it says Loading… if it never had anything */ }
     }));
@@ -261,7 +261,7 @@ function runTileEffect(effect: TileEffect): void {
   if (effect.kind === 'reminderDone') {
     void api('reminders/done', { method: 'POST', body: JSON.stringify({ id: effect.id }) }).catch(() => {}).then(() => refreshTiles());
   } else if (effect.kind === 'urlAction') {
-    void api('tile', { method: 'POST', body: JSON.stringify({ endpoint: effect.endpoint, id: effect.id }) }).catch(() => {}).then(() => refreshTiles());
+    void api('tile/action', { method: 'POST', body: JSON.stringify({ url: effect.endpoint, id: effect.id }) }).catch(() => {}).then(() => refreshTiles());
   }
 }
 
