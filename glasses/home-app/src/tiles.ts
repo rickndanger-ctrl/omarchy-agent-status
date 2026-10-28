@@ -40,7 +40,13 @@ export const DEFAULT_LAYOUT: Layout = {
 export interface UrlTile { title: string; lines: string[]; actions?: { label: string; id: string }[] }
 
 /** An Apple Reminders item, as the hub passes it on from the Mini 1 relay. */
-export interface Reminder { id: string; title: string; due: string | null; list: string }
+export interface Reminder {
+  id: string; title: string; due: string | null; list: string;
+  /** Due time in ms (for sorting; `due` is the short label), null if none. Optional: older hubs don't send it. */
+  dueAt?: number | null;
+  /** When the hub first saw this reminder, in ms: a stand-in for "added" (the relay doesn't send a creation date). */
+  added?: number;
+}
 
 /** Everything a widget may read. The tiles model never fetches; main.ts fills these in. */
 export interface TileContext {
