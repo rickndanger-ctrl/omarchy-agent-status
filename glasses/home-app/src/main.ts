@@ -60,7 +60,7 @@ const glasses = new Glasses({
   { id: MENU.messages, name: 'Messages' },
   { id: MENU.muse, name: 'Muse' },
   { id: MENU.tiles, name: 'Tiles' },
-  { id: MENU.tilesOn, name: 'Tiles on/off' },
+  { id: MENU.tilesOn, name: 'Start in Tiles' },
   { id: MENU.editPage, name: 'Edit page' },
   { id: MENU.refresh, name: 'Refresh' },
   { id: MENU.pause, name: 'Pause/resume approvals' },
@@ -86,6 +86,7 @@ $('app').innerHTML = `
   <details id="tiles-editor">
     <summary>Tiles</summary>
     <p class="muted">Five pages, two apps each. This is what the glasses show in Tiles.</p>
+    <label class="row"><input type="checkbox" id="start-tiles"> Start in Tiles</label>
     <div id="tile-rows"></div>
     <div class="row"><button id="tiles-save">Save tiles</button></div>
   </details>
@@ -190,8 +191,8 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 // ---- Tiles: five pages of two apps each (src/tiles.ts). ----
 const tiles = new Tiles();
 tiles.setLayout(DEFAULT_LAYOUT);
-/** On: Home opens in Tiles. Off: Tiles only opens from the Home list or the long-press menu. */
-let tilesOn = store.get('home.tiles') === '1';
+/** Start in Tiles (on unless switched off): Home opens in Tiles. Off: Tiles only opens from the Home list or the long-press menu. The double-tap from Tiles still reaches the old Home. */
+let tilesOn = store.get('home.tiles') !== '0';
 let tilesActive = false;
 /** A full screen opened from a tile: double-tap returns to Tiles. */
 let fromTiles = false;
@@ -202,12 +203,16 @@ const tileData = {
   reminders: null as Reminder[] | null,
   urls: new Map<string, UrlTile>(),
 };
+let justAdded: { title: string; at: number } | null = null;
 const tileCtx = (): TileContext => ({
   data: model.data, now: Date.now(), battery: model.battery,
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,
   muse: () => tileData.muse,
-  reminders: () => tileData.reminders,
+  // For ~5 s after a voice add the Reminders tile shows "Added: <title>" at the top, from the add result (no extra fetch).
+  reminders: () => (tileData.reminders && justAdded && Date.now() - justAdded.at < 5000
+    ? [{ id: 'just-added', title: justAdded.title, due: null, list: '', added: justAdded.at }, ...tileData.reminders]
+    : tileData.reminders),
   url: endpoint => tileData.urls.get(endpoint) ?? null,
 });
 const showingTiles = () => tilesActive && !fromTiles;
@@ -255,6 +260,12 @@ async function loadLayout(): Promise<void> {
 }
 
 /** The phone's Tiles editor: one row per page, two dropdowns of everything Home knows. Not rebuilt while you are editing. */
+function syncStartInTiles(): void { $<HTMLInputElement>('start-tiles').checked = tilesOn; }
+$<HTMLInputElement>('start-tiles').onchange = () => {
+  tilesOn = $<HTMLInputElement>('start-tiles').checked;
+  store.set('home.tiles', tilesOn ? '1' : '0');
+};
+syncStartInTiles();
 let editorDirty = false;
 let editorKey = '';
 function buildEditor(): void {
@@ -504,6 +515,7 @@ async function run(action: Action): Promise<void> {
       const r = await api<{ ok: boolean }>('reminders/add', { method: 'POST', body: JSON.stringify({ title: action.title }) }).catch(() => ({ ok: false }));
       diag('reminder.add', `ok=${r.ok}`);
       model.showFlash(r.ok ? 'Reminder added' : 'Reminder not added', Date.now());
+      if (r.ok) { justAdded = { title: action.title, at: Date.now() }; setTimeout(paint, 5100); }
       if (fromTiles) fromTiles = false;
       void refreshTiles();
     } else if (action.kind === 'openTiles') {
@@ -555,8 +567,8 @@ async function menu(id: number): Promise<void> {
   if (id === MENU.tilesOn) {
     tilesOn = !tilesOn;
     store.set('home.tiles', tilesOn ? '1' : '0');
-    model.showFlash(tilesOn ? 'Tiles on: Home opens in Tiles' : 'Tiles off', Date.now());
-    if (tilesOn) enterTiles(); else { tilesActive = false; fromTiles = false; }
+    model.showFlash(tilesOn ? 'Start in Tiles: on' : 'Start in Tiles: off', Date.now());
+    syncStartInTiles();
   }
   if (id === MENU.refresh) void poll();
   if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.refresh, MENU.pause, MENU.hideDone, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }

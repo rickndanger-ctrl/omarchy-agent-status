@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Tiles, TILE_LINES, TILE_WIDTH, PAGE_COUNT, DEFAULT_LAYOUT, availableWidgets, normalizeLayout, widgetFor } from '../src/tiles';
+import { sortReminders, Tiles, TILE_LINES, TILE_WIDTH, PAGE_COUNT, DEFAULT_LAYOUT, availableWidgets, normalizeLayout, widgetFor } from '../src/tiles';
 import type { TileContext } from '../src/tiles';
 import type { HomeData } from '../src/model';
 
@@ -153,4 +153,35 @@ test('Reminders: add by voice runs through listen and confirm, then asks the hub
   assert.match(m.render(NOW), /ADD REMINDER\?/);
   assert.deepEqual(m.input('select', NOW), { kind: 'addReminder', title: 'buy milk' });
   assert.equal(m.screenKind, 'home');
+});
+
+test('agent tile prefers a live pane over a newer finished rollout', () => {
+  const rollout = { agent: 'claude', name: 'Claude', session: 'old', state: 'done', page: 'p', at: 900, workspace: 'w', machine: 'Dell' };
+  const pane = { agent: 'claude', name: 'Claude', session: 'live', state: 'working', page: 'p', at: 100, workspace: 'w', machine: 'Dell', pane: 'p9' };
+  const c = ctx({ data: { ...data, sessions: [rollout, pane] } });
+  assert.deepEqual(widgetFor('agent:Dell/claude').needs(c).map(n => n.kind === 'terminal' && n.pane), ['p9']);
+  const newerPane = { ...pane, session: 'live2', pane: 'p10', at: 200 };
+  const c2 = ctx({ data: { ...data, sessions: [rollout, pane, newerPane] } });
+  assert.deepEqual(widgetFor('agent:Dell/claude').needs(c2).map(n => n.kind === 'terminal' && n.pane), ['p10']);
+});
+
+test('reminders: due soon first, then newest added, then the rest; Reminders list wins ties', () => {
+  const H = 3600_000;
+  const r = (id: string, over: object = {}) => ({ id, title: id, due: null, list: 'Reminders', ...over });
+  const list = [
+    r('plain'), r('old', { added: 1 }), r('new', { added: 9 }), r('later', { dueAt: NOW + 30 * H }),
+    r('overdue', { dueAt: NOW - H }), r('soon', { dueAt: NOW + 2 * H }), r('otherlist', { list: 'Errands' }),
+  ];
+  assert.deepEqual(sortReminders(list, NOW).map(x => x.id), ['overdue', 'soon', 'new', 'old', 'plain', 'later', 'otherlist']);
+});
+
+test('reminders tile shows the list name only when it is not Reminders, and Added: for a fresh add', () => {
+  const list = [{ id: 'a', title: 'Milk', due: null, list: 'Reminders' }, { id: 'b', title: 'Bin', due: null, list: 'Errands' }];
+  const w = widgetFor('reminders');
+  const body = w.body(ctx({ reminders: () => list }), 27);
+  assert.deepEqual(body, ['• Milk', '• Bin · Errands']);
+  const withNote = [{ id: 'just-added', title: 'Eggs', due: null, list: '', added: NOW - 1000 }, ...list];
+  assert.deepEqual(w.body(ctx({ reminders: () => withNote }), 27).slice(0, 2), ['Added: Eggs', '']);
+  const stale = [{ id: 'just-added', title: 'Eggs', due: null, list: '', added: NOW - 6000 }, ...list];
+  assert.deepEqual(w.body(ctx({ reminders: () => stale }), 27), ['• Milk', '• Bin · Errands']);
 });

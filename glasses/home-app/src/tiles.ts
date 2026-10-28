@@ -140,9 +140,11 @@ function findSession(data: HomeData | null, ref: string): Session | undefined {
   const slash = ref.indexOf('/');
   const machine = ref.slice(0, slash);
   const agent = ref.slice(slash + 1).toLowerCase();
+  // A live terminal (pane, then window, then Codex app thread) beats a finished rollout; newest among equals.
+  const rank = (s: Session) => (s.pane ? 0 : s.window ? 1 : s.appThread ? 2 : 3);
   return data.sessions
     .filter(s => s.machine === machine && (s.agent.toLowerCase() === agent || s.name.toLowerCase() === agent))
-    .sort((a, b) => b.at - a.at)[0];
+    .sort((a, b) => rank(a) - rank(b) || b.at - a.at)[0];
 }
 
 function agentWidget(id: WidgetId): Widget {
@@ -307,17 +309,38 @@ function clockWidget(): Widget {
   };
 }
 
+const DAY_MS = 24 * 3600_000;
+const JUST_ADDED = 'just-added';
+const NOTICE_MS = 5000;
+/** Overdue or due within 24 h first (soonest first), then the newest added, then the rest; ties: the 'Reminders' list first. */
+export function sortReminders(list: Reminder[], now: number): Reminder[] {
+  const soon = (r: Reminder) => typeof r.dueAt === 'number' && r.dueAt <= now + DAY_MS;
+  return [...list].sort((a, b) =>
+    Number(soon(b)) - Number(soon(a))
+    || (soon(a) && soon(b) ? (a.dueAt as number) - (b.dueAt as number) : 0)
+    || (b.added ?? -Infinity) - (a.added ?? -Infinity)
+    || Number(b.list === 'Reminders') - Number(a.list === 'Reminders'));
+}
+
 function remindersWidget(): Widget {
+  // main.ts puts a {id: 'just-added', title, added} entry in front of the list for a few seconds after a voice add.
+  const split = (ctx: TileContext) => {
+    const all = ctx.reminders();
+    if (!all) return null;
+    const note = all.find(r => r.id === JUST_ADDED && ctx.now - (r.added ?? 0) < NOTICE_MS);
+    return { note, list: sortReminders(all.filter(r => r.id !== JUST_ADDED), ctx.now) };
+  };
   return {
     id: 'reminders', kind: 'reminders',
-    title: ctx => { const n = ctx.reminders()?.length; return n ? `Reminders · ${n}` : 'Reminders'; },
+    title: ctx => { const n = split(ctx)?.list.length; return n ? `Reminders · ${n}` : 'Reminders'; },
     body: (ctx, width) => {
-      const list = ctx.reminders();
-      if (!list) return ['Loading…'];
-      if (!list.length) return ['No reminders.'];
-      return list.flatMap(r => wrap(`• ${r.title}${r.due ? ` (${r.due})` : ''}`, width));
+      const v = split(ctx);
+      if (!v) return ['Loading…'];
+      const head = v.note ? [...wrap(`Added: ${v.note.title}`, width), ''] : [];
+      if (!v.list.length) return [...head, 'No reminders.'];
+      return [...head, ...v.list.flatMap(r => wrap(`• ${r.title}${r.due ? ` (${r.due})` : ''}${r.list && r.list !== 'Reminders' ? ` · ${r.list}` : ''}`, width))];
     },
-    actions: ctx => [{ id: 'add', label: 'Add by voice' }, ...(ctx.reminders() ?? []).slice(0, 5).map(r => ({ id: `done:${r.id}`, label: clip(`Done: ${r.title}`, W - 2) }))],
+    actions: ctx => [{ id: 'add', label: 'Add by voice' }, ...(split(ctx)?.list ?? []).slice(0, 5).map(r => ({ id: `done:${r.id}`, label: clip(`Done: ${r.title}`, W - 2) }))],
     act: actionId => {
       if (actionId === 'add') return { kind: 'open', target: { kind: 'reminderAdd' } };
       return actionId.startsWith('done:') ? { kind: 'reminderDone', id: actionId.slice('done:'.length) } : null;
