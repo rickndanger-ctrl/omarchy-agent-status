@@ -93,7 +93,7 @@ const APPROVAL_CHOICES = [
 
 // A [talk] agent is identified by its terminal (pane or window), never by whichever status
 // session happens to match it this poll; otherwise an open page can flip between two chats.
-const sessionKey = (s: Session) => s.pane ? `${s.machine}/${s.pane}` : s.window ? `${s.machine}/${s.window}` : `${s.machine}/${s.agent}/${s.session}`;
+export const sessionKey = (s: Session) => s.pane ? `${s.machine}/${s.pane}` : s.window ? `${s.machine}/${s.window}` : `${s.machine}/${s.agent}/${s.session}`;
 /** Something Home can type into: a terminal pane, a terminal window, or a Codex app thread. */
 const talkable = (s: Session) => Boolean(s.pane || s.window || s.appThread);
 const pendingKey = (p: { machine: string; id: string }) => `${p.machine}/${p.id}`;
@@ -142,7 +142,7 @@ export function age(seconds: number, nowMs: number): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
-const STATE_WORD: Record<string, string> = { working: 'busy', done: 'done', attention: 'needs you', error: 'error', stopped: 'stopped', idle: 'ready' };
+export const STATE_WORD: Record<string, string> = { working: 'busy', done: 'done', attention: 'needs you', error: 'error', stopped: 'stopped', idle: 'ready' };
 const MARK: Record<string, string> = { attention: '!', error: '!', working: '•', done: '-', stopped: '-', idle: '·' };
 const NOTICE_MS = 10 * 60_000;
 
@@ -153,6 +153,36 @@ export function clock(nowMs: number, timeZone?: string): string {
   const day = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone });
   const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone });
   return `${day.replace(',', '')} · ${time}`;
+}
+
+/**
+ * A terminal tail as readable lines. A plain terminal screen is shown as it is; a conversation
+ * (lines with ::msg headers) shows what was said only, no commands. An agent's run of messages
+ * between two of yours is one reply: each progress note replaces the last, so a finished reply
+ * is just the answer.
+ */
+export function conversationLines(raw: string[], width = WIDTH): string[] {
+  if (!raw.some(line => line.startsWith('::msg '))) return raw.flatMap(line => (line ? wrap(line, width) : ['']));
+  const said: { who: string; ms: number; text: string[] }[] = [];
+  for (const line of raw) {
+    const header = line.match(/^::msg (\w+) (\d+)$/);
+    if (header) {
+      const [, who, ms] = header;
+      const last = said.at(-1);
+      if (last && who !== 'you' && last.who === who) Object.assign(last, { ms: Number(ms), text: [] });
+      else said.push({ who, ms: Number(ms), text: [] });
+    } else if (said.length && !/^\[[\w.-]+\] /.test(line)) said.at(-1)!.text.push(line);
+  }
+  // A blank line above every bar but the first keeps your messages and the agent's apart.
+  return said.flatMap((m, i) => [...(i ? [''] : []), messageBar(m.who, m.ms).slice(0, width), ...m.text.join('\n').trim().split('\n').flatMap(line => (line ? wrap(line, width) : ['']))]);
+}
+
+/** Studio: one line per computer, then the conversation, newest first, in plain English. */
+export function studioText(st: Studio, nowMs: number, width = WIDTH): string[] {
+  const lines = st.machines.map(m => clip(`${m.busy ? '>' : '-'} ${m.name}: ${m.line}`, width));
+  lines.push(RULE.slice(0, width));
+  for (const e of st.feed) lines.push(...wrap(`${age(e.t, nowMs)} ${e.text}`, width));
+  return lines;
 }
 
 export class HomeModel {
@@ -277,23 +307,7 @@ export class HomeModel {
   private terminalLines(): string[] | null {
     const s = this.screen;
     if (s.kind !== 'agent' || this.terminal?.key !== s.key) return null;
-    const raw = this.terminal.lines;
-    // Without message headers (a plain terminal screen), show what the terminal shows.
-    if (!raw.some(line => line.startsWith('::msg '))) return raw.flatMap(line => (line ? wrap(line) : ['']));
-    // A conversation: what was said only, no commands. An agent's run of messages between two of
-    // yours is one reply: each progress note replaces the last, so a finished reply is just the answer.
-    const said: { who: string; ms: number; text: string[] }[] = [];
-    for (const line of raw) {
-      const header = line.match(/^::msg (\w+) (\d+)$/);
-      if (header) {
-        const [, who, ms] = header;
-        const last = said.at(-1);
-        if (last && who !== 'you' && last.who === who) Object.assign(last, { ms: Number(ms), text: [] });
-        else said.push({ who, ms: Number(ms), text: [] });
-      } else if (said.length && !/^\[[\w.-]+\] /.test(line)) said.at(-1)!.text.push(line);
-    }
-    // A blank line above every bar but the first keeps your messages and the agent's apart.
-    return said.flatMap((m, i) => [...(i ? [''] : []), messageBar(m.who, m.ms), ...m.text.join('\n').trim().split('\n').flatMap(line => (line ? wrap(line) : ['']))]);
+    return conversationLines(this.terminal.lines);
   }
 
   setFolders(machine: string, folders: string[] | null): void {
@@ -692,14 +706,9 @@ export class HomeModel {
     return rows.slice(start, start + LIST_ROWS).map((r, i) => r.header ? r.text : `${start + i === selected ? '>' : ' '} ${r.text}`);
   }
 
-  /** Studio: one line per computer, then the conversation, newest first, in plain English. */
   private studioLines(nowMs: number): string[] | null {
     const st = this.data?.studio;
-    if (!st) return null;
-    const lines = st.machines.map(m => clip(`${m.busy ? '>' : '-'} ${m.name}: ${m.line}`));
-    lines.push(RULE);
-    for (const e of st.feed) lines.push(...wrap(`${age(e.t, nowMs)} ${e.text}`));
-    return lines;
+    return st ? studioText(st, nowMs) : null;
   }
 
   private body(lines: string[] | null, loading: string): string[] {
