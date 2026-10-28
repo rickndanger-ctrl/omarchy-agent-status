@@ -132,6 +132,19 @@ export function museDisplay(question: string, reply: string): { question: string
   return { question: squeeze(question.replace(/\r/g, '').split('\n')).join('\n').trim(), reply: squeeze(lines).join('\n') };
 }
 
+const OLD_TEXT_S = 24 * 3600;
+/** Chats whose last message is older than 24 h are hidden when `on` (display only: model.data stays whole). */
+export function recentChats(chats: Chat[], nowMs: number, on: boolean): Chat[] {
+  return on ? chats.filter(c => nowMs / 1000 - c.when <= OLD_TEXT_S) : chats;
+}
+/** One chat's messages: those older than 24 h are dropped, but the newest always stays; `hidden` says some were. */
+export function recentMessages(msgs: ChatMessage[], nowMs: number, on: boolean): { messages: ChatMessage[]; hidden: boolean } {
+  if (!on || !msgs.length) return { messages: msgs, hidden: false };
+  const newest = msgs.reduce((a, b) => (b.when > a.when ? b : a));
+  const messages = msgs.filter(m => m === newest || nowMs / 1000 - m.when <= OLD_TEXT_S);
+  return { messages, hidden: messages.length < msgs.length };
+}
+
 export function clip(text: string, width = WIDTH): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > width ? flat.slice(0, width - 1) + '…' : flat;
@@ -210,6 +223,8 @@ export class HomeModel {
   error = '';
   battery: number | undefined;
   hideDone = false;
+  /** Hide texts older than 24 h on the Home screens (the setting 'Hide old texts'). */
+  hideOldTexts = true;
   private screen: Screen = { kind: 'home' };
   private cursor = 0;
   private scroll = 0;
@@ -396,8 +411,9 @@ export class HomeModel {
   }
 
   setChat(messages: ChatMessage[] | null, nowMs: number): void {
-    this.chatLines = messages === null ? ['Could not load this chat.']
-      : [...messages].reverse().flatMap(m => wrap(`${m.fromMe ? 'Me' : m.from} (${age(m.when, nowMs)}): ${m.text}`));
+    const shown = messages && recentMessages(messages, nowMs, this.hideOldTexts);
+    this.chatLines = shown === null ? ['Could not load this chat.']
+      : [...(shown.hidden ? ['(older messages hidden)'] : []), ...[...shown.messages].reverse().flatMap(m => wrap(`${m.fromMe ? 'Me' : m.from} (${age(m.when, nowMs)}): ${m.text}`))];
     this.scroll = Math.max(0, this.chatLines.length - BODY_LINES);
   }
   private chatAtBottom(): boolean { return this.scroll >= Math.max(0, (this.chatLines?.length ?? 0) - BODY_LINES); }
@@ -441,7 +457,7 @@ export class HomeModel {
   }
 
   /** Home: the agent status bar, the menu of pages, and one row for anything waiting on you. */
-  private homeRows(): Row[] {
+  private homeRows(nowMs = Date.now()): Row[] {
     const d = this.data;
     if (!d) return [];
     const counts = new Map<string, number>();
@@ -457,8 +473,9 @@ export class HomeModel {
     const online = d.machines.filter(m => m.online).length;
     rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
     if (d.messages) {
-      const unread = d.messages.filter(c => c.unread).length;
-      const top = d.messages[0];
+      const chats = recentChats(d.messages, nowMs, this.hideOldTexts);
+      const unread = chats.filter(c => c.unread).length;
+      const top = chats[0];
       const latest = top ? `${top.fromMe ? 'You' : top.name}: ${top.snippet}` : 'no recent texts';
       rows.push({ text: clip(`Messages${unread ? ` · ${unread} new` : ''} · ${latest}`, WIDTH - 2), open: { kind: 'messages' } });
     }
@@ -562,11 +579,11 @@ export class HomeModel {
     }
     if (this.screen.kind === 'confirm') return CONFIRM_CHOICES.map(text => ({ text }));
     if (this.screen.kind === 'workspaces') return this.workspaceRows().map(w => w.row);
-    if (this.screen.kind === 'home') return this.homeRows();
+    if (this.screen.kind === 'home') return this.homeRows(nowMs);
     if (this.screen.kind === 'needs') return this.needsRows();
     if (this.screen.kind === 'agents') return this.agentRows(nowMs);
     if (this.screen.kind === 'messages') {
-      return (this.data?.messages ?? []).map(c => ({
+      return recentChats(this.data?.messages ?? [], nowMs, this.hideOldTexts).map(c => ({
         text: clip(`${c.unread ? '*' : ' '} ${c.name} ${age(c.when, nowMs)}: ${c.fromMe ? 'You: ' : ''}${c.snippet}`, WIDTH - 2),
         open: { kind: 'chat', id: c.id, name: c.name },
       }));
@@ -797,7 +814,7 @@ export class HomeModel {
       return lines.join('\n');
     }
     if (s.kind === 'home') {
-      lines.push(...this.list(this.homeRows()));
+      lines.push(...this.list(this.homeRows(nowMs)));
       const offline = this.data.machines.filter(m => !m.online).map(m => m.name);
       if (this.error) lines.push(clip(`Offline: ${this.error}`));
       else if (offline.length) lines.push(`Offline: ${offline.join(', ')}`);

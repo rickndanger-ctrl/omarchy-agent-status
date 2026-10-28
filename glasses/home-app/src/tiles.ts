@@ -256,7 +256,7 @@ function chatWidget(id: WidgetId): Widget {
     title: ctx => find(ctx)?.name ?? 'Chat',
     body: (ctx, width) => {
       const c = find(ctx);
-      if (!c) return ctx.data?.messages ? ['No such chat.'] : ['Loading…'];
+      if (!c) return ctx.data?.messages ? [ref === 'recent' ? 'No recent chats.' : 'No such chat.'] : ['Loading…'];
       const lines = ctx.chat(c.id);
       return lines === null ? ['Loading…'] : lines.flatMap(line => (line ? wrap(line, width) : ['']));
     },

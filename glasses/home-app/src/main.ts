@@ -1,6 +1,6 @@
 import './style.css';
 import { Glasses } from './glasses';
-import { HomeModel, age, type Action, type ChatMessage, type HomeData, type Input } from './model';
+import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { MuseCache } from './musecache';
 import { Tiles, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
@@ -31,11 +31,13 @@ let token = store.get('home.token');
 
 const model = new HomeModel();
 model.hideDone = store.get('home.hideDone') === '1';
+// Texts older than 24 h are hidden on the glasses unless switched off (phone checkbox or the glasses menu).
+model.hideOldTexts = store.get('home.hideOldTexts') !== '0';
 let foreground = true;
 let recording: Uint8Array[] | null = null;
 let status = 'Starting…';
 
-const MENU = { refresh: 1, pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7, tiles: 8, tilesOn: 9, editPage: 10 };
+const MENU = { pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7, tiles: 8, tilesOn: 9, editPage: 10, hideOldTexts: 1 };
 let lastDevice = '';
 const glasses = new Glasses({
   onInput: input => handle(input),
@@ -63,7 +65,7 @@ const glasses = new Glasses({
   { id: MENU.tiles, name: 'Tiles' },
   { id: MENU.tilesOn, name: 'Start in Tiles' },
   { id: MENU.editPage, name: 'Edit page' },
-  { id: MENU.refresh, name: 'Refresh' },
+  { id: MENU.hideOldTexts, name: 'Hide old texts on/off' },
   { id: MENU.pause, name: 'Pause/resume approvals' },
   { id: MENU.hideDone, name: 'Hide/show finished agents' },
 ]);
@@ -77,6 +79,7 @@ $('app').innerHTML = `
     <button id="pair-top">Pair</button>
   </section>
   <p id="status" class="status"></p>
+  <label class="row"><input type="checkbox" id="hide-old"> Hide messages older than 24 h</label>
   <pre id="glass" class="glass"></pre>
   <div class="pad">
     <button data-input="up">▲ Swipe up</button>
@@ -206,7 +209,9 @@ const tileData = {
 };
 let justAdded: { title: string; at: number } | null = null;
 const tileCtx = (): TileContext => ({
-  data: model.data, now: Date.now(), battery: model.battery,
+  // The tiles see a filtered copy of the chat list; model.data itself stays whole so pop-ups are unaffected.
+  data: model.data && model.data.messages ? { ...model.data, messages: recentChats(model.data.messages, Date.now(), model.hideOldTexts) } : model.data,
+  now: Date.now(), battery: model.battery,
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,
   muse: () => museTile.get(),
@@ -234,7 +239,8 @@ async function refreshTiles(): Promise<void> {
           tileData.terminals.set(need.key, (await api<{ lines: string[] }>(`terminal?${query}`)).lines);
         } else if (need.kind === 'chat') {
           const r = await api<{ messages: ChatMessage[] }>(`messages?chat=${need.id}`);
-          tileData.chats.set(need.id, [...r.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`));
+          const shown = recentMessages(r.messages, Date.now(), model.hideOldTexts);
+          tileData.chats.set(need.id, [...(shown.hidden ? ['(older messages hidden)'] : []), ...[...shown.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`)]);
         } else if (need.kind === 'muse') {
           const stamp = museTile.pageFetchStart(page);
           if (stamp === null) return; // already read for this page view, or an ask is in flight (its reply is the newest word)
@@ -259,6 +265,14 @@ async function loadLayout(): Promise<void> {
 }
 
 /** The phone's Tiles editor: one row per page, two dropdowns of everything Home knows. Not rebuilt while you are editing. */
+function setHideOldTexts(on: boolean): void {
+  model.hideOldTexts = on;
+  store.set('home.hideOldTexts', on ? '1' : '0');
+  $<HTMLInputElement>('hide-old').checked = on;
+  paint();
+}
+$<HTMLInputElement>('hide-old').checked = model.hideOldTexts;
+$<HTMLInputElement>('hide-old').onchange = () => setHideOldTexts($<HTMLInputElement>('hide-old').checked);
 function syncStartInTiles(): void { $<HTMLInputElement>('start-tiles').checked = tilesOn; }
 $<HTMLInputElement>('start-tiles').onchange = () => {
   tilesOn = $<HTMLInputElement>('start-tiles').checked;
@@ -577,8 +591,11 @@ async function menu(id: number): Promise<void> {
     model.showFlash(tilesOn ? 'Start in Tiles: on' : 'Start in Tiles: off', Date.now());
     syncStartInTiles();
   }
-  if (id === MENU.refresh) void poll();
-  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.refresh, MENU.pause, MENU.hideDone, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
+  if (id === MENU.hideOldTexts) {
+    setHideOldTexts(!model.hideOldTexts);
+    model.showFlash(model.hideOldTexts ? 'Texts older than 24 h hidden' : 'All texts shown', Date.now());
+  }
+  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.hideOldTexts, MENU.pause, MENU.hideDone, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
   if (id === MENU.hideDone) {
     model.hideDone = !model.hideDone;
     store.set('home.hideDone', model.hideDone ? '1' : '0');
