@@ -704,15 +704,40 @@ async function messagesSummary() {
 
 // Open Reminders, cached briefly: the glasses poll /api/home often and the relay makes one call per list.
 let remindersCache = null // { at, items }
+// When the hub first saw each open reminder (ms): the "added" time, since the relay sends no creation date.
+// Kept in memory; pruned to the reminders that are still open after each full read.
+const firstSeen = new Map()
+// The same order as the tile's sortReminders (src/tiles.ts): due within a day (overdue too) first, soonest
+// first; then the newest added; a tie goes to the Reminders list.
+const DAY_MS = 86_400_000
+const byRelevance = now => {
+  const soon = r => typeof r.dueAt === 'number' && r.dueAt <= now + DAY_MS
+  return (a, b) =>
+    Number(soon(b)) - Number(soon(a))
+    || (soon(a) && soon(b) ? a.dueAt - b.dueAt : 0)
+    || (b.added ?? -Infinity) - (a.added ?? -Infinity)
+    || Number(b.list === 'Reminders') - Number(a.list === 'Reminders')
+}
 async function openReminders() {
   const lists = listOf(await remindersRelay('/lists'), 'lists')
   // One list at a time: the relay serves at most 8 connections and answers "busy" (503) past that.
   const groups = []
   for (const l of lists) {
     const items = listOf(await remindersRelay(`/lists/${encodeURIComponent(l.id)}/items?open=1`), 'items')
-    groups.push(items.map(i => ({ id: String(i.id), title: clip(i.title, 120), due: dueLabel(i.due), list: clip(l.title, 40) })))
+    groups.push(items.map(i => ({ id: String(i.id), title: clip(i.title, 120), due: dueLabel(i.due), dueAt: msOrNull(i.due), created: msOrNull(i.created ?? i.creationDate), list: clip(l.title, 40) })))
   }
-  return groups.flat()
+  const now = Date.now()
+  const all = groups.flat().map(({ created, ...r }) => {
+    if (!firstSeen.has(r.id)) firstSeen.set(r.id, now)
+    return { ...r, added: created ?? firstSeen.get(r.id) }
+  })
+  const open = new Set(all.map(r => r.id))
+  for (const id of firstSeen.keys()) if (!open.has(id)) firstSeen.delete(id)
+  return all.sort(byRelevance(now))
+}
+const msOrNull = iso => {
+  const t = Date.parse(iso)
+  return Number.isFinite(t) ? t : null
 }
 async function remindersSummary() {
   if (DEMO) return demoReminders()
@@ -721,6 +746,7 @@ async function remindersSummary() {
   // A failure is cached too (as null): a down relay must not stall every /api/home poll.
   let items = null
   try {
+    // Sorted in openReminders, so the 30 kept are the ones that matter most.
     items = (await openReminders()).slice(0, 30)
   } catch {
     items = null

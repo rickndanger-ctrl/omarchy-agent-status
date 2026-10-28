@@ -34,7 +34,8 @@ const [port, token] = [Number(process.argv[2]), process.argv[3]]
 const log = []
 // The Mini 1 relay's real shapes (checked read-only 2026-10-28): GET /lists -> [{id,title,count}],
 // GET /lists/<id>/items?open=1 -> [{id,title,due,notes,done}], POST /items {listId,title,due?} -> 201.
-const lists = [{ id: 'L1', title: 'Errands', count: 2 }, { id: 'L2', title: 'Home', count: 1 }, { id: 'L3', title: 'Reminders', count: 0 }]
+// Groceries comes before Reminders here, so a 30-cut before sorting would drop the Reminders items.
+const lists = [{ id: 'L1', title: 'Errands', count: 2 }, { id: 'L2', title: 'Home', count: 1 }, { id: 'L4', title: 'Groceries', count: 0 }, { id: 'L3', title: 'Reminders', count: 0 }]
 const items = [
   { id: 'R1', listId: 'L1', title: 'Buy milk', due: '2026-10-28T09:00:00-07:00', notes: '', done: false },
   { id: 'R2', listId: 'L2', title: 'Call dentist', due: null, notes: '', done: false },
@@ -55,7 +56,7 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/lists' && req.method === 'GET') return json(res, 200, lists)
   const listItems = url.pathname.match(/^\/lists\/(\w+)\/items$/)
   if (listItems && req.method === 'GET') {
-    const open = items.filter(i => i.listId === listItems[1] && !i.done).map(({ id, title, due, notes, done }) => ({ id, title, due, notes, done }))
+    const open = items.filter(i => i.listId === listItems[1] && !i.done).map(({ id, title, due, notes, done, created }) => ({ id, title, due, notes, done, ...(created ? { created } : {}) }))
     return json(res, 200, open)
   }
   const done = url.pathname.match(/^\/items\/(\w+)\/done$/)
@@ -69,7 +70,7 @@ http.createServer(async (req, res) => {
     const b = JSON.parse(body || '{}')
     if (!lists.some(l => l.id === b.listId) || typeof b.title !== 'string' || !b.title) return json(res, 400, { error: 'listId and title are required' })
     const id = `R${next++}`
-    items.push({ id, listId: b.listId, title: b.title, due: b.due ?? null, notes: '', done: false })
+    items.push({ id, listId: b.listId, title: b.title, due: b.due ?? null, notes: '', done: false, created: b.created })
     return json(res, 201, { id, listId: b.listId, title: b.title })
   }
   return json(res, 404, { error: 'no route' })
@@ -181,6 +182,42 @@ req GET "$BARE" /api/reminders
 check "GET /api/reminders is 404 with no relay configured" 404
 req GET "$BARE" /api/home
 check "GET /api/home has reminders null with no relay" 200 "d['reminders'] is None"
+
+echo "Sorting and the 30 cut"
+# Straight to the fake relay: one item due in two hours (soon), a relay creation date, and 32 items due in
+# a month (far future). Then a fresh undated voice-style add through the hub must still make the 30 kept.
+relay_post() { curl -s -o /dev/null -X POST -H "Authorization: Bearer $RELAY_TOKEN" -H 'Content-Type: application/json' -d "$1" "$RELAY/items"; }
+due_in_two_hours=$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+due_in_a_month=$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(days=30)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+relay_post "{\"listId\":\"L3\",\"title\":\"Pay rent\",\"due\":\"$due_in_two_hours\"}"
+relay_post '{"listId":"L1","title":"Dated item","created":"2026-10-01T12:00:00Z"}'
+for i in $(seq 32); do relay_post "{\"listId\":\"L4\",\"title\":\"Groceries $i\",\"due\":\"$due_in_a_month\"}"; done
+req GET "$HUB" /api/reminders
+check "the hub has seen the posted items" 200 "len(d['reminders'])>=34"
+sleep 1 # so the fresh add is seen a moment later than the rest: it is the newest
+req POST "$HUB" /api/reminders/add '{"title":"Fresh idea","list":"Groceries"}'
+check "a fresh add goes through" 200 "d['ok'] is True"
+req GET "$HUB" /api/home
+check "the 30 kept include the soon item and the fresh undated add" 200 "len(d['reminders'])==30 and 'Pay rent' in [r['title'] for r in d['reminders']] and 'Fresh idea' in [r['title'] for r in d['reminders']]"
+req GET "$HUB" /api/reminders
+first=$OUT
+req GET "$HUB" /api/reminders
+second=$OUT
+if python3 -c 'import json,sys
+a={r["id"]:r["added"] for r in json.loads(sys.argv[1])["reminders"]}
+b={r["id"]:r["added"] for r in json.loads(sys.argv[2])["reminders"]}
+sys.exit(0 if a and a==b and all(isinstance(v,int) for v in a.values()) else 1)' "$first" "$second"; then
+  ok "added is stable across polls"
+else
+  bad "added is stable across polls"
+fi
+if printf '%s' "$second" | python3 -c 'import datetime,json,sys
+dated=[r for r in json.load(sys.stdin)["reminders"] if r["title"]=="Dated item"][0]
+sys.exit(0 if dated["added"]==int(datetime.datetime(2026,10,1,12,tzinfo=datetime.timezone.utc).timestamp()*1000) else 1)'; then
+  ok "a relay creation date is used as added"
+else
+  bad "a relay creation date is used as added"
+fi
 
 echo "Relay down"
 # relay_count: how many requests the fake relay has seen for the Reminders lists
