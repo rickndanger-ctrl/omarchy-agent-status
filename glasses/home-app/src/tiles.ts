@@ -69,7 +69,8 @@ export type OpenTarget =
   | { kind: 'agent'; key: string; then?: 'listen' | 'reply' }
   | { kind: 'chat'; id: number; name: string; then?: 'listen' | 'textReply' }
   | { kind: 'muse'; then?: 'listen' }
-  | { kind: 'messages' } | { kind: 'needs' } | { kind: 'studio' } | { kind: 'home' };
+  | { kind: 'messages' } | { kind: 'needs' } | { kind: 'studio' } | { kind: 'home' }
+  | { kind: 'reminderAdd' };
 
 /** What an action does: a Home action (send, decide, ...), open a full screen, or something tiles-only. */
 export type TileEffect =
@@ -234,7 +235,7 @@ function messagesWidget(): Widget {
     body: ctx => {
       if (!ctx.data?.messages) return ['Loading…'];
       if (!ctx.data.messages.length) return ['No messages.'];
-      return chats(ctx).map(c => clip(`${c.unread ? '●' : ' '} ${c.name}: ${c.snippet}`, W));
+      return chats(ctx).map(c => clip(`${c.unread ? '•' : ' '} ${c.name}: ${c.snippet}`, W));
     },
     actions: ctx => chats(ctx).slice(0, 5).map(c => ({ id: `chat:${c.id}`, label: clip(c.name, W - 2) })),
     act: (actionId, ctx) => {
@@ -310,8 +311,11 @@ function remindersWidget(): Widget {
       if (!list.length) return ['No reminders.'];
       return list.flatMap(r => wrap(`• ${r.title}${r.due ? ` (${r.due})` : ''}`, width));
     },
-    actions: ctx => (ctx.reminders() ?? []).slice(0, 5).map(r => ({ id: `done:${r.id}`, label: clip(`Done: ${r.title}`, W - 2) })),
-    act: actionId => (actionId.startsWith('done:') ? { kind: 'reminderDone', id: actionId.slice('done:'.length) } : null),
+    actions: ctx => [{ id: 'add', label: 'Add by voice' }, ...(ctx.reminders() ?? []).slice(0, 5).map(r => ({ id: `done:${r.id}`, label: clip(`Done: ${r.title}`, W - 2) }))],
+    act: actionId => {
+      if (actionId === 'add') return { kind: 'open', target: { kind: 'reminderAdd' } };
+      return actionId.startsWith('done:') ? { kind: 'reminderDone', id: actionId.slice('done:'.length) } : null;
+    },
     needs: () => [{ kind: 'reminders' }],
   };
 }
@@ -384,6 +388,51 @@ export class Tiles implements TilesApi {
   private mode: Mode = { kind: 'page' };
   /** Lines scrolled up from the newest (log-like tiles) or down from the top (lists), per tile. */
   private scroll = 0;
+  /** "Edit page": pick the left, then the right widget for the current page from everything Home knows. */
+  private edit: { side: Side; cursor: number; left: WidgetId } | null = null;
+  private edited: Layout | null = null;
+
+  getLayout(): Layout { return this.layout; }
+
+  /** Start editing the current page (the long-press menu's "Edit page"). */
+  startEdit(ctx: TileContext): void {
+    this.edit = { side: 'left', cursor: this.optionIndex(ctx, this.layout.pages[this.page].left), left: '' };
+    this.mode = { kind: 'tile', side: 'left', menu: null };
+  }
+
+  /** The layout the last "Edit page" produced, once; main.ts saves it to the hub. */
+  takeEdited(): Layout | null {
+    const out = this.edited;
+    this.edited = null;
+    return out;
+  }
+
+  private options(ctx: TileContext): { id: WidgetId; label: string }[] {
+    return availableWidgets(ctx.data);
+  }
+
+  private optionIndex(ctx: TileContext, id: WidgetId): number {
+    return Math.max(0, this.options(ctx).findIndex(o => o.id === id));
+  }
+
+  private inputEdit(input: Input, ctx: TileContext): TilesResult {
+    const edit = this.edit!;
+    const options = this.options(ctx);
+    if (input === 'back') { this.edit = null; this.mode = { kind: 'page' }; return null; }
+    if (input === 'up' || input === 'down') { edit.cursor = (edit.cursor + options.length + (input === 'down' ? 1 : -1)) % options.length; return null; }
+    const pick = options[edit.cursor]?.id ?? 'empty';
+    if (edit.side === 'left') {
+      this.edit = { side: 'right', cursor: this.optionIndex(ctx, this.layout.pages[this.page].right), left: pick };
+      this.mode = { kind: 'tile', side: 'right', menu: null };
+      return null;
+    }
+    const pages = this.layout.pages.map((p, i) => (i === this.page ? { left: edit.left, right: pick } : p));
+    this.layout = normalizeLayout({ pages });
+    this.edited = this.layout;
+    this.edit = null;
+    this.mode = { kind: 'page' };
+    return null;
+  }
 
   setLayout(layout: Layout): void {
     this.layout = normalizeLayout(layout);
@@ -409,6 +458,7 @@ export class Tiles implements TilesApi {
   }
 
   input(input: Input, ctx: TileContext): TilesResult {
+    if (this.edit) return this.inputEdit(input, ctx);
     const mode = this.mode;
     if (mode.kind === 'page') {
       if (input === 'up' || input === 'down') {
@@ -452,7 +502,13 @@ export class Tiles implements TilesApi {
       if (side === 'left') title = `${this.page + 1}/${this.layout.pages.length} ${title}`;
       let view: string[];
       let mark = '';
-      if (menu !== null) {
+      if (this.edit && this.edit.side === side) {
+        const options = this.options(ctx);
+        const c = this.edit.cursor;
+        const start = Math.min(Math.max(0, c - Math.floor(BODY_LINES / 2)), Math.max(0, options.length - BODY_LINES));
+        title = `Pick ${side}`;
+        view = options.slice(start, start + BODY_LINES).map((o, i) => `${start + i === c ? '>' : ' '} ${clip(o.label, W - 2)}`);
+      } else if (menu !== null) {
         const items = this.menuItems(w, ctx);
         const start = Math.min(Math.max(0, menu - Math.floor(BODY_LINES / 2)), Math.max(0, items.length - BODY_LINES));
         view = items.slice(start, start + BODY_LINES).map((it, i) => `${start + i === menu ? '>' : ' '} ${clip(it.label, W - 2)}`);

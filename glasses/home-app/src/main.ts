@@ -1,6 +1,7 @@
 import './style.css';
 import { Glasses } from './glasses';
-import { HomeModel, type Action, type HomeData, type Input } from './model';
+import { HomeModel, age, type Action, type ChatMessage, type HomeData, type Input } from './model';
+import { Tiles, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
 const POLL_MS = 2000;
@@ -33,7 +34,7 @@ let foreground = true;
 let recording: Uint8Array[] | null = null;
 let status = 'Starting…';
 
-const MENU = { refresh: 1, pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7 };
+const MENU = { refresh: 1, pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7, tiles: 8, tilesOn: 9, editPage: 10 };
 let lastDevice = '';
 const glasses = new Glasses({
   onInput: input => handle(input),
@@ -58,6 +59,9 @@ const glasses = new Glasses({
   { id: MENU.agents, name: 'Agents' },
   { id: MENU.messages, name: 'Messages' },
   { id: MENU.muse, name: 'Muse' },
+  { id: MENU.tiles, name: 'Tiles' },
+  { id: MENU.tilesOn, name: 'Tiles on/off' },
+  { id: MENU.editPage, name: 'Edit page' },
   { id: MENU.refresh, name: 'Refresh' },
   { id: MENU.pause, name: 'Pause/resume approvals' },
   { id: MENU.hideDone, name: 'Hide/show finished agents' },
@@ -79,6 +83,12 @@ $('app').innerHTML = `
     <button data-input="back">Double-tap</button>
     <button data-input="down">▼ Swipe down</button>
   </div>
+  <details id="tiles-editor">
+    <summary>Tiles</summary>
+    <p class="muted">Five pages, two apps each. This is what the glasses show in Tiles.</p>
+    <div id="tile-rows"></div>
+    <div class="row"><button id="tiles-save">Save tiles</button></div>
+  </details>
   <details ${token ? '' : 'open'}>
     <summary>Connection</summary>
     <label>Server<input id="base" autocomplete="off" spellcheck="false"></label>
@@ -177,10 +187,166 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   throw lastError;
 }
 
+// ---- Tiles: five pages of two apps each (src/tiles.ts). ----
+const tiles = new Tiles();
+tiles.setLayout(DEFAULT_LAYOUT);
+/** On: Home opens in Tiles. Off: Tiles only opens from the Home list or the long-press menu. */
+let tilesOn = store.get('home.tiles') === '1';
+let tilesActive = false;
+/** A full screen opened from a tile: double-tap returns to Tiles. */
+let fromTiles = false;
+const tileData = {
+  terminals: new Map<string, string[]>(),
+  chats: new Map<number, string[]>(),
+  muse: null as { question: string; reply: string } | null,
+  reminders: null as Reminder[] | null,
+  urls: new Map<string, UrlTile>(),
+};
+const tileCtx = (): TileContext => ({
+  data: model.data, now: Date.now(), battery: model.battery,
+  terminal: key => tileData.terminals.get(key) ?? null,
+  chat: id => tileData.chats.get(id) ?? null,
+  muse: () => tileData.muse,
+  reminders: () => tileData.reminders,
+  url: endpoint => tileData.urls.get(endpoint) ?? null,
+});
+const showingTiles = () => tilesActive && !fromTiles;
+// Screens a tile opens: one double-tap there goes straight back to Tiles.
+const TOP_SCREENS = ['agent', 'chat', 'muse', 'messages', 'needs', 'studio', 'home'];
+
+let tilesBusy = false;
+/** Muse is fetched once when a page with its tile is shown (entering Tiles, or swiping to that page), never on a timer. */
+let museFetchedOn = -1;
+async function refreshTiles(): Promise<void> {
+  if (!showingTiles() || tilesBusy) return;
+  tilesBusy = true;
+  const page = tiles.render(tileCtx()).page;
+  const museDue = museFetchedOn !== page;
+  try {
+    await Promise.all(tiles.needs(tileCtx()).map(async need => {
+      try {
+        if (need.kind === 'terminal') {
+          const query = new URLSearchParams({ machine: need.machine, pane: need.pane, ...(need.window ? { window: need.window } : {}), ...(need.appThread ? { appThread: need.appThread } : {}), stamps: '1' });
+          tileData.terminals.set(need.key, (await api<{ lines: string[] }>(`terminal?${query}`)).lines);
+        } else if (need.kind === 'chat') {
+          const r = await api<{ messages: ChatMessage[] }>(`messages?chat=${need.id}`);
+          tileData.chats.set(need.id, [...r.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`));
+        } else if (need.kind === 'muse') {
+          if (!museDue) return;
+          museFetchedOn = page;
+          tileData.muse = await api<{ question: string; reply: string }>('muse');
+        } else if (need.kind === 'reminders') {
+          tileData.reminders = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
+        } else if (need.kind === 'url') {
+          tileData.urls.set(need.endpoint, await api<UrlTile>(`tile?url=${encodeURIComponent(need.endpoint)}`));
+        }
+      } catch { /* keep what the tile showed; it says Loading… if it never had anything */ }
+    }));
+  } finally {
+    tilesBusy = false;
+    paint();
+  }
+}
+
+async function loadLayout(): Promise<void> {
+  try { tiles.setLayout(normalizeLayout(await api<Layout>('layout'))); } catch { /* the default layout stays */ }
+  buildEditor();
+  paint();
+}
+
+/** The phone's Tiles editor: one row per page, two dropdowns of everything Home knows. Not rebuilt while you are editing. */
+let editorDirty = false;
+let editorKey = '';
+function buildEditor(): void {
+  if (editorDirty) return;
+  const layout = tiles.getLayout();
+  const options = availableWidgets(model.data);
+  const key = JSON.stringify([layout, options.map(o => o.id)]);
+  if (key === editorKey) return;
+  editorKey = key;
+  const rows = $('tile-rows');
+  rows.replaceChildren(...layout.pages.map((page, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const label = document.createElement('b');
+    label.textContent = `Page ${i + 1}`;
+    row.append(label);
+    for (const side of ['left', 'right'] as const) {
+      const select = document.createElement('select');
+      select.dataset.page = String(i);
+      select.dataset.side = side;
+      const choices = options.some(o => o.id === page[side]) ? options : [...options, { id: page[side], label: page[side] }];
+      for (const o of choices) select.append(new Option(o.label, o.id, false, o.id === page[side]));
+      select.onchange = () => { editorDirty = true; };
+      row.append(select);
+    }
+    return row;
+  }));
+}
+$('tiles-save').onclick = async () => {
+  const pages = Array.from({ length: PAGE_COUNT }, (_, i) => ({
+    left: $<HTMLSelectElement>('tile-rows').querySelector<HTMLSelectElement>(`select[data-page="${i}"][data-side="left"]`)?.value ?? 'empty',
+    right: $<HTMLSelectElement>('tile-rows').querySelector<HTMLSelectElement>(`select[data-page="${i}"][data-side="right"]`)?.value ?? 'empty',
+  }));
+  await saveLayout(normalizeLayout({ pages }));
+};
+
+async function saveLayout(layout: Layout): Promise<void> {
+  tiles.setLayout(layout);
+  editorDirty = false;
+  try {
+    await api('layout', { method: 'PUT', body: JSON.stringify(tiles.getLayout()) });
+    status = 'Tiles saved.';
+  } catch (error) {
+    status = `Tiles not saved: ${error instanceof Error ? error.message : error}`;
+  }
+  buildEditor();
+  paint();
+}
+
+function enterTiles(): void {
+  museFetchedOn = -1;
+  tilesActive = true;
+  fromTiles = false;
+  void loadLayout();
+  void refreshTiles();
+  paint();
+}
+
+/** Do what a tile's action asked for. */
+function runTileEffect(effect: TileEffect): void {
+  if (effect.kind === 'action') { void run(effect.action); return; }
+  if (effect.kind === 'open') {
+    fromTiles = true;
+    const action = model.openTarget(effect.target as OpenTarget);
+    if (action) void run(action);
+    void refreshTerminal();
+    return;
+  }
+  if (effect.kind === 'reminderDone') {
+    void api('reminders/done', { method: 'POST', body: JSON.stringify({ id: effect.id }) }).catch(() => {}).then(() => refreshTiles());
+  } else if (effect.kind === 'urlAction') {
+    void api('tile/action', { method: 'POST', body: JSON.stringify({ url: effect.endpoint, id: effect.id }) }).catch(() => {}).then(() => refreshTiles());
+  }
+}
+
+let prevKind = model.screenKind;
 function paint(): void {
-  const text = model.render(Date.now());
-  glasses.setText(text);
-  $('glass').textContent = text;
+  // A reminder that was added or cancelled (or whose voice failed) ends on Home: that is back in Tiles.
+  if (fromTiles && model.screenKind === 'home' && (prevKind === 'listen' || prevKind === 'confirm')) fromTiles = false;
+  prevKind = model.screenKind;
+  let preview: string;
+  if (showingTiles()) {
+    const frame = tiles.render(tileCtx());
+    glasses.setTiles(`p${frame.page}`, frame.focus, frame.left, frame.right);
+    const l = frame.left.split('\n');
+    const r = frame.right.split('\n');
+    preview = Array.from({ length: Math.max(l.length, r.length) }, (_, i) => (l[i] ?? '').padEnd(28) + '│ ' + (r[i] ?? '')).join('\n');
+  } else {
+    preview = model.render(Date.now());
+    glasses.setText(preview);
+  }
+  $('glass').textContent = preview;
   $('status').textContent = status;
 }
 
@@ -212,6 +378,7 @@ async function poll(): Promise<void> {
   polling = true;
   try {
     model.update(await api<HomeData>('home'));
+    buildEditor();
     // No weather yet? Try sharing the location again (at most every 2 minutes).
     if (!model.data?.weather && Date.now() - lastLocationTry > 120_000) void shareLocation();
   } catch (error) {
@@ -307,7 +474,7 @@ async function run(action: Action): Promise<void> {
         await new Promise(r => setTimeout(r, 700));
         const job = await api<{ status: string; question: string; reply: string; error?: string }>(`muse/reply?id=${encodeURIComponent(asked.id)}`).catch(() => null);
         if (!job) continue;
-        if (job.reply) model.setMuseAnswer(job.question, job.reply);
+        if (job.reply) { model.setMuseAnswer(job.question, job.reply); tileData.muse = { question: job.question, reply: job.reply }; }
         paint();
         if (['done', 'error', 'timeout'].includes(job.status)) {
           diag('muse.reply', `${job.status} ${job.error ?? ''}`);
@@ -333,8 +500,18 @@ async function run(action: Action): Promise<void> {
       model.showFlash(r.ok ? `Started ${action.agent} on ${action.machine}` : `Couldn't start: ${r.error ?? 'error'}`, Date.now());
       if (r.ok && r.pane) model.expectAgent(action.machine, r.pane, Date.now());
       void poll();
+    } else if (action.kind === 'addReminder') {
+      const r = await api<{ ok: boolean }>('reminders/add', { method: 'POST', body: JSON.stringify({ title: action.title }) }).catch(() => ({ ok: false }));
+      diag('reminder.add', `ok=${r.ok}`);
+      model.showFlash(r.ok ? 'Reminder added' : 'Reminder not added', Date.now());
+      if (fromTiles) fromTiles = false;
+      void refreshTiles();
+    } else if (action.kind === 'openTiles') {
+      enterTiles();
     } else if (action.kind === 'loadMuse') {
-      model.setMuse(await api<{ question: string; reply: string }>('muse').catch(() => null));
+      const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
+      model.setMuse(latest);
+      if (latest) tileData.muse = latest;
     }
   } catch (error) {
     model.showFlash(error instanceof Error ? error.message : 'Failed', Date.now());
@@ -343,7 +520,24 @@ async function run(action: Action): Promise<void> {
 }
 
 function handle(input: Input): void {
-  diag('input', `${input} on ${model.screenKind}`);
+  diag('input', `${input} on ${showingTiles() ? 'tiles' : model.screenKind}`);
+  if (showingTiles()) {
+    const result = tiles.input(input, tileCtx());
+    if (result?.kind === 'exit') { tilesActive = false; model.goHome(); paint(); return; }
+    paint();
+    if (result) runTileEffect(result as TileEffect);
+    const edited = tiles.takeEdited();
+    if (edited) void saveLayout(edited);
+    void refreshTiles();
+    return;
+  }
+  // Back from a screen a tile opened: straight to Tiles.
+  if (tilesActive && fromTiles && input === 'back' && TOP_SCREENS.includes(model.screenKind)) {
+    fromTiles = false;
+    paint();
+    void refreshTiles();
+    return;
+  }
   const action = model.input(input, Date.now());
   paint();
   if (action) void run(action);
@@ -356,7 +550,16 @@ async function menu(id: number): Promise<void> {
   if (id === MENU.agents) model.goTo('agents');
   if (id === MENU.messages) model.goTo('messages');
   if (id === MENU.muse) { model.goTo('muse'); void run({ kind: 'loadMuse' }); }
+  if (id === MENU.tiles) enterTiles();
+  if (id === MENU.editPage) { if (!showingTiles()) enterTiles(); tiles.startEdit(tileCtx()); }
+  if (id === MENU.tilesOn) {
+    tilesOn = !tilesOn;
+    store.set('home.tiles', tilesOn ? '1' : '0');
+    model.showFlash(tilesOn ? 'Tiles on: Home opens in Tiles' : 'Tiles off', Date.now());
+    if (tilesOn) enterTiles(); else { tilesActive = false; fromTiles = false; }
+  }
   if (id === MENU.refresh) void poll();
+  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.refresh, MENU.pause, MENU.hideDone, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
   if (id === MENU.hideDone) {
     model.hideDone = !model.hideDone;
     store.set('home.hideDone', model.hideDone ? '1' : '0');
@@ -385,11 +588,12 @@ async function shareLocation(): Promise<void> {
   if (at) await api('location', { method: 'POST', body: JSON.stringify(at) }).catch(() => {});
 }
 
-paint();
+if (tilesOn) enterTiles(); else paint();
 void glasses.connect().then(() => shareLocation());
 setInterval(() => void shareLocation(), 30 * 60_000);
 void poll();
 setInterval(() => { if (foreground) void poll(); }, POLL_MS);
 // The open agent's conversation refreshes faster than the rest, so replies show up quickly.
-setInterval(() => { if (foreground) void refreshTerminal(); }, 1200);
+setInterval(() => { if (foreground) { void refreshTerminal(); void refreshTiles(); } }, 1200);
+setInterval(() => void loadLayout(), 60_000);
 setInterval(paint, 15_000); // keep the clock current between polls

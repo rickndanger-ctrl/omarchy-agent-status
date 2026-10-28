@@ -33,6 +33,12 @@ export interface GlassesOptions {
 
 const CONTAINER_ID = 1;
 const CONTAINER_NAME = 'home-main';
+// Tiles mode: two text containers side by side, 288 px each (27 characters, 9 lines).
+const TILE_IDS = { left: 2, right: 3 } as const;
+const TILE_NAMES = { left: 'tile-left', right: 'tile-right' } as const;
+const TILE_W = 288;
+/** What the glasses should show: one full-screen text block, or two tiles. `key` is page + focus: a change rebuilds the page. */
+type Frame = { kind: 'single'; text: string } | { kind: 'tiles'; key: string; focus: 'page' | 'left' | 'right'; left: string; right: string };
 // Each redraw is a Bluetooth write; too many in a row delays taps and swipes coming back.
 const MIN_RENDER_INTERVAL_MS = 450;
 const BRIDGE_TIMEOUT_MS = 15000;
@@ -63,8 +69,8 @@ export class Glasses {
   private connecting: Promise<boolean> | null = null;
   private epoch = 0;
   private foreground = true;
-  private content = 'HOME\n\nConnecting…';
-  private sentContent = '';
+  private want: Frame = { kind: 'single', text: 'HOME\n\nConnecting…' };
+  private shown: Frame | null = null;
   private renderTimer: ReturnType<typeof setTimeout> | undefined;
   private renderBusy = false;
   private renderBlocked = false;
@@ -86,9 +92,27 @@ export class Glasses {
     return this.connecting;
   }
 
-  private page(text: TextContainerProperty) {
+  /** The text containers for a frame. Exactly one has isEventCapture; in tiles mode a focused tile gets a border so you can see where you are. */
+  private containers(frame: Frame): TextContainerProperty[] {
+    if (frame.kind === 'single') {
+      return [new TextContainerProperty({
+        xPosition: 0, yPosition: 0, width: 576, height: 288, borderWidth: 0, paddingLength: 4,
+        containerID: CONTAINER_ID, containerName: CONTAINER_NAME, isEventCapture: 1, content: frame.text,
+      })];
+    }
+    // At page level no tile is focused: the left one catches the gestures, with no border on either.
+    const owner = frame.focus === 'right' ? 'right' : 'left';
+    return (['left', 'right'] as const).map(side => new TextContainerProperty({
+      xPosition: side === 'left' ? 0 : TILE_W, yPosition: 0, width: TILE_W, height: 288,
+      borderWidth: frame.focus === side ? 2 : 0, borderColor: 13, borderRadius: 4, paddingLength: 4,
+      containerID: TILE_IDS[side], containerName: TILE_NAMES[side], isEventCapture: side === owner ? 1 : 0, content: frame[side],
+    }));
+  }
+
+  private page(frame: Frame) {
+    const textObject = this.containers(frame);
     const menuObject = new MenuContainerProperty({ menuItems: this.menu.map(m => new MenuItemProperty({ itemID: m.id, itemName: m.name })) });
-    return { containerTotalNum: 1, textObject: [text], menuObject };
+    return { containerTotalNum: textObject.length, textObject, menuObject };
   }
 
   private async open(epoch: number): Promise<boolean> {
@@ -109,23 +133,17 @@ export class Glasses {
       void ask();
       if (!this.deviceTimer) this.deviceTimer = setInterval(() => void ask(), 60_000);
       stage = this.pageCreated ? 'Glasses display resume' : 'Glasses display startup';
-      const displayed = this.content;
-      const text = new TextContainerProperty({
-        xPosition: 0, yPosition: 0, width: 576, height: 288,
-        borderWidth: 0, paddingLength: 4,
-        containerID: CONTAINER_ID, containerName: CONTAINER_NAME,
-        isEventCapture: 1, content: displayed,
-      });
+      const displayed = this.want;
       if (this.pageCreated) {
-        const result = await bounded(this.sdk.rebuildPageContainer(new RebuildPageContainer(this.page(text))), stage);
+        const result = await bounded(this.sdk.rebuildPageContainer(new RebuildPageContainer(this.page(displayed))), stage);
         if (!result) throw new Error('The Even app returned false for rebuilding the page.');
       } else {
-        const result = await bounded(this.sdk.createStartUpPageContainer(new CreateStartUpPageContainer(this.page(text))), stage);
+        const result = await bounded(this.sdk.createStartUpPageContainer(new CreateStartUpPageContainer(this.page(displayed))), stage);
         // The official SDK success value is numeric zero, not a truthy flag.
         if (result === StartUpPageCreateResult.invalid) {
           // A developer reload can leave the native host owning a page: rebuild once.
           stage = 'Glasses display recovery';
-          const rebuilt = await bounded(this.sdk.rebuildPageContainer(new RebuildPageContainer(this.page(text))), stage);
+          const rebuilt = await bounded(this.sdk.rebuildPageContainer(new RebuildPageContainer(this.page(displayed))), stage);
           if (!rebuilt) throw new Error('Startup returned code 1 (invalid), and the recovery rebuild returned false.');
         } else if (result !== StartUpPageCreateResult.success) {
           throw new Error(`The Even app returned code ${result} (${StartUpPageCreateResult[result] ?? 'unknown'}).`);
@@ -135,7 +153,7 @@ export class Glasses {
       this.pageCreated = true;
       this.connected = true;
       this.renderBlocked = false;
-      this.sentContent = displayed;
+      this.shown = displayed;
       this.options.onStatus('Home is showing on your glasses.');
       this.scheduleRender();
       return true;
@@ -171,9 +189,27 @@ export class Glasses {
   }
 
   setText(content: string): void {
-    this.content = glassesSafe(content).slice(0, 950) || ' ';
+    this.want = { kind: 'single', text: glassesSafe(content).slice(0, 950) || ' ' };
     this.renderBlocked = false;
     this.scheduleRender();
+  }
+
+  /** Tiles mode. `layoutKey` names the page; changing it or the focus rebuilds the page, a text change only updates that tile. */
+  setTiles(layoutKey: string, focus: 'page' | 'left' | 'right', left: string, right: string): void {
+    this.want = { kind: 'tiles', key: `${layoutKey}/${focus}`, focus, left: glassesSafe(left).slice(0, 400) || ' ', right: glassesSafe(right).slice(0, 400) || ' ' };
+    this.renderBlocked = false;
+    this.scheduleRender();
+  }
+
+  /** What still has to reach the glasses: a rebuild, one tile's text, or nothing. */
+  private pending(): 'rebuild' | 'left' | 'right' | 'text' | null {
+    const want = this.want;
+    const shown = this.shown;
+    if (!shown || shown.kind !== want.kind) return 'rebuild';
+    if (want.kind === 'single') return shown.kind === 'single' && shown.text !== want.text ? 'text' : null;
+    if (shown.kind !== 'tiles') return 'rebuild';
+    if (shown.key !== want.key) return 'rebuild';
+    return shown.left !== want.left ? 'left' : shown.right !== want.right ? 'right' : null;
   }
 
   private onEvent(event: EvenHubEvent): void {
@@ -247,26 +283,39 @@ export class Glasses {
   }
 
   private scheduleRender(): void {
-    if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.renderTimer !== undefined || this.content === this.sentContent) return;
+    if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.renderTimer !== undefined || this.pending() === null) return;
     const wait = Math.max(0, MIN_RENDER_INTERVAL_MS - (performance.now() - this.lastRenderAt));
     this.renderTimer = setTimeout(() => { this.renderTimer = undefined; void this.flushRender(); }, wait);
   }
 
   private async flushRender(): Promise<void> {
-    if (!this.sdk || !this.connected || !this.foreground || this.renderBusy || this.content === this.sentContent) return;
-    const content = this.content;
+    if (!this.sdk || !this.connected || !this.foreground || this.renderBusy) return;
+    const todo = this.pending();
+    if (todo === null) return;
+    const want = this.want;
     const epoch = this.epoch;
     this.renderBusy = true;
     this.lastRenderAt = performance.now();
     try {
-      const accepted = await bounded(this.sdk.textContainerUpgrade(new TextContainerUpgrade({
-        containerID: CONTAINER_ID, containerName: CONTAINER_NAME, content,
-      })), 'Glasses text update', 5000);
+      let accepted: boolean;
+      if (todo === 'rebuild') {
+        accepted = await bounded(this.sdk.rebuildPageContainer(new RebuildPageContainer(this.page(want))), 'Glasses page update', 5000);
+      } else if (want.kind === 'single') {
+        accepted = await bounded(this.sdk.textContainerUpgrade(new TextContainerUpgrade({
+          containerID: CONTAINER_ID, containerName: CONTAINER_NAME, content: want.text,
+        })), 'Glasses text update', 5000);
+      } else {
+        const side = todo as 'left' | 'right';
+        accepted = await bounded(this.sdk.textContainerUpgrade(new TextContainerUpgrade({
+          containerID: TILE_IDS[side], containerName: TILE_NAMES[side], content: want[side],
+        })), 'Glasses text update', 5000);
+      }
       if (epoch !== this.epoch) return;
       const took = performance.now() - this.lastRenderAt;
       if (took > 2000) this.options.onSlowRender?.(Math.round(took));
       if (!accepted) throw new Error('The Even app returned false for the text update.');
-      this.sentContent = content;
+      if (todo === 'rebuild' || want.kind === 'single') this.shown = want;
+      else if (this.shown?.kind === 'tiles') this.shown = { ...this.shown, [todo]: want[todo as 'left' | 'right'] };
     } catch (error) {
       if (epoch === this.epoch) {
         this.renderBlocked = true;
