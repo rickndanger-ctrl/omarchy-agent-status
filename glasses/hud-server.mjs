@@ -126,10 +126,6 @@ const MUSES = (HUB.muse ?? (HUB.museUrl ? [{ name: 'local', url: HUB.museUrl }] 
   url: String(m.url).replace(/\/$/, ''),
   token: m.tokenFile ? tokenFrom(m.tokenFile) : RELAY_TOKEN,
 }))
-// Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl", "remindersTokenFile", "remindersList").
-const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
-const REMINDERS_TOKEN = HUB.remindersTokenFile ? tokenFrom(HUB.remindersTokenFile) : ''
-const REMINDERS_LIST = HUB.remindersList ? String(HUB.remindersList) : '' // default list for new reminders: an id or a title
 
 // ---- local state ---------------------------------------------------------------
 
@@ -779,6 +775,7 @@ function dueLabel(iso, now = Date.now()) {
   if (!iso) return null
   const due = new Date(iso)
   if (Number.isNaN(due.getTime())) return null
+  if (due.getTime() < now) return 'Overdue'
   const dayStart = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
   const days = Math.round((dayStart(due) - dayStart(new Date(now))) / 86_400_000)
   // Intl puts a narrow no-break space before AM/PM; a tile counts characters, so use plain spaces.
@@ -1232,6 +1229,10 @@ async function serveStatic(res, pathname) {
 }
 
 // ---- tiles: the pages (layout.json), Reminders and url: plug-in tiles -----------------------
+// Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl", "remindersTokenFile", "remindersList").
+const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
+const REMINDERS_TOKEN = HUB.remindersTokenFile ? tokenFrom(HUB.remindersTokenFile) : ''
+const REMINDERS_LIST = HUB.remindersList ? String(HUB.remindersList) : '' // default list for new reminders: an id or a title
 // DEFAULT_LAYOUT mirrors glasses/home-app/src/tiles.ts; keep the two equal.
 const TILE_LAYOUT_FILE = path.join(CONFIG_DIR, 'layout.json')
 const DEFAULT_LAYOUT = {

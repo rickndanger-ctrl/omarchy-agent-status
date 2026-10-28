@@ -153,7 +153,7 @@ if [ -f "$HOME/.config/agent-glasses/layout.json" ]; then ok "layout.json is wri
 echo "Reminders"
 req GET "$HUB" /api/reminders
 check "GET /api/reminders lists open items with list titles" 200 "sorted((r['title'],r['list']) for r in d['reminders'])==[('Buy milk','Errands'),('Call dentist','Home'),('Mail the card','Errands')]"
-check "a due time is a short tile label; no due stays null" 200 "all(re.match(r'^(Today \d{1,2}(:\d{2})? (AM|PM)|Tomorrow|[A-Z][a-z]{2} \d{1,2})$', r['due']) for r in d['reminders'] if r['due']) and [r['due'] for r in d['reminders'] if r['title']=='Call dentist']==[None]"
+check "a due time is a short tile label; no due stays null" 200 "all(re.match(r'^(Overdue|Today \d{1,2}(:\d{2})? (AM|PM)|Tomorrow|[A-Z][a-z]{2} \d{1,2})$', r['due']) for r in d['reminders'] if r['due']) and [r['due'] for r in d['reminders'] if r['title']=='Call dentist']==[None]"
 req GET "$HUB" /api/home
 check "GET /api/home carries reminders" 200 "len(d['reminders'])==3"
 req POST "$HUB" /api/reminders/done '{"id":"R1"}'
