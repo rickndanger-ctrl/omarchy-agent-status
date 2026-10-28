@@ -706,10 +706,12 @@ async function messagesSummary() {
 let remindersCache = null // { at, items }
 async function openReminders() {
   const lists = listOf(await remindersRelay('/lists'), 'lists')
-  const groups = await Promise.all(lists.map(async l => {
+  // One list at a time: the relay serves at most 8 connections and answers "busy" (503) past that.
+  const groups = []
+  for (const l of lists) {
     const items = listOf(await remindersRelay(`/lists/${encodeURIComponent(l.id)}/items?open=1`), 'items')
-    return items.map(i => ({ id: String(i.id), title: clip(i.title, 120), due: dueLabel(i.due), list: clip(l.title, 40) }))
-  }))
+    groups.push(items.map(i => ({ id: String(i.id), title: clip(i.title, 120), due: dueLabel(i.due), list: clip(l.title, 40) })))
+  }
   return groups.flat()
 }
 async function remindersSummary() {
