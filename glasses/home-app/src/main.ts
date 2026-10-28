@@ -2,7 +2,7 @@ import './style.css';
 import { Glasses } from './glasses';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { MuseCache } from './musecache';
-import { Tiles, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
+import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
 const POLL_MS = 2000;
@@ -210,7 +210,7 @@ const tileData = {
 let justAdded: { title: string; at: number } | null = null;
 const tileCtx = (): TileContext => ({
   // The tiles see a filtered copy of the chat list; model.data itself stays whole so pop-ups are unaffected.
-  data: model.data && model.data.messages ? { ...model.data, messages: recentChats(model.data.messages, Date.now(), model.hideOldTexts) } : model.data,
+  data: model.data && model.data.messages ? { ...model.data, messages: tileChats(model.data.messages, tiles.getLayout(), Date.now(), model.hideOldTexts) } : model.data,
   now: Date.now(), battery: model.battery,
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,

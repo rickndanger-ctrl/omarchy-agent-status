@@ -9,7 +9,7 @@ export type Input = 'up' | 'down' | 'select' | 'back';
 export interface Session { agent: string; name: string; session: string; state: string; page: string; at: number; workspace: string; machine: string; pane?: string; window?: string; appThread?: string; desktopSession?: string }
 export interface Desktop { machine: string; active: number; workspaces: { id: number; windows: string[] }[] }
 export interface Pending { id: string; agent: string; page: string; tool: string; summary: string; at: number; machine: string }
-export interface Chat { id: number; name: string; unread: boolean; when: number; snippet: string; fromMe: boolean }
+export interface Chat { id: number; name: string; unread: boolean; when: number; snippet: string; fromMe: boolean; /** Set by tileChats: older than 24 h but kept because a tile is pinned to it; lists and chat:recent skip it. */ old?: boolean }
 export interface ChatMessage { from: string; fromMe: boolean; when: number; text: string }
 export interface HomeData {
   now: number;

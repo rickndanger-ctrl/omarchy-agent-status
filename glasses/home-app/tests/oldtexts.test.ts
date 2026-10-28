@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HomeModel, recentChats, recentMessages, type Chat, type ChatMessage, type HomeData } from '../src/model.ts';
-import { widgetFor, type TileContext } from '../src/tiles.ts';
+import { tileChats, widgetFor, DEFAULT_LAYOUT, type Layout, type TileContext } from '../src/tiles.ts';
 
 const NOW = Date.UTC(2026, 9, 26, 18, 42);
 const H = 3600;
@@ -62,4 +62,20 @@ test('a new text still pops up with the setting on (model.data stays unfiltered)
 test('chat:recent with nothing recent says so', () => {
   const ctx = { data: { ...base([]) }, now: NOW, terminal: () => null, chat: () => null, muse: () => null, reminders: () => null, url: () => null } as TileContext;
   assert.deepEqual(widgetFor('chat:recent').body(ctx, 27), ['No recent chats.']);
+});
+
+test('a chat pinned by id keeps its last message and the note when it is 25 h old; chat:recent and the list skip it', () => {
+  const layout: Layout = { pages: [{ left: 'chat:7', right: 'messages' }, ...DEFAULT_LAYOUT.pages.slice(1)] };
+  const chats = [chat(7, 25, { name: 'Wife' }), chat(8, 30), chat(9, 2)];
+  const shown = tileChats(chats, layout, NOW, true);
+  assert.deepEqual(shown.map(c => [c.id, Boolean(c.old)]), [[7, true], [9, false]]); // 8 is old and not pinned: gone
+  assert.deepEqual(tileChats(chats, layout, NOW, false), chats);
+  const lines = (() => { const r = recentMessages([msg(25, 'last text'), msg(40, 'older one')], NOW, true); return [...(r.hidden ? ['(older messages hidden)'] : []), ...r.messages.map(m => m.text)]; })();
+  const ctx = { data: { ...base(shown) }, now: NOW, terminal: () => null, chat: () => lines, muse: () => null, reminders: () => null, url: () => null } as TileContext;
+  assert.equal(widgetFor('chat:7').title(ctx), 'Wife');
+  assert.deepEqual(widgetFor('chat:7').body(ctx, 27), ['(older messages hidden)', 'last text']);
+  assert.equal(widgetFor('chat:recent').title(ctx), 'Chat 9');
+  assert.ok(!widgetFor('messages').body(ctx, 27).join('\n').includes('Wife'));
+  const onlyPinned = { ...ctx, data: { ...base(tileChats([chat(7, 25)], layout, NOW, true)) } } as TileContext;
+  assert.deepEqual(widgetFor('chat:recent').body(onlyPinned, 27), ['No recent chats.']);
 });

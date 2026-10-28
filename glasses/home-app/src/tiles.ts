@@ -4,8 +4,8 @@
 //
 // CONTRACT (set by the architect; changing a type here is a breaking change: tell the
 // architect first). The implementation below the line is the main session's.
-import { clip, clock, conversationLines, museDisplay, sessionKey, studioText, STATE_WORD, wrap } from './model';
-import type { Action, HomeData, Input, Session } from './model';
+import { clip, clock, conversationLines, museDisplay, recentChats, sessionKey, studioText, STATE_WORD, wrap } from './model';
+import type { Action, Chat, HomeData, Input, Session } from './model';
 
 /** One tile is 288 px wide: 27 characters, 9 lines, title included. More lines make the glasses auto-scroll and swallow swipes. */
 export const TILE_WIDTH = 27;
@@ -245,11 +245,23 @@ function museWidget(): Widget {
   };
 }
 
+/**
+ * The chat list the tiles see. Old chats (24 h+) are dropped when `on`, except those a tile is pinned to by id
+ * (chat:<id>): they stay, marked `old`, so the pinned tile still shows its last message. The Messages tile and
+ * chat:recent skip the marked ones.
+ */
+export function tileChats(chats: Chat[], layout: Layout, nowMs: number, on: boolean): Chat[] {
+  if (!on) return chats;
+  const pinned = new Set(layout.pages.flatMap(p => [p.left, p.right]).filter(w => /^chat:\d+$/.test(w)).map(w => Number(w.slice(5))));
+  const recent = new Set(recentChats(chats, nowMs, true));
+  return chats.filter(c => recent.has(c) || pinned.has(c.id)).map(c => (recent.has(c) ? c : { ...c, old: true }));
+}
+
 function chatWidget(id: WidgetId): Widget {
   const ref = id.slice('chat:'.length);
   const find = (ctx: TileContext) => {
     const chats = ctx.data?.messages ?? [];
-    return ref === 'recent' ? [...chats].sort((a, b) => b.when - a.when)[0] : chats.find(c => String(c.id) === ref);
+    return ref === 'recent' ? [...chats].filter(c => !c.old).sort((a, b) => b.when - a.when)[0] : chats.find(c => String(c.id) === ref);
   };
   return {
     id, kind: 'chat',
@@ -274,13 +286,13 @@ function chatWidget(id: WidgetId): Widget {
 }
 
 function messagesWidget(): Widget {
-  const chats = (ctx: TileContext) => [...(ctx.data?.messages ?? [])].sort((a, b) => b.when - a.when);
+  const chats = (ctx: TileContext) => [...(ctx.data?.messages ?? [])].filter(c => !c.old).sort((a, b) => b.when - a.when);
   return {
     id: 'messages', kind: 'messages',
     title: ctx => { const n = chats(ctx).filter(c => c.unread).length; return n ? `Messages · ${n} new` : 'Messages'; },
     body: ctx => {
       if (!ctx.data?.messages) return ['Loading…'];
-      if (!ctx.data.messages.length) return ['No messages.'];
+      if (!chats(ctx).length) return ['No messages.'];
       return chats(ctx).map(c => clip(`${c.unread ? '•' : ' '} ${c.name}: ${c.snippet}`, W));
     },
     actions: ctx => chats(ctx).slice(0, 5).map(c => ({ id: `chat:${c.id}`, label: clip(c.name, W - 2) })),
