@@ -90,6 +90,12 @@ printf '%s\n' "wrong-token" > "$work/wrong.token"
 cat > "$work/hub-down.json" <<JSON
 {"remindersUrl":"$RELAY","remindersTokenFile":"$work/wrong.token"}
 JSON
+# Muse rule: this test never configures Muse. Fails if any hub config it writes mentions it.
+if grep -qi 'muse' "$HOME/.config/agent-glasses/hub.json" "$work/hub-bare.json" "$work/hub-down.json"; then
+  echo "  FAIL  the test hub configs must not mention muse (Muse is off limits to this test)"
+  exit 1
+fi
+echo "  ok    the test hub configs do not mention muse"
 HUD_HUB_CONFIG="$work/hub-down.json" node "$here/hud-server.mjs" --mode hub --port "$DOWN_PORT" --machine "Mini 1" >"$work/down.log" 2>&1 & pids+=($!)
 
 for url in "$RELAY/_log" "$HUB/api/health" "$BARE/api/health" "$DOWN/api/health"; do
