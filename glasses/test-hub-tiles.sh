@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# Tests the hub's tile routes: /api/layout, /api/reminders, /api/home reminders, /api/tile.
+# A fake Mini 1 Reminders relay and a fake url: plug-in run on spare ports; the hub runs with
+# HOME in a temp folder, so your real ~/.config/agent-glasses is never read or written.
+#   bash glasses/test-hub-tiles.sh          (needs node and python3)
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+RELAY_PORT=${RELAY_PORT:-5391}
+HUB_PORT=${HUB_PORT:-5392}
+BARE_PORT=${BARE_PORT:-5393}
+DOWN_PORT=${DOWN_PORT:-5394}
+RELAY="http://127.0.0.1:$RELAY_PORT"
+HUB="http://127.0.0.1:$HUB_PORT"
+BARE="http://127.0.0.1:$BARE_PORT"
+DOWN="http://127.0.0.1:$DOWN_PORT"
+TOKEN=hud-test-token
+RELAY_TOKEN=relay-test-token
+
+work=$(mktemp -d)
+export HOME="$work/home"
+mkdir -p "$HOME/.config/agent-glasses"
+pids=()
+cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; rm -rf "$work"; }
+trap cleanup EXIT
+
+pass=0; fail=0
+ok()  { printf '  ok    %s\n' "$1"; pass=$((pass + 1)); }
+bad() { printf '  FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+
+# ---- fake relay: Reminders (Mini 1 shape) plus a url: plug-in, logging every request ----
+cat > "$work/fake-relay.mjs" <<'JS'
+import http from 'node:http'
+const [port, token] = [Number(process.argv[2]), process.argv[3]]
+const log = []
+const lists = [{ id: 'L1', name: 'Errands' }, { id: 'L2', name: 'Home' }]
+const items = [
+  { id: 'R1', list: 'L1', title: 'Buy milk', due: '2026-10-28T18:00:00Z', done: false },
+  { id: 'R2', list: 'L2', title: 'Call dentist', due: null, done: false },
+]
+let next = 3
+const json = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)) }
+http.createServer(async (req, res) => {
+  let body = ''
+  for await (const c of req) body += c
+  const url = new URL(req.url, 'http://x')
+  log.push({ method: req.method, path: url.pathname + url.search, body })
+  if (url.pathname === '/_log') return json(res, 200, log)
+  // The plug-in: public, plain JSON.
+  if (url.pathname === '/plugin' && req.method === 'GET') return json(res, 200, { title: 'Weather', lines: ['Sunny', '72 F'], actions: [{ label: 'Refresh', id: 'refresh' }] })
+  if (url.pathname === '/plugin' && req.method === 'POST') return json(res, 200, { ok: true })
+  if (req.headers.authorization !== `Bearer ${token}`) return json(res, 401, { error: 'bad token' })
+  if (url.pathname === '/lists' && req.method === 'GET') return json(res, 200, { lists })
+  const listItems = url.pathname.match(/^\/lists\/(\w+)\/items$/)
+  if (listItems && req.method === 'GET') {
+    const open = items.filter(i => i.list === listItems[1] && !i.done).map(({ id, title, due }) => ({ id, title, due }))
+    return json(res, 200, open) // bare array, to exercise the hub's shape handling
+  }
+  const done = url.pathname.match(/^\/items\/(\w+)\/done$/)
+  if (done && req.method === 'POST') {
+    const item = items.find(i => i.id === done[1])
+    if (!item) return json(res, 404, { error: 'no item' })
+    item.done = true
+    return json(res, 200, { ok: true })
+  }
+  if (url.pathname === '/items' && req.method === 'POST') {
+    const b = JSON.parse(body || '{}')
+    const list = lists.find(l => l.name === b.list) ?? lists[0]
+    const id = `R${next++}`
+    items.push({ id, list: list.id, title: b.title, due: null, done: false })
+    return json(res, 200, { id })
+  }
+  return json(res, 404, { error: 'no route' })
+}).listen(port, '127.0.0.1')
+JS
+node "$work/fake-relay.mjs" "$RELAY_PORT" "$RELAY_TOKEN" & pids+=($!)
+
+# ---- config: a hub with the Reminders relay, and a bare hub with none ----
+printf '%s\n' "$RELAY_TOKEN" > "$work/relay.token"
+printf '%s\n' "$TOKEN" > "$work/hud.token"
+cat > "$HOME/.config/agent-glasses/hub.json" <<JSON
+{"remindersUrl":"$RELAY","remindersTokenFile":"$work/relay.token"}
+JSON
+echo '{}' > "$work/hub-bare.json"
+
+export HUD_TOKEN_FILE="$work/hud.token"
+HUD_HUB_CONFIG="$HOME/.config/agent-glasses/hub.json" node "$here/hud-server.mjs" --mode hub --port "$HUB_PORT" --machine "Mini 1" >"$work/hub.log" 2>&1 & pids+=($!)
+HUD_HUB_CONFIG="$work/hub-bare.json" node "$here/hud-server.mjs" --mode hub --port "$BARE_PORT" --machine "Mini 1" >"$work/bare.log" 2>&1 & pids+=($!)
+# A hub whose relay refuses its token: every relay call fails, the relay still logs each one.
+printf '%s\n' "wrong-token" > "$work/wrong.token"
+cat > "$work/hub-down.json" <<JSON
+{"remindersUrl":"$RELAY","remindersTokenFile":"$work/wrong.token"}
+JSON
+HUD_HUB_CONFIG="$work/hub-down.json" node "$here/hud-server.mjs" --mode hub --port "$DOWN_PORT" --machine "Mini 1" >"$work/down.log" 2>&1 & pids+=($!)
+
+for url in "$RELAY/_log" "$HUB/api/health" "$BARE/api/health" "$DOWN/api/health"; do
+  for _ in $(seq 50); do curl -s -o /dev/null "$url" && break; sleep 0.2; done
+done
+
+# ---- request helper: sets CODE and OUT. SEND_TOKEN=0 sends no token. ----
+req() { # method base path [json-body]
+  local m=$1 base=$2 path=$3 data=${4:-}
+  local auth=(-H "Authorization: Bearer $TOKEN")
+  [ "${SEND_TOKEN:-1}" = 0 ] && auth=()
+  if [ -n "$data" ]; then
+    CODE=$(curl -s -o "$work/out" -w '%{http_code}' -X "$m" "${auth[@]}" -H 'Content-Type: application/json' -d "$data" "$base$path")
+  else
+    CODE=$(curl -s -o "$work/out" -w '%{http_code}' -X "$m" "${auth[@]}" "$base$path")
+  fi
+  OUT=$(cat "$work/out")
+}
+# check LABEL WANT_CODE [PYTHON_EXPR]: the HTTP code must match and the JSON body (as d) must satisfy the expression
+check() {
+  local label=$1 want=$2 expr=${3:-True}
+  if [ "$CODE" = "$want" ] && printf '%s' "$OUT" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if ($expr) else 1)" 2>/dev/null; then
+    ok "$label"
+  else
+    bad "$label (HTTP $CODE, wanted $want: $OUT)"
+  fi
+}
+# logged PYTHON_EXPR: e is each request the fake relay has seen
+logged() {
+  curl -s "$RELAY/_log" | python3 -c "import json,sys; sys.exit(0 if any($1 for e in json.load(sys.stdin)) else 1)" 2>/dev/null
+}
+
+DEFAULT_PAGES='[{"left":"muse","right":"agent:Dell/claude"},{"left":"chat:recent","right":"agent:Mini 1/codex"},{"left":"reminders","right":"studio"},{"left":"approvals","right":"messages"},{"left":"clock","right":"empty"}]'
+PLUGIN="$RELAY/plugin"
+
+echo "Layout"
+SEND_TOKEN=0 req GET "$HUB" /api/layout
+check "GET /api/layout needs the token" 401
+req GET "$HUB" /api/layout
+check "GET /api/layout with no layout.json returns the default" 200 "d['pages']==$DEFAULT_PAGES"
+req PUT "$HUB" /api/layout '{"pages":[{"left":"a","right":"b"}]}'
+check "PUT /api/layout rejects a layout that is not five pages" 400
+req PUT "$HUB" /api/layout '{"pages":[{"left":"a","right":1},{"left":"a","right":"b"},{"left":"a","right":"b"},{"left":"a","right":"b"},{"left":"a","right":"b"}]}'
+check "PUT /api/layout rejects a non-string widget id" 400
+PLUGIN_PAGES=$(python3 -c "import json,sys; p=json.loads(sys.argv[1]); p[4]['left']=sys.argv[2]; print(json.dumps({'pages':p}))" "$DEFAULT_PAGES" "url:$PLUGIN")
+req PUT "$HUB" /api/layout "$PLUGIN_PAGES"
+check "PUT /api/layout saves five pages" 200 "d['pages'][4]['left']=='url:$PLUGIN'"
+req GET "$HUB" /api/layout
+check "GET /api/layout reads back what was saved" 200 "d['pages'][4]['left']=='url:$PLUGIN'"
+if [ -f "$HOME/.config/agent-glasses/layout.json" ]; then ok "layout.json is written under the config folder"; else bad "layout.json is written under the config folder"; fi
+
+echo "Reminders"
+req GET "$HUB" /api/reminders
+check "GET /api/reminders lists open items from every list" 200 "sorted((r['title'],r['list']) for r in d['reminders'])==[('Buy milk','Errands'),('Call dentist','Home')]"
+req GET "$HUB" /api/home
+check "GET /api/home carries reminders" 200 "len(d['reminders'])==2"
+req POST "$HUB" /api/reminders/done '{"id":"R1"}'
+check "POST /api/reminders/done answers ok" 200 "d['ok'] is True"
+if logged "e['method']=='POST' and e['path']=='/items/R1/done'"; then ok "done reached the relay as POST /items/R1/done"; else bad "done reached the relay as POST /items/R1/done"; fi
+req GET "$HUB" /api/reminders
+check "a done item leaves the open list" 200 "[r['id'] for r in d['reminders']]==['R2']"
+req POST "$HUB" /api/reminders/add '{"title":"Water plants","list":"Home"}'
+check "POST /api/reminders/add answers ok" 200 "d['ok'] is True"
+req GET "$HUB" /api/reminders
+check "an added item appears in its list" 200 "sorted(r['title'] for r in d['reminders'])==['Call dentist','Water plants']"
+req POST "$HUB" /api/reminders/add '{"title":""}'
+check "POST /api/reminders/add refuses an empty title" 400
+req GET "$BARE" /api/reminders
+check "GET /api/reminders is 404 with no relay configured" 404
+req GET "$BARE" /api/home
+check "GET /api/home has reminders null with no relay" 200 "d['reminders'] is None"
+
+echo "Relay down"
+# relay_count: how many requests the fake relay has seen for the Reminders lists
+relay_count() { curl -s "$RELAY/_log" | python3 -c "import json,sys; print(sum(1 for e in json.load(sys.stdin) if e['path'].startswith('/lists')))"; }
+before=$(relay_count)
+req GET "$DOWN" /api/home
+check "a failing relay leaves reminders null on /api/home" 200 "d['reminders'] is None"
+after_first=$(relay_count)
+req GET "$DOWN" /api/home
+check "a second /api/home still answers with reminders null" 200 "d['reminders'] is None"
+after_second=$(relay_count)
+if [ "$after_first" -gt "$before" ] && [ "$after_second" = "$after_first" ]; then
+  ok "the failure is cached: the second poll made no relay call"
+else
+  bad "the failure is cached: the second poll made no relay call (relay calls: $before, $after_first, $after_second)"
+fi
+
+echo "Plug-in tiles"
+req GET "$HUB" "/api/tile?url=$PLUGIN"
+check "GET /api/tile returns a tile for a url: endpoint in the layout" 200 "d['title']=='Weather' and d['lines']==['Sunny','72 F'] and d['actions'][0]['id']=='refresh'"
+req GET "$HUB" "/api/tile?url=$RELAY/not-in-layout"
+check "GET /api/tile refuses an endpoint not in the layout" 404
+req POST "$HUB" /api/tile/action "{\"url\":\"$PLUGIN\",\"id\":\"refresh\"}"
+check "POST /api/tile/action answers ok" 200 "d['ok'] is True"
+if logged "e['path']=='/plugin' and e['method']=='POST' and '\"refresh\"' in e['body']"; then ok "the action reached the plug-in as POST {id}"; else bad "the action reached the plug-in as POST {id}"; fi
+req POST "$HUB" /api/tile/action "{\"url\":\"$RELAY/not-in-layout\",\"id\":\"refresh\"}"
+check "POST /api/tile/action refuses an endpoint not in the layout" 404
+req POST "$HUB" /api/tile/action "{\"url\":\"$PLUGIN\"}"
+check "POST /api/tile/action needs an action id" 400
+
+echo
+echo "$pass passed, $fail failed"
+[ "$fail" = 0 ]

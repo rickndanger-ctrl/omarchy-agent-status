@@ -21,6 +21,11 @@
 //   POST /api/transcribe  (16 kHz s16le mono PCM body) → {text}   speech-to-text via Groq Whisper
 //   GET  /api/messages?chat=<id>              hub: last messages of one chat (read-only)
 //   GET  /api/muse                            hub: Muse's latest exchange (read-only, on demand)
+//   GET  /api/layout, PUT /api/layout         the Tiles pages (layout.json in the config folder)
+//   GET  /api/reminders                       hub: open Apple Reminders (Mini 1 relay)
+//   POST /api/reminders/done {id}, /api/reminders/add {title, list?}
+//   GET  /api/tile?url=<endpoint>             hub: a url: plug-in tile (only endpoints in layout.json)
+//   POST /api/tile/action {url, id}           hub: an action on a url: plug-in tile
 //   POST /api/hook/request, GET /api/hook/wait/<id>, POST /api/hook/cancel/<id>
 //                                             approve_hook.py on this machine (loopback only)
 //   GET  /, /assets/*                         the built glasses app (no token)
@@ -121,6 +126,9 @@ const MUSES = (HUB.muse ?? (HUB.museUrl ? [{ name: 'local', url: HUB.museUrl }] 
   url: String(m.url).replace(/\/$/, ''),
   token: m.tokenFile ? tokenFrom(m.tokenFile) : RELAY_TOKEN,
 }))
+// Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl" + "remindersTokenFile").
+const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
+const REMINDERS_TOKEN = HUB.remindersTokenFile ? tokenFrom(HUB.remindersTokenFile) : ''
 
 // ---- local state ---------------------------------------------------------------
 
@@ -697,6 +705,31 @@ async function messagesSummary() {
   }
 }
 
+// Open Reminders, cached briefly: the glasses poll /api/home often and the relay makes one call per list.
+let remindersCache = null // { at, items }
+async function openReminders() {
+  const lists = listOf(await remindersRelay('/lists'), 'lists')
+  const groups = await Promise.all(lists.map(async l => {
+    const items = listOf(await remindersRelay(`/lists/${encodeURIComponent(l.id)}/items?open=1`), 'items')
+    return items.map(i => ({ id: String(i.id), title: clip(i.title, 120), due: i.due ? String(i.due) : null, list: clip(l.name, 40) }))
+  }))
+  return groups.flat()
+}
+async function remindersSummary() {
+  if (DEMO) return demoReminders()
+  if (!REMINDERS_URL) return null
+  if (remindersCache && Date.now() - remindersCache.at < 15_000) return remindersCache.items
+  // A failure is cached too (as null): a down relay must not stall every /api/home poll.
+  let items = null
+  try {
+    items = (await openReminders()).slice(0, 30)
+  } catch {
+    items = null
+  }
+  remindersCache = { at: Date.now(), items }
+  return items
+}
+
 async function home() {
   const views = [await nodeView(), ...(MODE === 'hub' ? await remoteViews() : [])]
   const priority = { attention: 5, error: 4, working: 3, done: 2, idle: 1.5, stopped: 1 }
@@ -712,12 +745,21 @@ async function home() {
     voice: Boolean(GROQ_KEY) || DEMO,
     weather: DEMO ? { temp: 62, desc: 'Cloudy', hi: 68, lo: 51, rainAt: '4 PM', rainChance: 70 } : weather,
     messages: MODE === 'hub' || DEMO ? await messagesSummary() : null,
+    reminders: await remindersSummary(),
     muse: MODE === 'hub' ? MUSES.length > 0 : DEMO,
     studio: views.find(v => v.studio)?.studio ?? null,
   }
 }
 
+const remindersRelay = (route, init = {}) => call(`${REMINDERS_URL}${route}`, REMINDERS_TOKEN, { timeout: 4000, ...init })
+// The relay answers either a bare array or an object holding one under `key`.
+const listOf = (v, key) => (Array.isArray(v) ? v : Array.isArray(v?.[key]) ? v[key] : [])
+
 // ---- demo data (HUD_DEMO=1, for the simulator) -----------------------------------------
+const demoReminders = () => [
+  { id: 'demo-r1', title: 'Pick up dry cleaning', due: null, list: 'Errands' },
+  { id: 'demo-r2', title: 'Call the dentist', due: null, list: 'Home' },
+]
 
 const t0 = Date.now()
 function demoSessions() {
@@ -744,7 +786,7 @@ const send = (res, code, body) => {
     'Cache-Control': 'no-store',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
   })
   res.end(JSON.stringify(body))
 }
@@ -1156,6 +1198,53 @@ async function serveStatic(res, pathname) {
   }
 }
 
+// ---- tiles: the pages (layout.json), Reminders and url: plug-in tiles -----------------------
+// DEFAULT_LAYOUT mirrors glasses/home-app/src/tiles.ts; keep the two equal.
+const TILE_LAYOUT_FILE = path.join(CONFIG_DIR, 'layout.json')
+const DEFAULT_LAYOUT = {
+  pages: [
+    { left: 'muse', right: 'agent:Dell/claude' },
+    { left: 'chat:recent', right: 'agent:Mini 1/codex' },
+    { left: 'reminders', right: 'studio' },
+    { left: 'approvals', right: 'messages' },
+    { left: 'clock', right: 'empty' },
+  ],
+}
+const PAGE_COUNT = 5
+const WIDGET_ID_MAX = 80
+
+// A layout from a request or from disk: exactly PAGE_COUNT pages of {left, right} widget ids, or null.
+function checkLayout(raw) {
+  if (!raw || !Array.isArray(raw.pages) || raw.pages.length !== PAGE_COUNT) return null
+  const ok = id => typeof id === 'string' && id.length > 0 && id.length <= WIDGET_ID_MAX
+  const pages = raw.pages.map(pg => (pg && ok(pg.left) && ok(pg.right) ? { left: pg.left, right: pg.right } : null))
+  return pages.every(Boolean) ? { pages } : null
+}
+const loadLayout = () => checkLayout(readJson(TILE_LAYOUT_FILE)) ?? DEFAULT_LAYOUT
+
+// The endpoints of the url: tiles in the saved layout. Nothing else is ever fetched for a tile.
+function layoutUrlEndpoints() {
+  const out = new Set()
+  for (const pg of loadLayout().pages) for (const id of [pg.left, pg.right]) if (id.startsWith('url:')) out.add(id.slice(4))
+  return out
+}
+
+// A plug-in endpoint is plain JSON over http(s); no hub token goes to it.
+async function pluginCall(endpoint, options = {}) {
+  if (!/^https?:\/\//.test(endpoint)) throw new Error('not a web address')
+  const res = await fetch(endpoint, { ...options, headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(4000) })
+  if (!res.ok) throw new Error(`${res.status}`)
+  return res.json()
+}
+// Keeps a plug-in's answer to the UrlTile shape and sensible sizes.
+function tileFrom(raw) {
+  const lines = Array.isArray(raw?.lines) ? raw.lines.slice(0, 60).map(l => String(l ?? '').slice(0, 200)) : []
+  const actions = Array.isArray(raw?.actions)
+    ? raw.actions.slice(0, 6).map(a => ({ label: clip(a?.label, 30), id: clip(a?.id, 40) })).filter(a => a.label && a.id)
+    : []
+  return { title: clip(raw?.title, 40) || 'Tile', lines, actions }
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, 'http://x')
   const p = url.pathname.replace(/^\/hud(?=\/|$)/, '') || '/'
@@ -1387,6 +1476,52 @@ async function handle(req, res) {
       }
       if (!latest) return send(res, 502, { error: 'no Muse reachable' })
       return send(res, 200, { question: clip(latest.question, 300), reply: String(latest.reply || '').slice(0, 900) })
+    }
+    if (req.method === 'GET' && p === '/api/layout') return send(res, 200, loadLayout())
+    if (req.method === 'PUT' && p === '/api/layout') {
+      const layout = checkLayout(await readBody(req))
+      if (!layout) return send(res, 400, { error: `layout needs ${PAGE_COUNT} pages of {left, right} widget ids` })
+      mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
+      writeFileSync(TILE_LAYOUT_FILE, JSON.stringify(layout, null, 2) + '\n', { mode: 0o600 })
+      return send(res, 200, layout)
+    }
+    if (req.method === 'GET' && p === '/api/reminders') {
+      if (DEMO) return send(res, 200, { reminders: demoReminders() })
+      if (!REMINDERS_URL) return send(res, 404, { error: 'reminders unavailable' })
+      return send(res, 200, { reminders: await openReminders() })
+    }
+    if (req.method === 'POST' && p === '/api/reminders/done') {
+      const b = await readBody(req)
+      const id = String(b.id ?? '').slice(0, 200)
+      if (DEMO) return send(res, 200, { ok: true })
+      if (!REMINDERS_URL || !id) return send(res, 400, { ok: false, error: 'cannot complete' })
+      await remindersRelay(`/items/${encodeURIComponent(id)}/done`, { method: 'POST' })
+      remindersCache = null
+      return send(res, 200, { ok: true })
+    }
+    if (req.method === 'POST' && p === '/api/reminders/add') {
+      const b = await readBody(req)
+      const title = clip(b.title, 200)
+      const list = clip(b.list, 60)
+      if (DEMO) return send(res, 200, { ok: true })
+      if (!REMINDERS_URL || !title) return send(res, 400, { ok: false, error: 'cannot add' })
+      await remindersRelay('/items', { method: 'POST', body: JSON.stringify({ title, list: list || undefined }) })
+      remindersCache = null
+      return send(res, 200, { ok: true })
+    }
+    if (req.method === 'GET' && p === '/api/tile') {
+      const endpoint = String(url.searchParams.get('url') ?? '')
+      if (!layoutUrlEndpoints().has(endpoint)) return send(res, 404, { error: 'not in layout' })
+      return send(res, 200, tileFrom(await pluginCall(endpoint)))
+    }
+    if (req.method === 'POST' && p === '/api/tile/action') {
+      const b = await readBody(req)
+      const endpoint = String(b.url ?? '')
+      const id = String(b.id ?? '').slice(0, 40)
+      if (!layoutUrlEndpoints().has(endpoint)) return send(res, 404, { ok: false, error: 'not in layout' })
+      if (!id) return send(res, 400, { ok: false, error: 'no action id' })
+      await pluginCall(endpoint, { method: 'POST', body: JSON.stringify({ id }) })
+      return send(res, 200, { ok: true })
     }
     return send(res, 404, { error: 'not found' })
   } catch (err) {
