@@ -32,12 +32,15 @@ cat > "$work/fake-relay.mjs" <<'JS'
 import http from 'node:http'
 const [port, token] = [Number(process.argv[2]), process.argv[3]]
 const log = []
-const lists = [{ id: 'L1', name: 'Errands' }, { id: 'L2', name: 'Home' }]
+// The Mini 1 relay's real shapes (checked read-only 2026-10-28): GET /lists -> [{id,title,count}],
+// GET /lists/<id>/items?open=1 -> [{id,title,due,notes,done}], POST /items {listId,title,due?} -> 201.
+const lists = [{ id: 'L1', title: 'Errands', count: 2 }, { id: 'L2', title: 'Home', count: 1 }, { id: 'L3', title: 'Reminders', count: 0 }]
 const items = [
-  { id: 'R1', list: 'L1', title: 'Buy milk', due: '2026-10-28T18:00:00Z', done: false },
-  { id: 'R2', list: 'L2', title: 'Call dentist', due: null, done: false },
+  { id: 'R1', listId: 'L1', title: 'Buy milk', due: '2026-10-28T09:00:00-07:00', notes: '', done: false },
+  { id: 'R2', listId: 'L2', title: 'Call dentist', due: null, notes: '', done: false },
+  { id: 'R3', listId: 'L1', title: 'Mail the card', due: '2026-10-30T14:05:00-07:00', notes: 'before Friday', done: false },
 ]
-let next = 3
+let next = 4
 const json = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)) }
 http.createServer(async (req, res) => {
   let body = ''
@@ -49,25 +52,25 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/plugin' && req.method === 'GET') return json(res, 200, { title: 'Weather', lines: ['Sunny', '72 F'], actions: [{ label: 'Refresh', id: 'refresh' }] })
   if (url.pathname === '/plugin' && req.method === 'POST') return json(res, 200, { ok: true })
   if (req.headers.authorization !== `Bearer ${token}`) return json(res, 401, { error: 'bad token' })
-  if (url.pathname === '/lists' && req.method === 'GET') return json(res, 200, { lists })
+  if (url.pathname === '/lists' && req.method === 'GET') return json(res, 200, lists)
   const listItems = url.pathname.match(/^\/lists\/(\w+)\/items$/)
   if (listItems && req.method === 'GET') {
-    const open = items.filter(i => i.list === listItems[1] && !i.done).map(({ id, title, due }) => ({ id, title, due }))
-    return json(res, 200, open) // bare array, to exercise the hub's shape handling
+    const open = items.filter(i => i.listId === listItems[1] && !i.done).map(({ id, title, due, notes, done }) => ({ id, title, due, notes, done }))
+    return json(res, 200, open)
   }
   const done = url.pathname.match(/^\/items\/(\w+)\/done$/)
   if (done && req.method === 'POST') {
     const item = items.find(i => i.id === done[1])
     if (!item) return json(res, 404, { error: 'no item' })
     item.done = true
-    return json(res, 200, { ok: true })
+    return res.writeHead(200).end() // the relay's reply to /done is a bare 200
   }
   if (url.pathname === '/items' && req.method === 'POST') {
     const b = JSON.parse(body || '{}')
-    const list = lists.find(l => l.name === b.list) ?? lists[0]
+    if (!lists.some(l => l.id === b.listId) || typeof b.title !== 'string' || !b.title) return json(res, 400, { error: 'listId and title are required' })
     const id = `R${next++}`
-    items.push({ id, list: list.id, title: b.title, due: null, done: false })
-    return json(res, 200, { id })
+    items.push({ id, listId: b.listId, title: b.title, due: b.due ?? null, notes: '', done: false })
+    return json(res, 201, { id, listId: b.listId, title: b.title })
   }
   return json(res, 404, { error: 'no route' })
 }).listen(port, '127.0.0.1')
@@ -117,7 +120,7 @@ req() { # method base path [json-body]
 # check LABEL WANT_CODE [PYTHON_EXPR]: the HTTP code must match and the JSON body (as d) must satisfy the expression
 check() {
   local label=$1 want=$2 expr=${3:-True}
-  if [ "$CODE" = "$want" ] && printf '%s' "$OUT" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if ($expr) else 1)" 2>/dev/null; then
+  if [ "$CODE" = "$want" ] && printf '%s' "$OUT" | python3 -c "import json,re,sys; d=json.load(sys.stdin); sys.exit(0 if ($expr) else 1)" 2>/dev/null; then
     ok "$label"
   else
     bad "$label (HTTP $CODE, wanted $want: $OUT)"
@@ -149,18 +152,29 @@ if [ -f "$HOME/.config/agent-glasses/layout.json" ]; then ok "layout.json is wri
 
 echo "Reminders"
 req GET "$HUB" /api/reminders
-check "GET /api/reminders lists open items from every list" 200 "sorted((r['title'],r['list']) for r in d['reminders'])==[('Buy milk','Errands'),('Call dentist','Home')]"
+check "GET /api/reminders lists open items with list titles" 200 "sorted((r['title'],r['list']) for r in d['reminders'])==[('Buy milk','Errands'),('Call dentist','Home'),('Mail the card','Errands')]"
+check "a due time is a short tile label; no due stays null" 200 "all(re.match(r'^(Today \d{1,2}(:\d{2})? (AM|PM)|Tomorrow|[A-Z][a-z]{2} \d{1,2})$', r['due']) for r in d['reminders'] if r['due']) and [r['due'] for r in d['reminders'] if r['title']=='Call dentist']==[None]"
 req GET "$HUB" /api/home
-check "GET /api/home carries reminders" 200 "len(d['reminders'])==2"
+check "GET /api/home carries reminders" 200 "len(d['reminders'])==3"
 req POST "$HUB" /api/reminders/done '{"id":"R1"}'
 check "POST /api/reminders/done answers ok" 200 "d['ok'] is True"
 if logged "e['method']=='POST' and e['path']=='/items/R1/done'"; then ok "done reached the relay as POST /items/R1/done"; else bad "done reached the relay as POST /items/R1/done"; fi
 req GET "$HUB" /api/reminders
-check "a done item leaves the open list" 200 "[r['id'] for r in d['reminders']]==['R2']"
+check "a done item leaves the open list" 200 "sorted(r['id'] for r in d['reminders'])==['R2','R3']"
 req POST "$HUB" /api/reminders/add '{"title":"Water plants","list":"Home"}'
 check "POST /api/reminders/add answers ok" 200 "d['ok'] is True"
+if logged "e['path']=='/items' and json.loads(e['body'])=={'listId':'L2','title':'Water plants'}"; then ok "add by title sends the Home listId"; else bad "add by title sends the Home listId"; fi
+req POST "$HUB" /api/reminders/add '{"title":"Mow","list":"L1"}'
+check "add by list id is accepted" 200 "d['ok'] is True"
+if logged "e['path']=='/items' and json.loads(e['body'])['listId']=='L1' and json.loads(e['body'])['title']=='Mow'"; then ok "add by id sends listId L1"; else bad "add by id sends listId L1"; fi
+req POST "$HUB" /api/reminders/add '{"title":"Fix sink"}'
+check "add with no list goes to the list titled Reminders" 200 "d['ok'] is True"
+if logged "e['path']=='/items' and json.loads(e['body'])['listId']=='L3' and json.loads(e['body'])['title']=='Fix sink'"; then ok "no list sends the Reminders list L3"; else bad "no list sends the Reminders list L3"; fi
+req POST "$HUB" /api/reminders/add '{"title":"Nap","list":"Nope"}'
+check "an unknown list falls back to Reminders" 200 "d['ok'] is True"
+if logged "e['path']=='/items' and json.loads(e['body'])['listId']=='L3' and json.loads(e['body'])['title']=='Nap'"; then ok "an unknown list name sends L3"; else bad "an unknown list name sends L3"; fi
 req GET "$HUB" /api/reminders
-check "an added item appears in its list" 200 "sorted(r['title'] for r in d['reminders'])==['Call dentist','Water plants']"
+check "every added item shows in its list" 200 "sorted((r['title'],r['list']) for r in d['reminders'])==sorted([('Call dentist','Home'),('Fix sink','Reminders'),('Mow','Errands'),('Mail the card','Errands'),('Nap','Reminders'),('Water plants','Home')])"
 req POST "$HUB" /api/reminders/add '{"title":""}'
 check "POST /api/reminders/add refuses an empty title" 400
 req GET "$BARE" /api/reminders

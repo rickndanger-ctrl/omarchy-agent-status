@@ -126,9 +126,10 @@ const MUSES = (HUB.muse ?? (HUB.museUrl ? [{ name: 'local', url: HUB.museUrl }] 
   url: String(m.url).replace(/\/$/, ''),
   token: m.tokenFile ? tokenFrom(m.tokenFile) : RELAY_TOKEN,
 }))
-// Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl" + "remindersTokenFile").
+// Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl", "remindersTokenFile", "remindersList").
 const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
 const REMINDERS_TOKEN = HUB.remindersTokenFile ? tokenFrom(HUB.remindersTokenFile) : ''
+const REMINDERS_LIST = HUB.remindersList ? String(HUB.remindersList) : '' // default list for new reminders: an id or a title
 
 // ---- local state ---------------------------------------------------------------
 
@@ -711,7 +712,7 @@ async function openReminders() {
   const lists = listOf(await remindersRelay('/lists'), 'lists')
   const groups = await Promise.all(lists.map(async l => {
     const items = listOf(await remindersRelay(`/lists/${encodeURIComponent(l.id)}/items?open=1`), 'items')
-    return items.map(i => ({ id: String(i.id), title: clip(i.title, 120), due: i.due ? String(i.due) : null, list: clip(l.name, 40) }))
+    return items.map(i => ({ id: String(i.id), title: clip(i.title, 120), due: dueLabel(i.due), list: clip(l.title, 40) }))
   }))
   return groups.flat()
 }
@@ -754,6 +755,38 @@ async function home() {
 const remindersRelay = (route, init = {}) => call(`${REMINDERS_URL}${route}`, REMINDERS_TOKEN, { timeout: 4000, ...init })
 // The relay answers either a bare array or an object holding one under `key`.
 const listOf = (v, key) => (Array.isArray(v) ? v : Array.isArray(v?.[key]) ? v[key] : [])
+// Writes: the relay's reply body is not needed (and may be empty), only its status.
+async function remindersWrite(route, body) {
+  const res = await fetch(`${REMINDERS_URL}${route}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${REMINDERS_TOKEN}`, 'Content-Type': 'application/json' },
+    body,
+    signal: AbortSignal.timeout(4000),
+  })
+  if (!res.ok) throw new Error(`${res.status}`)
+}
+// The list a new reminder goes to: the one named (id or title), else hub.json remindersList,
+// else the list titled "Reminders", else the first list.
+async function resolveReminderList(wanted) {
+  const lists = listOf(await remindersRelay('/lists'), 'lists')
+  const find = name => (name ? lists.find(l => l.id === name || l.title === name) : undefined)
+  const list = find(String(wanted ?? '')) ?? find(REMINDERS_LIST) ?? lists.find(l => l.title === 'Reminders') ?? lists[0]
+  if (!list) throw new Error('no reminder lists')
+  return String(list.id)
+}
+// A short, tile-sized due time in this machine's time zone: "Today 9 AM", "Tomorrow", "Oct 30".
+function dueLabel(iso, now = Date.now()) {
+  if (!iso) return null
+  const due = new Date(iso)
+  if (Number.isNaN(due.getTime())) return null
+  const dayStart = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((dayStart(due) - dayStart(new Date(now))) / 86_400_000)
+  // Intl puts a narrow no-break space before AM/PM; a tile counts characters, so use plain spaces.
+  const clock = due.toLocaleTimeString('en-US', { hour: 'numeric', minute: due.getMinutes() ? '2-digit' : undefined }).replace(/\s/g, ' ')
+  if (days === 0) return `Today ${clock}`
+  if (days === 1) return 'Tomorrow'
+  return due.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
 
 // ---- demo data (HUD_DEMO=1, for the simulator) -----------------------------------------
 const demoReminders = () => [
@@ -1495,7 +1528,7 @@ async function handle(req, res) {
       const id = String(b.id ?? '').slice(0, 200)
       if (DEMO) return send(res, 200, { ok: true })
       if (!REMINDERS_URL || !id) return send(res, 400, { ok: false, error: 'cannot complete' })
-      await remindersRelay(`/items/${encodeURIComponent(id)}/done`, { method: 'POST' })
+      await remindersWrite(`/items/${encodeURIComponent(id)}/done`)
       remindersCache = null
       return send(res, 200, { ok: true })
     }
@@ -1505,7 +1538,8 @@ async function handle(req, res) {
       const list = clip(b.list, 60)
       if (DEMO) return send(res, 200, { ok: true })
       if (!REMINDERS_URL || !title) return send(res, 400, { ok: false, error: 'cannot add' })
-      await remindersRelay('/items', { method: 'POST', body: JSON.stringify({ title, list: list || undefined }) })
+      const listId = await resolveReminderList(list)
+      await remindersWrite('/items', JSON.stringify({ listId, title }))
       remindersCache = null
       return send(res, 200, { ok: true })
     }
