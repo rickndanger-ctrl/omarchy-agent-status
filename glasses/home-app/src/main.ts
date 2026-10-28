@@ -330,7 +330,11 @@ function runTileEffect(effect: TileEffect): void {
   }
 }
 
+let prevKind = model.screenKind;
 function paint(): void {
+  // A reminder that was added or cancelled (or whose voice failed) ends on Home: that is back in Tiles.
+  if (fromTiles && model.screenKind === 'home' && (prevKind === 'listen' || prevKind === 'confirm')) fromTiles = false;
+  prevKind = model.screenKind;
   let preview: string;
   if (showingTiles()) {
     const frame = tiles.render(tileCtx());
