@@ -2,6 +2,8 @@
 // can be tested on its own. The glasses show one full-screen text block; this
 // file decides what that text is and what each tap or swipe does.
 
+import type { OpenTarget } from './tiles';
+
 export type Input = 'up' | 'down' | 'select' | 'back';
 
 export interface Session { agent: string; name: string; session: string; state: string; page: string; at: number; workspace: string; machine: string; pane?: string; window?: string; appThread?: string; desktopSession?: string }
@@ -38,7 +40,8 @@ export type Action =
   | { kind: 'sendText'; chat: number; name: string; text: string }
   | { kind: 'askMuse'; text: string }
   | { kind: 'loadFolders'; machine: string }
-  | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string };
+  | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string }
+  | { kind: 'openTiles' };
 
 type Screen =
   | { kind: 'home' }
@@ -49,6 +52,7 @@ type Screen =
   | { kind: 'chat'; id: number; name: string }
   | { kind: 'muse' }
   | { kind: 'studio' }
+  | { kind: 'tiles' }
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
   | { kind: 'reply'; key: string }
@@ -339,6 +343,37 @@ export class HomeModel {
     this.go({ kind });
     if (kind === 'muse') this.museLines = null;
   }
+  /**
+   * Open a full screen from a Tiles action. Voice steps fall back to the quick-reply lists when the
+   * microphone is not available, as they do from the full screens.
+   */
+  openTarget(target: OpenTarget): Action | null {
+    this.returnTo = null;
+    if (target.kind === 'home' || target.kind === 'messages' || target.kind === 'needs' || target.kind === 'studio') {
+      this.go({ kind: target.kind });
+      this.scroll = 0;
+      return null;
+    }
+    if (target.kind === 'muse') {
+      this.museLines = null;
+      if (target.then === 'listen' && this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, muse: true }); return { kind: 'startMic' }; }
+      this.go({ kind: 'muse' });
+      return { kind: 'loadMuse' };
+    }
+    if (target.kind === 'chat') {
+      const chat = { id: target.id, name: target.name };
+      this.chatLines = null;
+      if (target.then === 'listen' && this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, chat }); return { kind: 'startMic' }; }
+      this.go(target.then === 'textReply' || target.then === 'listen' ? { kind: 'textReply', ...chat } : { kind: 'chat', ...chat });
+      return { kind: 'loadChat', id: target.id };
+    }
+    this.notices = this.notices.filter(n => n.key !== target.key);
+    const x = this.data?.sessions.find(y => sessionKey(y) === target.key);
+    if (target.then === 'listen' && x && talkable(x) && this.data?.voice) { this.go({ kind: 'listen', key: target.key, thinking: false }); return { kind: 'startMic' }; }
+    this.go(target.then && x && this.replyChoices(x).length ? { kind: 'reply', key: target.key } : { kind: 'agent', key: target.key });
+    return null;
+  }
+
   setChat(messages: ChatMessage[] | null, nowMs: number): void {
     this.chatLines = messages === null ? ['Could not load this chat.']
       : [...messages].reverse().flatMap(m => wrap(`${m.fromMe ? 'Me' : m.from} (${age(m.when, nowMs)}): ${m.text}`));
@@ -407,6 +442,7 @@ export class HomeModel {
       rows.push({ text: clip(`Studio · ${busy.length ? `${busy.length} working · ${busy[0].name}: ${busy[0].line}` : 'standing by'}`, WIDTH - 2), open: { kind: 'studio' } });
     }
     if (waiting) rows.push({ text: clip(`! Needs you · ${waiting}${d.pending.length ? ` (${d.pending.length} approval${d.pending.length === 1 ? '' : 's'})` : ''}`, WIDTH - 2), open: { kind: 'needs' } });
+    rows.push({ text: 'Tiles · 5 pages of apps', open: { kind: 'tiles' } });
     return rows;
   }
 
@@ -681,6 +717,7 @@ export class HomeModel {
     }
     const target = rows[this.cursor]?.open;
     if (!target) return null;
+    if (target.kind === 'tiles') return { kind: 'openTiles' };
     if (target.kind === 'agent') this.notices = this.notices.filter(n => n.key !== target.key);
     this.go(target);
     if (target.kind === 'chat') { this.chatLines = null; return { kind: 'loadChat', id: target.id }; }

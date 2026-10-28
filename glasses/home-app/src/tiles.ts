@@ -234,7 +234,7 @@ function messagesWidget(): Widget {
     body: ctx => {
       if (!ctx.data?.messages) return ['Loading…'];
       if (!ctx.data.messages.length) return ['No messages.'];
-      return chats(ctx).map(c => clip(`${c.unread ? '●' : ' '} ${c.name}: ${c.snippet}`, W));
+      return chats(ctx).map(c => clip(`${c.unread ? '•' : ' '} ${c.name}: ${c.snippet}`, W));
     },
     actions: ctx => chats(ctx).slice(0, 5).map(c => ({ id: `chat:${c.id}`, label: clip(c.name, W - 2) })),
     act: (actionId, ctx) => {

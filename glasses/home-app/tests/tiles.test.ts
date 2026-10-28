@@ -102,3 +102,14 @@ test('every default widget renders within the tile size', () => {
     t.input('down', ctx());
   }
 });
+
+test('a tile opens a full screen through the model', async () => {
+  const { HomeModel } = await import('../src/model');
+  const m = new HomeModel();
+  m.update(data);
+  assert.deepEqual(m.openTarget({ kind: 'chat', id: 7, name: 'Mum' }), { kind: 'loadChat', id: 7 });
+  assert.equal(m.screenKind, 'chat');
+  assert.equal(m.openTarget({ kind: 'agent', key: 'Dell/p1' }), null);
+  assert.equal(m.screenKind, 'agent');
+  assert.deepEqual(m.openTarget({ kind: 'muse' }), { kind: 'loadMuse' });
+});
