@@ -1,7 +1,7 @@
 import './style.css';
 import { Glasses } from './glasses';
 import { HomeModel, age, type Action, type ChatMessage, type HomeData, type Input } from './model';
-import { Tiles, DEFAULT_LAYOUT, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
+import { Tiles, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
 const POLL_MS = 2000;
@@ -34,7 +34,7 @@ let foreground = true;
 let recording: Uint8Array[] | null = null;
 let status = 'Starting…';
 
-const MENU = { refresh: 1, pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7, tiles: 8, tilesOn: 9 };
+const MENU = { refresh: 1, pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7, tiles: 8, tilesOn: 9, editPage: 10 };
 let lastDevice = '';
 const glasses = new Glasses({
   onInput: input => handle(input),
@@ -61,6 +61,7 @@ const glasses = new Glasses({
   { id: MENU.muse, name: 'Muse' },
   { id: MENU.tiles, name: 'Tiles' },
   { id: MENU.tilesOn, name: 'Tiles on/off' },
+  { id: MENU.editPage, name: 'Edit page' },
   { id: MENU.refresh, name: 'Refresh' },
   { id: MENU.pause, name: 'Pause/resume approvals' },
   { id: MENU.hideDone, name: 'Hide/show finished agents' },
@@ -82,6 +83,12 @@ $('app').innerHTML = `
     <button data-input="back">Double-tap</button>
     <button data-input="down">▼ Swipe down</button>
   </div>
+  <details id="tiles-editor">
+    <summary>Tiles</summary>
+    <p class="muted">Five pages, two apps each. This is what the glasses show in Tiles.</p>
+    <div id="tile-rows"></div>
+    <div class="row"><button id="tiles-save">Save tiles</button></div>
+  </details>
   <details ${token ? '' : 'open'}>
     <summary>Connection</summary>
     <label>Server<input id="base" autocomplete="off" spellcheck="false"></label>
@@ -208,9 +215,13 @@ const showingTiles = () => tilesActive && !fromTiles;
 const TOP_SCREENS = ['agent', 'chat', 'muse', 'messages', 'needs', 'studio', 'home'];
 
 let tilesBusy = false;
+/** Muse is fetched once when a page with its tile is shown (entering Tiles, or swiping to that page), never on a timer. */
+let museFetchedOn = -1;
 async function refreshTiles(): Promise<void> {
   if (!showingTiles() || tilesBusy) return;
   tilesBusy = true;
+  const page = tiles.render(tileCtx()).page;
+  const museDue = museFetchedOn !== page;
   try {
     await Promise.all(tiles.needs(tileCtx()).map(async need => {
       try {
@@ -221,6 +232,8 @@ async function refreshTiles(): Promise<void> {
           const r = await api<{ messages: ChatMessage[] }>(`messages?chat=${need.id}`);
           tileData.chats.set(need.id, [...r.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`));
         } else if (need.kind === 'muse') {
+          if (!museDue) return;
+          museFetchedOn = page;
           tileData.muse = await api<{ question: string; reply: string }>('muse');
         } else if (need.kind === 'reminders') {
           tileData.reminders = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
@@ -237,10 +250,62 @@ async function refreshTiles(): Promise<void> {
 
 async function loadLayout(): Promise<void> {
   try { tiles.setLayout(normalizeLayout(await api<Layout>('layout'))); } catch { /* the default layout stays */ }
+  buildEditor();
+  paint();
+}
+
+/** The phone's Tiles editor: one row per page, two dropdowns of everything Home knows. Not rebuilt while you are editing. */
+let editorDirty = false;
+let editorKey = '';
+function buildEditor(): void {
+  if (editorDirty) return;
+  const layout = tiles.getLayout();
+  const options = availableWidgets(model.data);
+  const key = JSON.stringify([layout, options.map(o => o.id)]);
+  if (key === editorKey) return;
+  editorKey = key;
+  const rows = $('tile-rows');
+  rows.replaceChildren(...layout.pages.map((page, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const label = document.createElement('b');
+    label.textContent = `Page ${i + 1}`;
+    row.append(label);
+    for (const side of ['left', 'right'] as const) {
+      const select = document.createElement('select');
+      select.dataset.page = String(i);
+      select.dataset.side = side;
+      const choices = options.some(o => o.id === page[side]) ? options : [...options, { id: page[side], label: page[side] }];
+      for (const o of choices) select.append(new Option(o.label, o.id, false, o.id === page[side]));
+      select.onchange = () => { editorDirty = true; };
+      row.append(select);
+    }
+    return row;
+  }));
+}
+$('tiles-save').onclick = async () => {
+  const pages = Array.from({ length: PAGE_COUNT }, (_, i) => ({
+    left: $<HTMLSelectElement>('tile-rows').querySelector<HTMLSelectElement>(`select[data-page="${i}"][data-side="left"]`)?.value ?? 'empty',
+    right: $<HTMLSelectElement>('tile-rows').querySelector<HTMLSelectElement>(`select[data-page="${i}"][data-side="right"]`)?.value ?? 'empty',
+  }));
+  await saveLayout(normalizeLayout({ pages }));
+};
+
+async function saveLayout(layout: Layout): Promise<void> {
+  tiles.setLayout(layout);
+  editorDirty = false;
+  try {
+    await api('layout', { method: 'PUT', body: JSON.stringify(tiles.getLayout()) });
+    status = 'Tiles saved.';
+  } catch (error) {
+    status = `Tiles not saved: ${error instanceof Error ? error.message : error}`;
+  }
+  buildEditor();
   paint();
 }
 
 function enterTiles(): void {
+  museFetchedOn = -1;
   tilesActive = true;
   fromTiles = false;
   void loadLayout();
@@ -309,6 +374,7 @@ async function poll(): Promise<void> {
   polling = true;
   try {
     model.update(await api<HomeData>('home'));
+    buildEditor();
     // No weather yet? Try sharing the location again (at most every 2 minutes).
     if (!model.data?.weather && Date.now() - lastLocationTry > 120_000) void shareLocation();
   } catch (error) {
@@ -404,7 +470,7 @@ async function run(action: Action): Promise<void> {
         await new Promise(r => setTimeout(r, 700));
         const job = await api<{ status: string; question: string; reply: string; error?: string }>(`muse/reply?id=${encodeURIComponent(asked.id)}`).catch(() => null);
         if (!job) continue;
-        if (job.reply) model.setMuseAnswer(job.question, job.reply);
+        if (job.reply) { model.setMuseAnswer(job.question, job.reply); tileData.muse = { question: job.question, reply: job.reply }; }
         paint();
         if (['done', 'error', 'timeout'].includes(job.status)) {
           diag('muse.reply', `${job.status} ${job.error ?? ''}`);
@@ -430,10 +496,18 @@ async function run(action: Action): Promise<void> {
       model.showFlash(r.ok ? `Started ${action.agent} on ${action.machine}` : `Couldn't start: ${r.error ?? 'error'}`, Date.now());
       if (r.ok && r.pane) model.expectAgent(action.machine, r.pane, Date.now());
       void poll();
+    } else if (action.kind === 'addReminder') {
+      const r = await api<{ ok: boolean }>('reminders/add', { method: 'POST', body: JSON.stringify({ title: action.title }) }).catch(() => ({ ok: false }));
+      diag('reminder.add', `ok=${r.ok}`);
+      model.showFlash(r.ok ? 'Reminder added' : 'Reminder not added', Date.now());
+      if (fromTiles) fromTiles = false;
+      void refreshTiles();
     } else if (action.kind === 'openTiles') {
       enterTiles();
     } else if (action.kind === 'loadMuse') {
-      model.setMuse(await api<{ question: string; reply: string }>('muse').catch(() => null));
+      const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
+      model.setMuse(latest);
+      if (latest) tileData.muse = latest;
     }
   } catch (error) {
     model.showFlash(error instanceof Error ? error.message : 'Failed', Date.now());
@@ -448,6 +522,8 @@ function handle(input: Input): void {
     if (result?.kind === 'exit') { tilesActive = false; model.goHome(); paint(); return; }
     paint();
     if (result) runTileEffect(result as TileEffect);
+    const edited = tiles.takeEdited();
+    if (edited) void saveLayout(edited);
     void refreshTiles();
     return;
   }
@@ -471,6 +547,7 @@ async function menu(id: number): Promise<void> {
   if (id === MENU.messages) model.goTo('messages');
   if (id === MENU.muse) { model.goTo('muse'); void run({ kind: 'loadMuse' }); }
   if (id === MENU.tiles) enterTiles();
+  if (id === MENU.editPage) { if (!showingTiles()) enterTiles(); tiles.startEdit(tileCtx()); }
   if (id === MENU.tilesOn) {
     tilesOn = !tilesOn;
     store.set('home.tiles', tilesOn ? '1' : '0');
@@ -478,7 +555,7 @@ async function menu(id: number): Promise<void> {
     if (tilesOn) enterTiles(); else { tilesActive = false; fromTiles = false; }
   }
   if (id === MENU.refresh) void poll();
-  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.refresh, MENU.pause, MENU.hideDone].includes(id)) { tilesActive = false; fromTiles = false; }
+  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.refresh, MENU.pause, MENU.hideDone, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
   if (id === MENU.hideDone) {
     model.hideDone = !model.hideDone;
     store.set('home.hideDone', model.hideDone ? '1' : '0');

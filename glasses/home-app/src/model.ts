@@ -41,7 +41,8 @@ export type Action =
   | { kind: 'askMuse'; text: string }
   | { kind: 'loadFolders'; machine: string }
   | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string }
-  | { kind: 'openTiles' };
+  | { kind: 'openTiles' }
+  | { kind: 'addReminder'; title: string };
 
 type Screen =
   | { kind: 'home' }
@@ -56,8 +57,8 @@ type Screen =
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
   | { kind: 'reply'; key: string }
-  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true; start?: StartRef }
-  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true; start?: StartRef }
+  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef }
+  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef }
   | { kind: 'newAgent'; machine: string; agent?: string; folders?: string[] | null }
   | { kind: 'textReply'; id: number; name: string }
   | { kind: 'alert'; alert: Alert };
@@ -327,10 +328,10 @@ export class HomeModel {
   setTranscript(text: string | null, nowMs: number): void {
     const s = this.screen;
     if (s.kind !== 'listen') return;
-    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
+    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.reminder ? { reminder: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
     else {
       this.showFlash(text === null ? 'Voice failed. Try again' : "Didn't catch that", nowMs);
-      this.go(s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key });
+      this.go(s.reminder ? { kind: 'home' } : s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key });
     }
   }
 
@@ -366,6 +367,11 @@ export class HomeModel {
       if (target.then === 'listen' && this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, chat }); return { kind: 'startMic' }; }
       this.go(target.then === 'textReply' || target.then === 'listen' ? { kind: 'textReply', ...chat } : { kind: 'chat', ...chat });
       return { kind: 'loadChat', id: target.id };
+    }
+    if (target.kind === 'reminderAdd') {
+      if (this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, reminder: true }); return { kind: 'startMic' }; }
+      this.go({ kind: 'home' });
+      return null;
     }
     this.notices = this.notices.filter(n => n.key !== target.key);
     const x = this.data?.sessions.find(y => sessionKey(y) === target.key);
@@ -571,7 +577,7 @@ export class HomeModel {
     // Double-tap out of something a pop-up opened returns to where you were.
     if (input === 'back' && this.returnTo && ['agent', 'chat'].includes(s.kind)) { this.finish(); return null; }
     if (s.kind === 'listen') {
-      if (input === 'back') { this.go(s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key }); return { kind: 'cancelMic' }; }
+      if (input === 'back') { this.go(s.reminder ? { kind: 'home' } : s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key }); return { kind: 'cancelMic' }; }
       if (input === 'select' && !s.thinking) { this.screen = { ...s, thinking: true }; return { kind: 'stopMic' }; }
       return null;
     }
@@ -581,6 +587,7 @@ export class HomeModel {
       else if (s.kind === 'textReply') this.go({ kind: 'chat', id: s.id, name: s.name });
       else if (s.kind === 'confirm' && s.chat) this.go({ kind: 'chat', ...s.chat });
       else if (s.kind === 'confirm' && s.muse) this.go({ kind: 'muse' });
+      else if (s.kind === 'confirm' && s.reminder) this.go({ kind: 'home' });
       else if ((s.kind === 'confirm' && s.start) || s.kind === 'newAgent') this.go({ kind: 'agents' });
       else if (s.kind === 'reply' || s.kind === 'confirm') this.go({ kind: 'agent', key: s.key });
       else this.go({ kind: 'home' });
@@ -616,6 +623,12 @@ export class HomeModel {
       if (choice === 'Send' && this.returnTo) this.finish();
       else this.go({ kind: 'chat', ...s.chat });
       return choice === 'Send' ? { kind: 'sendText', chat: s.chat.id, name: s.chat.name, text: s.text } : null;
+    }
+    if (s.kind === 'confirm' && s.reminder && input === 'select') {
+      const choice = CONFIRM_CHOICES[this.cursor];
+      if (choice === 'Talk again') { this.go({ kind: 'listen', key: '', thinking: false, reminder: true }); return { kind: 'startMic' }; }
+      this.go({ kind: 'home' });
+      return choice === 'Send' ? { kind: 'addReminder', title: s.text } : null;
     }
     if (s.kind === 'confirm' && s.muse && input === 'select') {
       const choice = CONFIRM_CHOICES[this.cursor];
@@ -837,6 +850,15 @@ export class HomeModel {
       } else {
         lines[0] = clip(`START ${where.toUpperCase()}?`);
         lines.push(...(s.text ? wrap(`"${s.text}"`).slice(0, 3) : ['(no task; it will wait for you)']), 'Full access: no approvals', '');
+        lines.push(...this.list(this.listRows(nowMs)));
+      }
+    } else if ((s.kind === 'confirm' || s.kind === 'listen') && s.reminder) {
+      if (s.kind === 'listen') {
+        lines[0] = 'ADD REMINDER';
+        lines.push(s.thinking ? 'Turning speech into text…' : 'Listening… say the reminder.', '', s.thinking ? '' : 'Tap when done. Double-tap to cancel.');
+      } else {
+        lines[0] = 'ADD REMINDER?';
+        lines.push(...wrap(`"${s.text}"`).slice(0, 4), '');
         lines.push(...this.list(this.listRows(nowMs)));
       }
     } else if ((s.kind === 'confirm' || s.kind === 'listen') && s.muse) {

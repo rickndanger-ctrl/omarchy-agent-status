@@ -113,3 +113,44 @@ test('a tile opens a full screen through the model', async () => {
   assert.equal(m.screenKind, 'agent');
   assert.deepEqual(m.openTarget({ kind: 'muse' }), { kind: 'loadMuse' });
 });
+
+test('Edit page: pick left then right, the layout changes for that page only', () => {
+  const t = new Tiles();
+  t.startEdit(ctx());
+  let f = t.render(ctx());
+  assert.equal(f.focus, 'left');
+  assert.match(f.left.split('\n')[0], /^> Pick left/);
+  const ids = availableWidgets(data).map(o => o.id);
+  t.input('down', ctx()); // muse -> messages
+  t.input('select', ctx());
+  assert.match(t.render(ctx()).right.split('\n')[0], /Pick right/);
+  t.input('select', ctx()); // keep the right tile as it was
+  assert.equal(t.render(ctx()).focus, 'page');
+  const layout = t.takeEdited()!;
+  assert.equal(layout.pages[0].left, ids[1]);
+  assert.equal(layout.pages[0].right, 'agent:Dell/claude');
+  assert.equal(layout.pages[1].left, 'chat:recent');
+  assert.equal(t.takeEdited(), null);
+});
+
+test('Edit page can be cancelled with a double-tap', () => {
+  const t = new Tiles();
+  t.startEdit(ctx());
+  t.input('back', ctx());
+  assert.equal(t.takeEdited(), null);
+  assert.equal(t.render(ctx()).focus, 'page');
+});
+
+test('Reminders: add by voice runs through listen and confirm, then asks the hub to add it', async () => {
+  const { HomeModel } = await import('../src/model');
+  const w = widgetFor('reminders');
+  assert.deepEqual(w.act('add', ctx()), { kind: 'open', target: { kind: 'reminderAdd' } });
+  const m = new HomeModel();
+  m.update({ ...data, pending: [], voice: true });
+  assert.deepEqual(m.openTarget({ kind: 'reminderAdd' }), { kind: 'startMic' });
+  m.setTranscript('buy milk', NOW);
+  assert.equal(m.screenKind, 'confirm');
+  assert.match(m.render(NOW), /ADD REMINDER\?/);
+  assert.deepEqual(m.input('select', NOW), { kind: 'addReminder', title: 'buy milk' });
+  assert.equal(m.screenKind, 'home');
+});
