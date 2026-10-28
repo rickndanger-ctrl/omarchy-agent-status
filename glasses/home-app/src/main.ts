@@ -222,12 +222,10 @@ const TOP_SCREENS = ['agent', 'chat', 'muse', 'messages', 'needs', 'studio', 'ho
 
 let tilesBusy = false;
 /** Muse is fetched once when a page with its tile is shown (entering Tiles, or swiping to that page), never on a timer. */
-let museFetchedOn = -1;
 async function refreshTiles(): Promise<void> {
   if (!showingTiles() || tilesBusy) return;
   tilesBusy = true;
   const page = tiles.render(tileCtx()).page;
-  const museDue = museFetchedOn !== page;
   try {
     await Promise.all(tiles.needs(tileCtx()).map(async need => {
       try {
@@ -238,10 +236,8 @@ async function refreshTiles(): Promise<void> {
           const r = await api<{ messages: ChatMessage[] }>(`messages?chat=${need.id}`);
           tileData.chats.set(need.id, [...r.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`));
         } else if (need.kind === 'muse') {
-          if (!museDue) return;
-          const stamp = museTile.fetchStart();
-          if (stamp === null) return; // an ask is in flight: its reply is the newest word
-          museFetchedOn = page;
+          const stamp = museTile.pageFetchStart(page);
+          if (stamp === null) return; // already read for this page view, or an ask is in flight (its reply is the newest word)
           museTile.fetchDone(stamp, await api<{ question: string; reply: string }>('muse'));
         } else if (need.kind === 'reminders') {
           tileData.reminders = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
@@ -319,7 +315,7 @@ async function saveLayout(layout: Layout): Promise<void> {
 }
 
 function enterTiles(): void {
-  museFetchedOn = -1;
+  museTile.resetPage();
   tilesActive = true;
   fromTiles = false;
   void loadLayout();

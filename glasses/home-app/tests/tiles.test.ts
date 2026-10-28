@@ -315,3 +315,17 @@ test('Muse: a fetch that started before an ask never overwrites the newer reply'
   cache.fetchDone(s2, { question: 'q2', reply: 'a2' });
   assert.equal(cache.get()!.reply, 'a2');
 });
+
+test('Muse: one /api/muse read per page view, none after an ask', async () => {
+  const { MuseCache } = await import('../src/musecache');
+  const cache = new MuseCache();
+  assert.equal(cache.pageFetchStart(0), 0);        // first view of the page: read once
+  assert.equal(cache.pageFetchStart(0), null);     // the next timed refresh: no read
+  assert.notEqual(cache.pageFetchStart(1), null);  // swiped to another page: read again
+  cache.askStart('q');
+  assert.equal(cache.pageFetchStart(2), null);     // asking: no read, but the page counts as read
+  cache.askReply('q', 'a'); cache.askEnd();
+  assert.equal(cache.pageFetchStart(2), null);     // so nothing is read after the ask either
+  cache.resetPage();                               // entering Tiles again
+  assert.notEqual(cache.pageFetchStart(2), null);
+});
