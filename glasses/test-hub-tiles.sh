@@ -184,16 +184,21 @@ req GET "$BARE" /api/home
 check "GET /api/home has reminders null with no relay" 200 "d['reminders'] is None"
 
 echo "Sorting and the 30 cut"
-# Straight to the fake relay: a dated reminder in Reminders, a relay creation date, and 32 undated Groceries items.
+# Straight to the fake relay: one item due in two hours (soon), a relay creation date, and 32 items due in
+# a month (far future). Then a fresh undated voice-style add through the hub must still make the 30 kept.
 relay_post() { curl -s -o /dev/null -X POST -H "Authorization: Bearer $RELAY_TOKEN" -H 'Content-Type: application/json' -d "$1" "$RELAY/items"; }
-in_two_days=$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(days=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
-relay_post "{\"listId\":\"L3\",\"title\":\"Pay rent\",\"due\":\"$in_two_days\"}"
+due_in_two_hours=$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+due_in_a_month=$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(days=30)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+relay_post "{\"listId\":\"L3\",\"title\":\"Pay rent\",\"due\":\"$due_in_two_hours\"}"
 relay_post '{"listId":"L1","title":"Dated item","created":"2026-10-01T12:00:00Z"}'
-for i in $(seq 32); do relay_post "{\"listId\":\"L4\",\"title\":\"Groceries $i\"}"; done
-req POST "$HUB" /api/reminders/add '{"title":"Groceries extra","list":"Groceries"}'
-check "a Groceries add goes through" 200 "d['ok'] is True"
+for i in $(seq 32); do relay_post "{\"listId\":\"L4\",\"title\":\"Groceries $i\",\"due\":\"$due_in_a_month\"}"; done
+req GET "$HUB" /api/reminders
+check "the hub has seen the posted items" 200 "len(d['reminders'])>=34"
+sleep 1 # so the fresh add is seen a moment later than the rest: it is the newest
+req POST "$HUB" /api/reminders/add '{"title":"Fresh idea","list":"Groceries"}'
+check "a fresh add goes through" 200 "d['ok'] is True"
 req GET "$HUB" /api/home
-check "the 30 kept still include the dated Reminders item" 200 "len(d['reminders'])==30 and 'Pay rent' in [r['title'] for r in d['reminders']]"
+check "the 30 kept include the soon item and the fresh undated add" 200 "len(d['reminders'])==30 and 'Pay rent' in [r['title'] for r in d['reminders']] and 'Fresh idea' in [r['title'] for r in d['reminders']]"
 req GET "$HUB" /api/reminders
 first=$OUT
 req GET "$HUB" /api/reminders

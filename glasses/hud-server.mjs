@@ -707,12 +707,16 @@ let remindersCache = null // { at, items }
 // When the hub first saw each open reminder (ms): the "added" time, since the relay sends no creation date.
 // Kept in memory; pruned to the reminders that are still open after each full read.
 const firstSeen = new Map()
-// Soonest due first, then the undated ones newest first; a tie goes to the Reminders list.
-const byRelevance = (a, b) => {
-  if ((a.dueAt != null) !== (b.dueAt != null)) return a.dueAt != null ? -1 : 1
-  const order = a.dueAt != null ? a.dueAt - b.dueAt : b.added - a.added
-  if (order !== 0) return order
-  return (b.list === 'Reminders') - (a.list === 'Reminders')
+// The same order as the tile's sortReminders (src/tiles.ts): due within a day (overdue too) first, soonest
+// first; then the newest added; a tie goes to the Reminders list.
+const DAY_MS = 86_400_000
+const byRelevance = now => {
+  const soon = r => typeof r.dueAt === 'number' && r.dueAt <= now + DAY_MS
+  return (a, b) =>
+    Number(soon(b)) - Number(soon(a))
+    || (soon(a) && soon(b) ? a.dueAt - b.dueAt : 0)
+    || (b.added ?? -Infinity) - (a.added ?? -Infinity)
+    || Number(b.list === 'Reminders') - Number(a.list === 'Reminders')
 }
 async function openReminders() {
   const lists = listOf(await remindersRelay('/lists'), 'lists')
@@ -729,7 +733,7 @@ async function openReminders() {
   })
   const open = new Set(all.map(r => r.id))
   for (const id of firstSeen.keys()) if (!open.has(id)) firstSeen.delete(id)
-  return all.sort(byRelevance)
+  return all.sort(byRelevance(now))
 }
 const msOrNull = iso => {
   const t = Date.parse(iso)
