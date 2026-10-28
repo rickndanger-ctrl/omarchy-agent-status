@@ -117,6 +117,21 @@ export function messageBar(who: string, ms: number): string {
 }
 const BAR_TIME = /^[=-]{3} \w+ · (\d+:\d\d:\d\d [AP]M) [=-]+$/;
 
+/** The relay's own screen furniture at the end of a reply: not part of the answer. */
+const MUSE_CHROME = /^(muse|connected|approvals history.*)$/i;
+
+/**
+ * Muse text for the glasses (display only): the reply's trailing blank lines and relay chrome lines
+ * (Muse / Connected / Approvals history…) are dropped, and runs of blank lines collapse to one.
+ */
+export function museDisplay(question: string, reply: string): { question: string; reply: string } {
+  const squeeze = (lines: string[]) => lines.filter((l, i) => l.trim() !== '' || (i > 0 && lines[i - 1].trim() !== ''));
+  const lines = reply.replace(/\r/g, '').split('\n').map(l => l.replace(/\s+$/, ''));
+  while (lines.length && (lines.at(-1) === '' || MUSE_CHROME.test(lines.at(-1)!.trim()))) lines.pop();
+  while (lines.length && lines[0] === '') lines.shift();
+  return { question: squeeze(question.replace(/\r/g, '').split('\n')).join('\n').trim(), reply: squeeze(lines).join('\n') };
+}
+
 export function clip(text: string, width = WIDTH): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > width ? flat.slice(0, width - 1) + '…' : flat;
@@ -388,7 +403,8 @@ export class HomeModel {
   private chatAtBottom(): boolean { return this.scroll >= Math.max(0, (this.chatLines?.length ?? 0) - BODY_LINES); }
   /** Show the newest part of a Muse answer (it is long-form; swipe up to read from the start). */
   setMuseAnswer(question: string, reply: string): void {
-    this.museLines = [...wrap(`You: ${question}`), '', ...wrap(`Muse: ${reply}`)];
+    const m = museDisplay(question, reply);
+    this.museLines = [...wrap(`You: ${m.question}`), '', ...wrap(`Muse: ${m.reply}`)];
     this.scroll = 0;
   }
   /** Muse didn't answer: say why, in the relay's own words. */
@@ -396,9 +412,13 @@ export class HomeModel {
     this.museLines = [...wrap(`You: ${question}`), '', ...wrap(`Muse didn't get it: ${reason || 'no answer'}.`), '', 'Nothing was typed anywhere else.'];
     this.scroll = 0;
   }
+  private museAnswerLines(question: string, reply: string): string[] {
+    const m = museDisplay(question, reply);
+    return [...wrap(`You: ${m.question}`), '', ...wrap(`Muse: ${m.reply}`)];
+  }
   setMuse(latest: { question: string; reply: string } | null): void {
     this.museLines = latest === null ? ["Couldn't reach Muse."]
-      : latest.question || latest.reply ? [...wrap(`You: ${latest.question}`), '', ...wrap(`Muse: ${latest.reply}`)] : ['No Muse conversation yet.'];
+      : latest.question || latest.reply ? this.museAnswerLines(latest.question, latest.reply) : ['No Muse conversation yet.'];
     this.scroll = 0;
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }

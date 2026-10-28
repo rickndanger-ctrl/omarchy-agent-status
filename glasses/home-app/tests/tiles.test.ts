@@ -252,3 +252,66 @@ test('editor lists each live window and pane with its page and machine', () => {
   assert.ok(labels.some(l => l.id === 'agent:Mini 1/p2' && l.label === 'Claude · api (Mini 1)'));
   assert.ok(!labels.some(l => l.label.includes('(Dell)') && l.label.includes('old')));
 });
+
+// ---- Muse tile (relay noise, long replies, stale fetches) ----
+test('Muse: a reply tailed with relay chrome and blanks still shows the answer', async () => {
+  const { museDisplay } = await import('../src/model');
+  const noisy = "Yep, I'm getting them\n\n\nMuse\nConnected\n\nApprovals history…\n\n";
+  assert.deepEqual(museDisplay('are you getting my texts?', noisy), { question: 'are you getting my texts?', reply: "Yep, I'm getting them" });
+  assert.equal(museDisplay('q', 'one\n\n\n\ntwo').reply, 'one\n\ntwo');
+  const body = widgetFor('muse').body(ctx({ muse: () => ({ question: 'are you getting my texts?', reply: noisy }) }), 27);
+  assert.ok(body.join('\n').includes("Yep, I'm getting them"));
+  assert.ok(!body.join('\n').includes('Connected'));
+  // the full-screen Muse page uses the same trim
+  const { HomeModel } = await import('../src/model');
+  const m = new HomeModel();
+  m.update({ ...data, pending: [] });
+  m.setMuse({ question: 'q', reply: noisy });
+  m.goTo('muse');
+  m.setMuse({ question: 'q', reply: noisy });
+  assert.match(m.render(NOW), /Yep, I'm getting them/);
+  assert.doesNotMatch(m.render(NOW), /Connected/);
+});
+
+test('Muse tile: a long reply shows its start right under the question, and swipe scrolls', () => {
+  const reply = Array.from({ length: 30 }, (_, i) => `answer line ${i}`).join('\n');
+  const c = ctx({ muse: () => ({ question: 'a very long question that wraps around the tile and then some more words', reply }) });
+  const body = widgetFor('muse').body(c, 27);
+  assert.equal(body.length > 8, true);
+  assert.ok(body[0].startsWith('You:'));
+  assert.equal(body[2], '');
+  assert.equal(body[3], 'answer line 0');
+  assert.match(body[1], /…$/);
+  const t = new Tiles();
+  t.input('select', c);
+  const frame = t.render(c).left.split('\n');
+  assert.equal(frame[4], 'answer line 0'); // title, then question, blank, answer: not scrolled to the end
+  t.input('down', c); t.input('down', c); // scroll later text
+  assert.notEqual(t.render(c).left.split('\n')[1], frame[1]);
+});
+
+test('Muse tile: shows "Muse is thinking…" while an ask is in flight', async () => {
+  const { MuseCache } = await import('../src/musecache');
+  const cache = new MuseCache();
+  cache.askStart('what now?');
+  assert.deepEqual(widgetFor('muse').body(ctx({ muse: () => cache.get() }), 27), ['You: what now?', '', 'Muse is thinking…']);
+});
+
+test('Muse: a fetch that started before an ask never overwrites the newer reply', async () => {
+  const { MuseCache } = await import('../src/musecache');
+  const cache = new MuseCache();
+  const stamp = cache.fetchStart()!;               // timed page fetch begins
+  cache.askStart('new question');                  // the owner asks meanwhile
+  cache.askReply('new question', 'new answer');
+  cache.askEnd();
+  cache.fetchDone(stamp, { question: 'old', reply: 'old answer' }); // the stale fetch lands
+  assert.deepEqual(cache.get(), { question: 'new question', reply: 'new answer' });
+  // while asking, no page fetch starts at all
+  cache.askStart('again');
+  assert.equal(cache.fetchStart(), null);
+  // after the ask, a fresh fetch is accepted again
+  cache.askReply('again', 'ok'); cache.askEnd();
+  const s2 = cache.fetchStart()!;
+  cache.fetchDone(s2, { question: 'q2', reply: 'a2' });
+  assert.equal(cache.get()!.reply, 'a2');
+});

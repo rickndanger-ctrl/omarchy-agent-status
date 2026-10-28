@@ -1,6 +1,7 @@
 import './style.css';
 import { Glasses } from './glasses';
 import { HomeModel, age, type Action, type ChatMessage, type HomeData, type Input } from './model';
+import { MuseCache } from './musecache';
 import { Tiles, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
@@ -196,10 +197,10 @@ let tilesOn = store.get('home.tiles') !== '0';
 let tilesActive = false;
 /** A full screen opened from a tile: double-tap returns to Tiles. */
 let fromTiles = false;
+const museTile = new MuseCache();
 const tileData = {
   terminals: new Map<string, string[]>(),
   chats: new Map<number, string[]>(),
-  muse: null as { question: string; reply: string } | null,
   reminders: null as Reminder[] | null,
   urls: new Map<string, UrlTile>(),
 };
@@ -208,7 +209,7 @@ const tileCtx = (): TileContext => ({
   data: model.data, now: Date.now(), battery: model.battery,
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,
-  muse: () => tileData.muse,
+  muse: () => museTile.get(),
   // For ~5 s after a voice add the Reminders tile shows "Added: <title>" at the top, from the add result (no extra fetch).
   reminders: () => (tileData.reminders && justAdded && Date.now() - justAdded.at < 5000
     ? [{ id: 'just-added', title: justAdded.title, due: null, list: '', added: justAdded.at }, ...tileData.reminders]
@@ -238,8 +239,10 @@ async function refreshTiles(): Promise<void> {
           tileData.chats.set(need.id, [...r.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`));
         } else if (need.kind === 'muse') {
           if (!museDue) return;
+          const stamp = museTile.fetchStart();
+          if (stamp === null) return; // an ask is in flight: its reply is the newest word
           museFetchedOn = page;
-          tileData.muse = await api<{ question: string; reply: string }>('muse');
+          museTile.fetchDone(stamp, await api<{ question: string; reply: string }>('muse'));
         } else if (need.kind === 'reminders') {
           tileData.reminders = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
         } else if (need.kind === 'url') {
@@ -476,24 +479,31 @@ async function run(action: Action): Promise<void> {
       const fresh = await api<{ messages: Parameters<HomeModel['setChat']>[0] }>(`messages?chat=${action.chat}`).catch(() => null);
       if (fresh && model.screenKind === 'chat') model.setChat(fresh.messages, Date.now());
     } else if (action.kind === 'askMuse') {
+      museTile.askStart(action.text);
       paint();
       const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text }) }).catch(e => ({ error: String(e.message ?? e) }));
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
-      if (!asked.id) { model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay'); paint(); return; }
+      if (!asked.id) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay'); paint(); return; }
       // Muse answers in a few seconds; long answers take longer. Check every 0.7 s for up to 2.5 minutes.
       for (let i = 0; i < 215; i++) {
         await new Promise(r => setTimeout(r, 700));
         const job = await api<{ status: string; question: string; reply: string; error?: string }>(`muse/reply?id=${encodeURIComponent(asked.id)}`).catch(() => null);
         if (!job) continue;
-        if (job.reply) { model.setMuseAnswer(job.question, job.reply); tileData.muse = { question: job.question, reply: job.reply }; }
+        if (job.reply) { model.setMuseAnswer(job.question, job.reply); museTile.askReply(job.question, job.reply); }
         paint();
         if (['done', 'error', 'timeout'].includes(job.status)) {
           diag('muse.reply', `${job.status} ${job.error ?? ''}`);
-          if (!job.reply) model.setMuseProblem(action.text, job.error || (job.status === 'timeout' ? 'Muse took too long' : 'unknown error'));
+          if (!job.reply) {
+            const why = job.error || (job.status === 'timeout' ? 'Muse took too long' : 'unknown error');
+            model.setMuseProblem(action.text, why);
+            museTile.askReply(action.text, `Muse didn't get it: ${why}.`);
+          }
           paint();
           break;
         }
       }
+      museTile.askEnd();
+      paint();
     } else if (action.kind === 'continueSession') {
       const r = await api<{ ok: boolean; pane?: string; error?: string }>('continue', { method: 'POST', body: JSON.stringify(action) })
         .catch(e => ({ ok: false, error: String(e.message ?? e) } as { ok: boolean; pane?: string; error?: string }));
@@ -521,9 +531,10 @@ async function run(action: Action): Promise<void> {
     } else if (action.kind === 'openTiles') {
       enterTiles();
     } else if (action.kind === 'loadMuse') {
+      const stamp = museTile.fetchStart();
       const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
       model.setMuse(latest);
-      if (latest) tileData.muse = latest;
+      if (stamp !== null) museTile.fetchDone(stamp, latest);
     }
   } catch (error) {
     model.showFlash(error instanceof Error ? error.message : 'Failed', Date.now());

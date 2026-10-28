@@ -4,7 +4,7 @@
 //
 // CONTRACT (set by the architect; changing a type here is a breaking change: tell the
 // architect first). The implementation below the line is the main session's.
-import { clip, clock, conversationLines, sessionKey, studioText, STATE_WORD, wrap } from './model';
+import { clip, clock, conversationLines, museDisplay, sessionKey, studioText, STATE_WORD, wrap } from './model';
 import type { Action, HomeData, Input, Session } from './model';
 
 /** One tile is 288 px wide: 27 characters, 9 lines, title included. More lines make the glasses auto-scroll and swallow swipes. */
@@ -228,9 +228,13 @@ function museWidget(): Widget {
     title: () => 'Muse',
     body: (ctx, width) => {
       if (ctx.data && !ctx.data.muse) return wrap('Muse is not set up.', width);
-      const m = ctx.muse();
-      if (!m) return ['Loading…'];
-      return [...wrap(`You: ${m.question}`, width), '', ...wrap(m.reply || '…', width)];
+      const raw = ctx.muse();
+      if (!raw) return ['Loading…'];
+      // The question (at most two lines), a blank, then the answer from its start; swipe scrolls on.
+      const m = museDisplay(raw.question, raw.reply);
+      const q = wrap(`You: ${m.question}`, width);
+      const question = q.length > 2 ? [q[0], `${q[1].slice(0, width - 1)}…`] : q;
+      return [...question, '', ...(m.reply ? wrap(m.reply, width) : ['Muse is thinking…'])];
     },
     actions: () => [{ id: 'ask', label: 'Ask Muse' }],
     act: actionId => {
@@ -511,7 +515,7 @@ export class Tiles implements TilesApi {
   }
 
   /** Log-like tiles open at the newest line; lists open at the top. */
-  private anchoredBottom(w: Widget): boolean { return w.kind === 'agent' || w.kind === 'chat' || w.kind === 'muse'; }
+  private anchoredBottom(w: Widget): boolean { return w.kind === 'agent' || w.kind === 'chat'; }
 
   private menuItems(w: Widget, ctx: TileContext): TileAction[] {
     const full = w.act(FULL, ctx) ? [{ id: FULL, label: 'Full screen' }] : [];
