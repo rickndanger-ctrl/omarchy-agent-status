@@ -240,3 +240,29 @@ test('settled() does not say rendered while a write is still in flight', async (
   assert.equal(await g.settled(2000), 'rendered');
   g.dispose();
 });
+
+test('a forgotten (hung) write that lands later may have overwritten the resent frame: the newest is sent once more', async () => {
+  const calls: { text: string; at: number }[] = [];
+  const t0 = Date.now();
+  const lifecycle: string[] = [];
+  let landLate: (ok: boolean) => void = () => {};
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {}, onStatus: () => {},
+    onLifecycle: e => lifecycle.push(e),
+    renderTimeoutMs: 100, hungWriteMs: 400,
+    bridge: async () => controlled(calls, t0, text => (text === 'hung text' ? new Promise<boolean>(r => { landLate = r; }) : Promise.resolve(true))),
+  }, GLASSES_MENU);
+  await g.connect();
+  g.setText('hung text');
+  await sleep(150);
+  g.setText('newest text');
+  await sleep(900); // the hard limit passed: the hung write was forgotten and the newest sent
+  const before = calls.filter(c => c.text === 'newest text').length;
+  assert.equal(before, 1, calls.map(c => c.text).join(','));
+  landLate(true); // ... and now the old write lands, possibly over it
+  await sleep(1000);
+  assert.equal(calls.filter(c => c.text === 'newest text').length, 2, calls.map(c => c.text).join(','));
+  assert.equal(calls.at(-1)?.text, 'newest text');
+  assert.ok(lifecycle.includes('frame held: late write, resent'), lifecycle.join('|'));
+  g.dispose();
+});

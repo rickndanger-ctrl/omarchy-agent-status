@@ -95,6 +95,8 @@ export class Glasses {
   /** SDK writes that have not settled (ids). A write that outlives its timeout stays here until it settles or the hard limit passes. */
   private live = new Set<number>();
   private writeSeq = 0;
+  /** Writes given up on that have not settled yet: when one lands it may have overwritten the frame sent since. */
+  private forgotten = new Set<number>();
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private lastRenderAt = -Infinity;
   private pressing = false;
@@ -283,7 +285,11 @@ export class Glasses {
     this.live.add(id);
     let timedOut = false;
     void promise.then(() => undefined, () => undefined).then(() => {
-      if (!this.live.delete(id)) return; // already given up on: the newest frame has been sent since
+      if (!this.live.delete(id)) {
+        // Given up on earlier (hung, or a reconnect): it may have landed over the frame sent since, so send the newest once more.
+        if (this.forgotten.delete(id)) { this.shown = null; this.options.onLifecycle?.('frame held: late write, resent'); this.scheduleRender(); }
+        return;
+      }
       if (timedOut) { this.shown = null; this.scheduleRender(); }
     });
     return bounded(promise, stage, this.options.renderTimeoutMs ?? 5000).catch(error => {
@@ -291,6 +297,7 @@ export class Glasses {
       // Past the hard limit a write that never settles is forgotten, so the glasses are not frozen for good.
       setTimeout(() => {
         if (!this.live.delete(id)) return;
+        this.forgotten.add(id);
         this.shown = null;
         this.options.onLifecycle?.('frame held: write hung, resent');
         this.scheduleRender();
@@ -300,7 +307,7 @@ export class Glasses {
   }
 
   /** Reconnecting or closing: nothing written before can be waited for any more. */
-  private forgetWrites(): void { this.live.clear(); }
+  private forgetWrites(): void { for (const id of this.live) this.forgotten.add(id); this.live.clear(); }
 
   /** What still has to reach the glasses: a rebuild, one tile's text, or nothing. */
   private pending(): 'rebuild' | 'left' | 'right' | 'text' | null {
