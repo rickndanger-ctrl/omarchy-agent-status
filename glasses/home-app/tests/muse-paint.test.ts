@@ -3,7 +3,7 @@
 // running inside the queue, refreshes and presses are queued meanwhile, and the reply is painted directly.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { StartUpPageCreateResult, type EvenAppBridge } from '@evenrealities/even_hub_sdk';
+import { StartUpPageCreateResult, OsEventTypeList, type EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { Glasses } from '../src/glasses';
 import { GLASSES_MENU } from '../src/menu';
 import { HomeModel, type HomeData } from '../src/model';
@@ -96,11 +96,11 @@ test('a failed update at the moment of the reply is retried by itself: the reply
 });
 
 /** A bridge whose text writes the test controls: each call is recorded, and `reply` decides how it ends. */
-function controlled(calls: { text: string; at: number }[], t0: number, reply: (text: string) => Promise<boolean>) {
+function controlled(calls: { text: string; at: number }[], t0: number, reply: (text: string) => Promise<boolean>, events?: { handler?: (e: unknown) => void }) {
   return {
-    onEvenHubEvent: () => () => {}, onDeviceStatusChanged: () => () => {},
+    onEvenHubEvent: (h: (e: unknown) => void) => { if (events) events.handler = h; return () => {}; }, onDeviceStatusChanged: () => () => {},
     getDeviceInfo: async () => ({ status: { batteryLevel: 80, isWearing: true } }),
-    createStartUpPageContainer: async () => StartUpPageCreateResult.success,
+    createStartUpPageContainer: async (c: { textObject?: { content?: string }[] }) => { const text = c.textObject?.[0]?.content; if (events && text !== undefined) calls.push({ text, at: Date.now() - t0 }); return StartUpPageCreateResult.success; },
     // a rebuild carries the whole page: its text container's content is what the glasses show
     rebuildPageContainer: async (c: { textObject?: { content?: string }[] }) => { const text = c.textObject?.[0]?.content; if (text !== undefined) calls.push({ text, at: Date.now() - t0 }); return true; },
     textContainerUpgrade: (u: { content?: string }) => { calls.push({ text: u.content ?? '', at: Date.now() - t0 }); return reply(u.content ?? ''); },
@@ -171,5 +171,72 @@ test('a timed-out write that lands late after the wanted text went back to the s
   const texts = calls.map(c => c.text);
   assert.equal(texts.at(-1), 'A', texts.join(','));
   assert.equal(texts.filter(t => t === 'A').length, 2, 'A is sent again after the late B: ' + texts.join(','));
+  g.dispose();
+});
+
+test('a write that never settles is given up after the hard limit: the newest frame is sent as a rebuild and the log says so', async () => {
+  const calls: { text: string; at: number }[] = [];
+  const t0 = Date.now();
+  const lifecycle: string[] = [];
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {}, onStatus: () => {},
+    onLifecycle: e => lifecycle.push(e),
+    renderTimeoutMs: 100, hungWriteMs: 500,
+    bridge: async () => controlled(calls, t0, text => (text === 'hung text' ? new Promise<boolean>(() => {}) : Promise.resolve(true))),
+  }, GLASSES_MENU);
+  await g.connect();
+  g.setText('hung text');
+  await sleep(250);
+  g.setText('newest text');
+  await sleep(300);
+  assert.ok(!calls.some(c => c.text === 'newest text'), 'held while the write may still land');
+  await sleep(900); // past the hard limit (and the 1.5 s retry is not needed: the limit sends it)
+  assert.ok(calls.some(c => c.text === 'newest text'), calls.map(c => c.text).join(','));
+  assert.ok(lifecycle.includes('frame held: write hung, resent'), lifecycle.join('|'));
+  g.dispose();
+});
+
+test('a reconnect forgets a hung write: the newest frame goes out with the new page, nothing stays frozen', async () => {
+  const calls: { text: string; at: number }[] = [];
+  const t0 = Date.now();
+  const events: { handler?: (e: unknown) => void } = {};
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {}, onStatus: () => {},
+    renderTimeoutMs: 100, hungWriteMs: 60_000,
+    bridge: async () => controlled(calls, t0, text => (text === 'hung text' ? new Promise<boolean>(() => {}) : Promise.resolve(true)), events),
+  }, GLASSES_MENU);
+  await g.connect();
+  g.setText('hung text');
+  await sleep(250);
+  g.setText('newest text');
+  events.handler?.({ sysEvent: { eventType: OsEventTypeList.ABNORMAL_EXIT_EVENT } });
+  assert.equal(await g.connect(), true);
+  await sleep(200);
+  assert.equal(calls.at(-1)?.text, 'newest text', calls.map(c => c.text).join(','));
+  g.setText('after reconnect');
+  assert.equal(await g.settled(2000), 'rendered');
+  assert.equal(calls.at(-1)?.text, 'after reconnect');
+  g.dispose();
+});
+
+test('settled() does not say rendered while a write is still in flight', async () => {
+  const calls: { text: string; at: number }[] = [];
+  const t0 = Date.now();
+  let release: (ok: boolean) => void = () => {};
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {}, onStatus: () => {},
+    renderTimeoutMs: 100, hungWriteMs: 60_000,
+    bridge: async () => controlled(calls, t0, text => (text === 'slow text' ? new Promise<boolean>(r => { release = r; }) : Promise.resolve(true))),
+  }, GLASSES_MENU);
+  await g.connect();
+  g.setText('base');
+  assert.equal(await g.settled(2000), 'rendered');
+  g.setText('slow text');
+  await sleep(1800); // timed out and past the 1.5 s retry: the glasses may be tried again, but the write is still out there
+  g.setText('base'); // wanted == shown as far as the app knows, yet the slow write may still land
+  assert.equal(await g.settled(300), 'capped');
+  release(true);
+  await sleep(100);
+  assert.equal(await g.settled(2000), 'rendered');
   g.dispose();
 });

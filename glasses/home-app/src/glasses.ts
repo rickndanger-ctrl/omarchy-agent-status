@@ -35,6 +35,8 @@ export interface GlassesOptions {
   onLifecycle?: (event: string) => void;
   /** How long one write to the Even app may take before it counts as failed (default 5000; tests shorten it). */
   renderTimeoutMs?: number;
+  /** How long past its timeout a write may hang before it is forgotten (default 10000; tests shorten it). */
+  hungWriteMs?: number;
   /** A render reached the glasses (what: rebuild, text, left or right). */
   onFrame?: (what: string) => void;
   /** Where the Even app bridge comes from (tests pass a fake). Default: the SDK's waitForEvenAppBridge. */
@@ -53,6 +55,8 @@ type Frame = { kind: 'single'; text: string } | { kind: 'tiles'; key: string; fo
 const MIN_RENDER_INTERVAL_MS = 450;
 /** After a failed update the glasses are tried again after this long, without waiting for a touch. */
 const RENDER_RETRY_MS = 1500;
+/** A write that has not settled this long after its timeout is given up on and the newest frame is sent again. */
+const HUNG_WRITE_MS = 10_000;
 const BRIDGE_TIMEOUT_MS = 15000;
 
 function bounded<T>(promise: Promise<T>, stage: string, ms = BRIDGE_TIMEOUT_MS): Promise<T> {
@@ -88,7 +92,9 @@ export class Glasses {
   private renderBlocked = false;
   private heldWhy = '';
   private failedWant: Frame | null = null;
-  private inFlight = 0;
+  /** SDK writes that have not settled (ids). A write that outlives its timeout stays here until it settles or the hard limit passes. */
+  private live = new Set<number>();
+  private writeSeq = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private lastRenderAt = -Infinity;
   private pressing = false;
@@ -124,7 +130,7 @@ export class Glasses {
   /** rendered: nothing pending, no render running. not-visible: nothing can reach the glasses now. null: still on its way. */
   private settleState(): SettleResult | null {
     if (!this.connected || !this.foreground || this.renderBlocked) return 'not-visible';
-    return !this.renderBusy && this.renderTimer === undefined && this.pending() === null ? 'rendered' : null;
+    return !this.renderBusy && this.live.size === 0 && this.renderTimer === undefined && this.pending() === null ? 'rendered' : null;
   }
 
   private notifySettled(): void { this.settleWaiters.notify(() => this.settleState()); }
@@ -138,6 +144,7 @@ export class Glasses {
     if (this.connected) return Promise.resolve(true);
     if (this.connecting) return this.connecting;
     const epoch = ++this.epoch;
+    this.forgetWrites();
     this.connecting = this.open(epoch).finally(() => { this.connecting = null; });
     return this.connecting;
   }
@@ -272,15 +279,28 @@ export class Glasses {
    * nothing else is sent while it is in flight; when it settles the glasses may show anything, so the newest wanted frame is sent again.
    */
   private write<T>(promise: Promise<T>, stage: string): Promise<T> {
-    this.inFlight++;
-    const started = this.epoch;
+    const id = ++this.writeSeq;
+    this.live.add(id);
     let timedOut = false;
     void promise.then(() => undefined, () => undefined).then(() => {
-      this.inFlight--;
-      if (timedOut && started === this.epoch) { this.shown = null; this.scheduleRender(); }
+      if (!this.live.delete(id)) return; // already given up on: the newest frame has been sent since
+      if (timedOut) { this.shown = null; this.scheduleRender(); }
     });
-    return bounded(promise, stage, this.options.renderTimeoutMs ?? 5000).catch(error => { timedOut = true; throw error; });
+    return bounded(promise, stage, this.options.renderTimeoutMs ?? 5000).catch(error => {
+      timedOut = true;
+      // Past the hard limit a write that never settles is forgotten, so the glasses are not frozen for good.
+      setTimeout(() => {
+        if (!this.live.delete(id)) return;
+        this.shown = null;
+        this.options.onLifecycle?.('frame held: write hung, resent');
+        this.scheduleRender();
+      }, this.options.hungWriteMs ?? HUNG_WRITE_MS);
+      throw error;
+    });
   }
+
+  /** Reconnecting or closing: nothing written before can be waited for any more. */
+  private forgetWrites(): void { this.live.clear(); }
 
   /** What still has to reach the glasses: a rebuild, one tile's text, or nothing. */
   private pending(): 'rebuild' | 'left' | 'right' | 'text' | null {
@@ -314,6 +334,7 @@ export class Glasses {
     if (system?.eventType === OsEventTypeList.SYSTEM_EXIT_EVENT || system?.eventType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
       this.options.onLifecycle?.(`exit ${system.eventType}`);
       ++this.epoch;
+      this.forgetWrites();
       this.connected = false;
       this.pageCreated = false;
       clearTimeout(this.renderTimer);
@@ -371,7 +392,7 @@ export class Glasses {
     const why = !this.connected ? 'not connected' : !this.foreground ? 'not in front' : this.renderBlocked ? 'last update failed' : '';
     if (why && this.pending() !== null && why !== this.heldWhy) this.options.onLifecycle?.(`frame held: ${why}`);
     this.heldWhy = why;
-    if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.inFlight > 0 || this.renderTimer !== undefined || this.pending() === null) return;
+    if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.live.size > 0 || this.renderTimer !== undefined || this.pending() === null) return;
     const wait = Math.max(0, MIN_RENDER_INTERVAL_MS - (performance.now() - this.lastRenderAt));
     this.renderTimer = setTimeout(() => { this.renderTimer = undefined; void this.flushRender(); }, wait);
   }
