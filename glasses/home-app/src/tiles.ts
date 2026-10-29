@@ -4,6 +4,7 @@
 //
 // CONTRACT (set by the architect; changing a type here is a breaking change: tell the
 // architect first). The implementation below the line is the main session's.
+import { MUSE_UNREACHABLE } from './musecache';
 import { clip, clock, conversationLines, museDisplay, recentChats, sessionKey, studioText, STATE_WORD, wrap } from './model';
 import type { Action, Chat, HomeData, Input, Session } from './model';
 
@@ -232,14 +233,16 @@ function museWidget(): Widget {
       if (ctx.data && !ctx.data.muse) return wrap('Muse is not set up.', width);
       const raw = ctx.muse();
       if (!raw) return ['Loading…'];
+      if (raw === MUSE_UNREACHABLE) return ["Muse: can't reach"];
       // The question (at most two lines), a blank, then the answer from its start; swipe scrolls on.
       const m = museDisplay(raw.question, raw.reply);
       const q = wrap(`You: ${m.question}`, width);
       const question = q.length > 2 ? [q[0], `${q[1].slice(0, width - 1)}…`] : q;
       return [...question, '', ...(m.reply ? wrap(m.reply, width) : ['Muse is thinking…'])];
     },
-    actions: () => [{ id: 'ask', label: 'Ask Muse' }],
+    actions: ctx => [...(ctx.muse() === MUSE_UNREACHABLE ? [{ id: 'retry', label: 'Retry' }] : []), { id: 'ask', label: 'Ask Muse' }],
     act: actionId => {
+      if (actionId === 'retry') return { kind: 'action', action: { kind: 'loadMuse' } };
       if (actionId === 'ask') return { kind: 'open', target: { kind: 'muse', then: 'listen' } };
       return actionId === FULL ? { kind: 'open', target: { kind: 'muse' } } : null;
     },
@@ -352,7 +355,12 @@ function clockWidget(): Widget {
       const w = ctx.data?.weather;
       if (w) lines.push('', clip(`${Math.round(w.temp)}° ${w.desc}`, W), `High ${Math.round(w.hi)}° · low ${Math.round(w.lo)}°`);
       if (w?.rainAt) lines.push(clip(`Rain ${w.rainAt} · ${Math.round(w.rainChance)}%`, W));
-      if (ctx.battery !== undefined) lines.push(`Glasses ${Math.round(ctx.battery)}%`);
+      // The hub line must never fall below the fold (8 body lines): battery and hub share a line, and blanks give way.
+      const battery = ctx.battery !== undefined ? `Glasses ${Math.round(ctx.battery)}%` : '';
+      if (ctx.hub?.down) lines.push(...(battery ? [battery] : []), 'Mini 1 and Neo unreachable');
+      else if (ctx.hub?.name) lines.push(clip(battery ? `${battery} · via ${ctx.hub.name}` : `via ${ctx.hub.name}`, W));
+      else if (battery) lines.push(battery);
+      for (let i = lines.indexOf(''); lines.length > BODY_LINES && i >= 0; i = lines.indexOf('')) lines.splice(i, 1);
       return lines;
     },
     actions: () => [],
