@@ -5,7 +5,7 @@ import type { TileContext } from '../src/tiles';
 import type { ConvView } from '../src/conversation';
 
 const NOW = Date.UTC(2026, 9, 29, 14, 32);
-const base: ConvView = { phase: 'idle', elapsedMs: 0, hints: [], summary: [], actions: [], fallback: '', error: '', notice: '', id: '', stoppedAt: 0, sent: false };
+const base: ConvView = { phase: 'idle', elapsedMs: 0, hints: [], summary: [], actions: [], fallback: '', error: '', notice: '', skipped: 0, warning: '', id: '', stoppedAt: 0, sent: false };
 const ctx = (v: Partial<ConvView> | null): TileContext => ({
   data: null, now: NOW, timeZone: 'UTC', terminal: () => null, chat: () => null, muse: () => null, reminders: () => null, url: () => null,
   conversation: () => (v === null ? null : { ...base, ...v }),
@@ -72,4 +72,13 @@ test('in the Tiles model: a tap on an idle conversation tile starts; on a done o
   assert.match(t.render(c).left, /> Start new/);
   t.input('down', c);
   assert.deepEqual(t.input('select', c), { kind: 'conversation', op: 'sendMuse' });
+});
+
+test('the tile says how many pieces were missed, and keeps the microphone warning', () => {
+  assert.ok(w.body(ctx({ phase: 'listening', skipped: 2 }), 27).includes('2 pieces missed'));
+  assert.ok(w.body(ctx({ phase: 'done', summary: ['x'], skipped: 1 }), 27).includes('1 piece missed'));
+  assert.ok(!w.body(ctx({ phase: 'listening' }), 27).join(' ').includes('missed'));
+  const lines = w.body(ctx({ phase: 'done', summary: ['x'], warning: 'Microphone may still be on: close the app' }), 27);
+  assert.ok(lines.join(' ').includes('Microphone may still be on'));
+  for (const l of lines) assert.ok(l.length <= 27, l);
 });

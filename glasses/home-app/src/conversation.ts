@@ -40,7 +40,9 @@ export interface ConvHub {
   stop(id: string): Promise<void>;
   get(): Promise<Conversation>;
 }
-export interface ConvMic { on(): Promise<boolean>; off(): Promise<void> }
+/** off() resolves to whether the microphone really went off (glasses.microphone(false)). */
+export interface ConvMic { on(): Promise<boolean>; off(): Promise<boolean> }
+export const MIC_STILL_ON = 'Microphone may still be on: close the app';
 
 export interface ConvDeps {
   /** The hub for a new session: bound to the hub current at that moment, kept for the whole session. */
@@ -63,6 +65,8 @@ export interface ConvView {
   elapsedMs: number;
   hints: string[]; summary: string[]; actions: string[];
   fallback: string; error: string; notice: string;
+  /** Pieces of audio that never reached the hub, and a lasting warning (the microphone may still be on). */
+  skipped: number; warning: string;
   id: string; stoppedAt: number;
   /** This summary was already sent to Muse. */
   sent: boolean;
@@ -100,6 +104,12 @@ export class ConversationSession {
   private summarizingSince = 0;
   private loaded = false;
   private stopping: Promise<void> | null = null;
+  private starting: Promise<void> | null = null;
+  private cancelStart = false;
+  private skipped = 0;
+  private warning = '';
+  /** Sent ids also live here, so a localStorage that fails cannot allow a second send. */
+  private sentMem = new Set<string>();
   private now: () => number;
 
   constructor(private readonly deps: ConvDeps, now: () => number = Date.now) { this.now = now; }
@@ -116,8 +126,25 @@ export class ConversationSession {
       hints: mine ? d.hints ?? [] : [], summary: mine ? d.summary ?? [] : [], actions: mine ? d.actions ?? [] : [],
       fallback: mine ? d.fallback ?? '' : '', error: this.errorText, notice: this.notice,
       id: this.id, stoppedAt: this.stoppedAt || (mine ? d.stoppedAt ?? 0 : 0),
-      sent: Boolean(this.id) && this.deps.sent.has(this.id),
+      skipped: this.skipped, warning: this.warning,
+      sent: Boolean(this.id) && this.wasSent(this.id),
     };
+  }
+
+  private wasSent(id: string): boolean {
+    if (this.sentMem.has(id)) return true;
+    try { return this.deps.sent.has(id); } catch { return false; }
+  }
+
+  /** Microphone off; a refusal is tried once more, and a second one leaves a warning on the tile. */
+  private async micOff(): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let ok = false;
+      try { ok = await this.deps.mic.off(); } catch { ok = false; }
+      if (ok) { this.warning = ''; return; }
+    }
+    this.warning = MIC_STILL_ON;
+    this.deps.diag('conv.mic-off-failed');
   }
 
   /** Once, when the tile is first shown: pick up the last finished summary the hub kept. */
@@ -136,15 +163,27 @@ export class ConversationSession {
     this.data = d; this.id = d.id ?? ''; this.startedAt = d.startedAt ?? 0; this.stoppedAt = d.stoppedAt ?? 0;
   }
 
-  async start(backend: ConvBackend): Promise<void> {
-    if (this.isListening() || this.phase === 'summarizing') return;
-    if (this.deps.voiceMicBusy()) { this.notice = 'Finish the voice reply first'; return; }
-    this.notice = ''; this.errorText = ''; this.data = null;
+  start(backend: ConvBackend): Promise<void> {
+    if (this.isListening() || this.phase === 'summarizing') return Promise.resolve();
+    if (this.deps.voiceMicBusy()) { this.notice = 'Finish the voice reply first'; return Promise.resolve(); }
+    this.notice = ''; this.errorText = ''; this.data = null; this.skipped = 0; this.cancelStart = false;
     this.phase = 'starting';
+    this.starting = this.doStart(backend).finally(() => { this.starting = null; });
+    return this.starting;
+  }
+
+  private async doStart(backend: ConvBackend): Promise<void> {
     const hub = this.deps.hub();
+    let started: { id: string; startedAt: number };
     try {
-      const s = await hub.start(backend);
-      this.id = s.id; this.hub = hub;
+      started = await hub.start(backend);
+      if (this.cancelStart) {
+        // Stopped before the hub answered: close the session it just opened; the microphone never went on.
+        void hub.stop(started.id).catch(() => {});
+        this.phase = 'idle'; this.id = ''; this.notice = 'Stopped before it began';
+        return;
+      }
+      this.id = started.id; this.hub = hub;
     } catch (e) {
       this.phase = 'idle'; this.id = '';
       this.notice = e instanceof ConvHttpError && e.status === 409 ? 'Already listening (started elsewhere)' : `Could not start: ${e instanceof Error ? e.message : e}`;
@@ -155,6 +194,13 @@ export class ConversationSession {
     this.startedAt = this.now(); this.stoppedAt = 0;
     let on = false;
     try { on = await this.deps.mic.on(); } catch { on = false; }
+    if (this.cancelStart) {
+      // Stopped while the microphone was starting: whatever it did, turn it off and close the hub session.
+      await this.micOff();
+      void this.hub.stop(this.id).catch(() => {});
+      this.phase = 'idle'; this.id = ''; this.notice = 'Stopped before it began';
+      return;
+    }
     if (!on) {
       this.phase = 'error'; this.errorText = 'The microphone did not start.';
       void this.hub.stop(this.id).catch(() => {});
@@ -201,7 +247,7 @@ export class ConversationSession {
         } catch (e) {
           const status = e instanceof ConvHttpError ? e.status : 0;
           if (status === 404 || status === 410) { this.deps.diag('conv.chunk-gone', status); this.queue = []; this.sessionLost(); return; }
-          if (status === 413 || attempt >= CHUNK_RETRY_MS.length) { this.deps.diag('conv.chunk-skipped', `${item.seq} ${status}`); break; }
+          if (status === 413 || attempt >= CHUNK_RETRY_MS.length) { this.skipped++; this.deps.diag('conv.chunk-skipped', `${item.seq} ${status}`); break; }
           await sleep(CHUNK_RETRY_MS[attempt]);
         }
       }
@@ -210,7 +256,7 @@ export class ConversationSession {
 
   private sessionLost(): void {
     if (this.phase !== 'listening' && this.phase !== 'stopping') return;
-    void this.deps.mic.off().catch(() => {});
+    void this.micOff().then(() => this.deps.changed());
     this.phase = 'error'; this.errorText = 'The hub ended the session.';
     this.deps.changed();
   }
@@ -218,6 +264,7 @@ export class ConversationSession {
   /** Stop listening and ask for the summary. Safe to call twice (a tap and the background event). */
   stop(reason: string): Promise<void> {
     if (this.stopping) return this.stopping;
+    if (this.phase === 'starting') { this.cancelStart = true; return this.starting ?? Promise.resolve(); }
     if (this.phase !== 'listening') return Promise.resolve();
     this.stopping = this.doStop(reason).finally(() => { this.stopping = null; });
     return this.stopping;
@@ -225,7 +272,7 @@ export class ConversationSession {
 
   private async doStop(reason: string): Promise<void> {
     this.phase = 'stopping';
-    try { await this.deps.mic.off(); } catch { /* released anyway below */ }
+    await this.micOff();
     if (this.bytes >= MIN_LAST_CHUNK_BYTES) this.enqueue(this.take()); else { this.parts = []; this.bytes = 0; }
     await this.pumping;
     if (this.phase !== 'stopping') return; // the hub ended it meanwhile
@@ -269,10 +316,12 @@ export class ConversationSession {
    * finished summary and never while listening. Returns whether it was sent.
    */
   sendToMuse(dispatch: (action: Action) => void): boolean {
-    if (this.phase !== 'done' || this.isListening() || !this.id || this.deps.sent.has(this.id)) return false;
+    if (this.phase !== 'done' || this.isListening() || !this.id || this.wasSent(this.id)) return false;
     const v = this.view();
     if (!v.summary.length && !v.actions.length) return false;
-    this.deps.sent.add(this.id);
+    // Marked first, in memory and in the store, before Muse is asked: once only, whatever happens next.
+    this.sentMem.add(this.id);
+    try { this.deps.sent.add(this.id); } catch { /* the in-memory mark still holds */ }
     dispatch({ kind: 'askMuse', text: museSummaryText(v.summary, v.actions, v.stoppedAt || this.startedAt) });
     this.deps.diag('conv.muse', 'sent');
     return true;

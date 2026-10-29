@@ -434,18 +434,20 @@ function conversationWidget(): Widget {
     body: (ctx, width) => {
       const v = view(ctx);
       if (!v) return wrap('Conversation is not available here.', width);
-      const note = v.notice ? [...wrap(v.notice, width), ''] : [];
+      const note = [...(v.notice ? [...wrap(v.notice, width), ''] : []), ...(v.warning ? [...wrap(v.warning, width), ''] : [])];
+      const missed = v.skipped > 0 ? [`${v.skipped} piece${v.skipped === 1 ? '' : 's'} missed`] : [];
       switch (v.phase) {
-        case 'starting': return ['Starting…'];
+        case 'starting': return [...note, 'Starting…'];
         case 'listening': {
           const hints = v.hints.length ? v.hints.flatMap(h => wrap(`• ${h}`, width)) : wrap('Listening… hints appear after about 10 seconds.', width);
-          return [...(v.error ? [...wrap(v.error, width), ''] : []), ...hints, ...(v.fallback ? ['', ...fallbackLine(v, width)] : []), '', 'Tap to stop.'];
+          return [...note, ...(v.error ? [...wrap(v.error, width), ''] : []), ...hints, ...(v.fallback ? ['', ...fallbackLine(v, width)] : []), ...(missed.length ? ['', ...missed] : []), '', 'Tap to stop.'];
         }
-        case 'stopping': case 'summarizing': return ['Summarizing…', ...(v.fallback ? ['', ...fallbackLine(v, width)] : [])];
+        case 'stopping': case 'summarizing': return [...note, 'Summarizing…', ...(missed.length ? ['', ...missed] : []), ...(v.fallback ? ['', ...fallbackLine(v, width)] : [])];
         case 'done': {
-          const lines = [...v.summary.flatMap(l => wrap(l, width))];
+          const lines = [...note, ...v.summary.flatMap(l => wrap(l, width))];
           if (v.actions.length) lines.push('', 'Action items:', ...v.actions.flatMap(a => wrap(`- ${a}`, width)));
           if (v.fallback) lines.push('', ...fallbackLine(v, width));
+          if (missed.length) lines.push('', ...missed);
           return lines.length ? lines : ['(Nothing was said.)'];
         }
         case 'error': return [...note, ...wrap(v.error || 'Something went wrong.', width), '', 'Tap to start again.'];
