@@ -1,6 +1,7 @@
 import './style.css';
 import { Glasses } from './glasses';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
+import { HubPicker } from './hubpick';
 import { MuseCache } from './musecache';
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
@@ -24,9 +25,18 @@ if (params.get('t')) {
 const HUBS: string[] = (import.meta.env.VITE_HUBS ?? '').split(',').map((h: string) => h.trim()).filter(Boolean);
 // Only a page actually served by a hub (/hud/ behind Tailscale, or a node on :5182) counts as one.
 const here = /^https?:$/.test(location.protocol) && (/\/hud\/$/.test(new URL('.', location.href).pathname) || location.port === '5182') ? new URL('.', location.href).href : '';
-const defaultBase = here || HUBS[0];
-const hubs = () => [...new Set([store.get('home.base'), here, ...HUBS].filter(Boolean))];
-let base = store.get('home.base') || defaultBase;
+// Only the hubs in HUBS are ever used: a stored or page address that is not one of them is dropped (src/hubpick.ts).
+const picker = new HubPicker(HUBS, here, store.get('home.base'), Date.now());
+if (picker.staleStored) store.set('home.base', '');
+const hubs = () => picker.order();
+let base = picker.current;
+/** A hub answered or was paired with: make it current and remember it (allowed hubs only). Returns true if it changed. */
+function adopt(hub: string): boolean {
+  const changed = picker.useHub(hub, Date.now());
+  base = picker.current;
+  if (changed || store.get('home.base') !== base) store.set('home.base', base);
+  return changed;
+}
 let token = store.get('home.token');
 
 const model = new HomeModel();
@@ -107,12 +117,12 @@ $('app').innerHTML = `
 $<HTMLInputElement>('base').value = base;
 $<HTMLInputElement>('token').value = token;
 $('save').onclick = () => {
-  base = $<HTMLInputElement>('base').value.trim() || defaultBase;
-  if (!base.endsWith('/')) base += '/';
+  let entered = $<HTMLInputElement>('base').value.trim() || picker.primary;
+  if (!entered.endsWith('/')) entered += '/';
   token = $<HTMLInputElement>('token').value.trim();
-  store.set('home.base', base);
   store.set('home.token', token);
-  status = 'Saved.';
+  if (picker.allowed(entered)) { adopt(entered); status = 'Saved.'; } else status = 'Saved the token. That server is not one of your hubs, so it is not used.';
+  $<HTMLInputElement>('base').value = base;
   paint();
   void poll();
 };
@@ -127,9 +137,8 @@ $('pair').onclick = async () => {
       const body = await res.json() as { token?: string };
       if (body.token) {
         token = body.token;
-        base = hub;
+        adopt(hub);
         store.set('home.token', token);
-        store.set('home.base', base);
         $<HTMLInputElement>('token').value = token;
         status = 'Paired. Home is connected.';
         $('pairbox').classList.add('hidden');
@@ -162,7 +171,7 @@ class HttpError extends Error {}
 /** Calls the current hub; if it can't be reached at all, the next hub takes over (and stays current). */
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   let lastError: unknown = new Error('no hub reachable');
-  for (const hub of [base, ...hubs().filter(h => h !== base)]) {
+  for (const hub of hubs()) {
     let res: Response;
     try {
       res = await fetch(new URL(`api/${path}`, hub), {
@@ -180,16 +189,37 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
       lastError = new Error(`hub down (${res.status})`);
       continue;
     }
-    if (hub !== base) {
-      base = hub;
-      store.set('home.base', base);
-      diag('hub.switch', new URL(hub).hostname);
-    }
+    if (adopt(hub)) diag('hub.switch', new URL(hub).hostname);
+    void learnName(hub);
     if (res.status === 401) throw new HttpError('wrong token');
     if (!res.ok) throw new HttpError(`server said ${res.status}`);
     return res.json() as Promise<T>;
   }
+  picker.allFailed();
   throw lastError;
+}
+
+/** The hubs say their own name in /api/health ("machine"); the clock tile shows "via <name>". Asked once per hub. */
+const learning = new Set<string>();
+async function learnName(hub: string): Promise<void> {
+  if (picker.knowsName(hub) || learning.has(hub)) return;
+  learning.add(hub);
+  try {
+    const health = await (await fetch(new URL('api/health', hub), { signal: AbortSignal.timeout(4000) })).json() as { machine?: string };
+    if (health.machine) picker.noteName(hub, health.machine);
+  } catch { /* asked again next time */ } finally { learning.delete(hub); }
+}
+
+/** Not on the preferred hub: at most once a minute, ask its /api/health (no token) and go back when it answers. */
+async function maybeReturnToPrimary(): Promise<void> {
+  if (!picker.primaryCheckDue(Date.now())) return;
+  try {
+    const res = await fetch(new URL('api/health', picker.primary), { signal: AbortSignal.timeout(4000) });
+    const health = await res.json() as { ok?: boolean; machine?: string };
+    if (!res.ok || !health.ok) return;
+    if (health.machine) picker.noteName(picker.primary, health.machine);
+    if (adopt(picker.primary)) diag('hub.back', new URL(picker.primary).hostname);
+  } catch { /* still down: look again in a minute */ }
 }
 
 // ---- Tiles: five pages of two apps each (src/tiles.ts). ----
@@ -211,7 +241,7 @@ let justAdded: { title: string; at: number } | null = null;
 const tileCtx = (): TileContext => ({
   // The tiles see a filtered copy of the chat list; model.data itself stays whole so pop-ups are unaffected.
   data: model.data && model.data.messages ? { ...model.data, messages: tileChats(model.data.messages, tiles.getLayout(), Date.now(), model.hideOldTexts) } : model.data,
-  now: Date.now(), battery: model.battery,
+  now: Date.now(), battery: model.battery, hub: picker.state(),
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,
   muse: () => museTile.get(),
@@ -225,6 +255,8 @@ const showingTiles = () => tilesActive && !fromTiles;
 // Screens a tile opens: one double-tap there goes straight back to Tiles.
 const TOP_SCREENS = ['agent', 'chat', 'muse', 'messages', 'needs', 'studio', 'home'];
 
+/** Set once the first /api/home poll worked: nothing else (Muse) is read before that. */
+let homeLoaded = false;
 let tilesBusy = false;
 /** Muse is fetched once when a page with its tile is shown (entering Tiles, or swiping to that page), never on a timer. */
 async function refreshTiles(): Promise<void> {
@@ -242,9 +274,9 @@ async function refreshTiles(): Promise<void> {
           const shown = recentMessages(r.messages, Date.now(), model.hideOldTexts);
           tileData.chats.set(need.id, [...(shown.hidden ? ['(older messages hidden)'] : []), ...[...shown.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`)]);
         } else if (need.kind === 'muse') {
-          const stamp = museTile.pageFetchStart(page);
+          const stamp = museTile.pageFetchStart(page, homeLoaded);
           if (stamp === null) return; // already read for this page view, or an ask is in flight (its reply is the newest word)
-          museTile.fetchDone(stamp, await api<{ question: string; reply: string }>('muse'));
+          try { museTile.fetchDone(stamp, await api<{ question: string; reply: string }>('muse')); } catch { museTile.fetchFailed(stamp); }
         } else if (need.kind === 'reminders') {
           tileData.reminders = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
         } else if (need.kind === 'url') {
@@ -382,9 +414,8 @@ async function autoPair(): Promise<boolean> {
       const body = await res.json() as { token?: string };
       if (body.token) {
         token = body.token;
-        base = hub;
+        adopt(hub);
         store.set('home.token', token);
-        store.set('home.base', base);
         $<HTMLInputElement>('token').value = token;
         $('pairbox').classList.add('hidden');
         diag('pair.auto', new URL(hub).hostname);
@@ -400,8 +431,10 @@ async function poll(): Promise<void> {
   if (!token && !(await autoPair())) { model.setError('Pair Home on the phone screen'); paint(); return; }
   if (polling) return;
   polling = true;
+  void maybeReturnToPrimary();
   try {
     model.update(await api<HomeData>('home'));
+    homeLoaded = true;
     buildEditor();
     // No weather yet? Try sharing the location again (at most every 2 minutes).
     if (!model.data?.weather && Date.now() - lastLocationTry > 120_000) void shareLocation();
@@ -544,7 +577,7 @@ async function run(action: Action): Promise<void> {
       const stamp = museTile.fetchStart();
       const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
       model.setMuse(latest);
-      if (stamp !== null) museTile.fetchDone(stamp, latest);
+      if (stamp !== null) { if (latest) museTile.fetchDone(stamp, latest); else museTile.fetchFailed(stamp); }
     }
   } catch (error) {
     model.showFlash(error instanceof Error ? error.message : 'Failed', Date.now());
