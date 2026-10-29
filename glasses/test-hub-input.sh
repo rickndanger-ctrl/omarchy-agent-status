@@ -116,7 +116,7 @@ check("posting an input needs the token (401)", code == 401)
 code, _ = call("GET", "/api/input/wait?after=0", token=None)
 check("the glasses' wait needs the token (401)", code == 401)
 code, body = post("left")
-check("an input that is not up, down, select or back is 400", code == 400 and body.get("ok") is False and "up, down, select or back" in body.get("error", ""))
+check("an input that is not up, down, select, back or settings is 400", code == 400 and body.get("ok") is False and "up, down, select, back or settings" in body.get("error", ""))
 code, body = call("POST", "/api/input", "not json")
 check("a body that is not JSON is 400, not a server error", code == 400)
 code, body = call("POST", "/api/input", {})
@@ -138,6 +138,15 @@ check("a listening glasses app gets the input: delivered true, with a seq", code
 check("the wait answers with that input, in the list", first.get("code") == 200 and [i["input"] for i in first["body"]["inputs"]] == ["select"] and first["body"]["seq"] == body.get("seq"))
 check(f"the glasses get it within 300 ms ({latency * 1000:.0f} ms)", 0 <= latency < 0.3)
 first_seq = first["body"]["seq"]
+
+print("Settings is an input too: the glasses get it the same way")
+settings_waiter_out = {}
+waiter = wait_in_background(first_seq, settings_waiter_out)
+time.sleep(0.3)
+code, body = post("settings")
+waiter.join(timeout=10)
+check("POST /api/input settings is accepted and delivered", code == 200 and body.get("delivered") is True and isinstance(body.get("seq"), int))
+check("the glasses' wait gets settings in the list", settings_waiter_out.get("code") == 200 and [i["input"] for i in settings_waiter_out["body"]["inputs"]] == ["settings"])
 
 print("Closed less than 3 s ago still counts as listening; no replay after 2 s")
 code, body = post("down")

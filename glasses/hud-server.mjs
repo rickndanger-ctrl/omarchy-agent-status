@@ -1384,7 +1384,7 @@ function tileFrom(raw) {
 }
 
 // ---- phone remote (docs/REMOTE-INPUT.md): a phone's four buttons, delivered to the glasses' long-poll ----------
-const INPUTS = new Set(['up', 'down', 'select', 'back'])
+const INPUTS = new Set(['up', 'down', 'select', 'back', 'settings'])
 const INPUT_RETAIN_MS = 2000 // an input is delivered only this long after it arrived, never replayed later
 const INPUT_LISTEN_MS = 3000 // a wait closed this recently still counts as the glasses listening
 const INPUT_RATE = 10 // inputs per second, shared by every phone
@@ -1618,7 +1618,7 @@ async function handle(req, res) {
     if (req.method === 'POST' && p === '/api/input') {
       const b = await readBody(req).catch(() => ({}))
       const input = String(b?.input ?? '')
-      if (!INPUTS.has(input)) return send(res, 400, { ok: false, error: 'input must be up, down, select or back' })
+      if (!INPUTS.has(input)) return send(res, 400, { ok: false, error: 'input must be up, down, select, back or settings' })
       if (overInputRate()) {
         remoteDiag('remote.limited', input)
         return send(res, 429, { ok: false, error: 'too fast' })

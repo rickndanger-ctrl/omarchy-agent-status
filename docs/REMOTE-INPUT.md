@@ -5,13 +5,13 @@ glasses as if they were touchpad gestures. Contract fixed 2026-10-28; the iPhone
 
 ## Phone → hub
 
-    POST /api/input  {"input": "up" | "down" | "select" | "back"}     Bearer <the hub's shared token>
+    POST /api/input  {"input": "up" | "down" | "select" | "back" | "settings"}     Bearer <the hub's shared token>
 
     200 {"ok": true,  "delivered": true,  "seq": 42}          a glasses app is listening; it gets it within ~300 ms
     200 {"ok": true,  "delivered": false, "reason": "no glasses listening on this hub"}
                                                               nothing waiting here: Home is not in front, or the
                                                               glasses use another hub (try the next hub)
-    400 {"ok": false, "error": "input must be up, down, select or back"}
+    400 {"ok": false, "error": "input must be up, down, select, back or settings"}
     401 {"error": "bad token"}
     429 {"ok": false, "error": "too fast"}                    more than 10 inputs in the last second (shared by all
                                                               phones); the input is dropped, not queued
