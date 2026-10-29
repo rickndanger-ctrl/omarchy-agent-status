@@ -4,6 +4,7 @@ import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMess
 import { HubPicker } from './hubpick';
 import { LayoutLoader } from './layoutcache';
 import { MuseCache } from './musecache';
+import { RemoteInput } from './remote';
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
@@ -35,16 +36,23 @@ let base = picker.current;
 function adopt(hub: string): boolean {
   const changed = picker.useHub(hub, Date.now());
   base = picker.current;
+  remote.sync(); // a different current hub means a new wait on that hub
   if (changed || store.get('home.base') !== base) store.set('home.base', base);
   return changed;
 }
 let token = store.get('home.token');
 
+let foreground = true;
+// The phone remote: while Home is in front, one long-poll to the current hub brings the phone's buttons; each one goes through handle() like a gesture.
+const remote = new RemoteInput({
+  hub: () => base, token: () => token, active: () => foreground,
+  apply: input => { handle(input); diag('remote.applied', `${input} on ${showingTiles() ? 'tiles' : model.screenKind}`); },
+});
+
 const model = new HomeModel();
 model.hideDone = store.get('home.hideDone') === '1';
 // Texts older than 24 h are hidden on the glasses unless switched off (phone checkbox or the glasses menu).
 model.hideOldTexts = store.get('home.hideOldTexts') !== '0';
-let foreground = true;
 let recording: Uint8Array[] | null = null;
 let status = 'Starting…';
 
@@ -54,7 +62,7 @@ const glasses = new Glasses({
   onInput: input => handle(input),
   onMenu: id => void menu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
-  onForeground: on => { foreground = on; if (on) void poll(); },
+  onForeground: on => { foreground = on; remote.sync(); if (on) void poll(); },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
     if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
@@ -123,6 +131,7 @@ $('save').onclick = () => {
   if (!entered.endsWith('/')) entered += '/';
   token = $<HTMLInputElement>('token').value.trim();
   store.set('home.token', token);
+  remote.sync();
   if (picker.allowed(entered)) { adopt(entered); status = 'Saved.'; } else status = 'Saved the token. That server is not one of your hubs, so it is not used.';
   $<HTMLInputElement>('base').value = base;
   paint();
@@ -141,6 +150,7 @@ $('pair').onclick = async () => {
         token = body.token;
         adopt(hub);
         store.set('home.token', token);
+        remote.sync();
         $<HTMLInputElement>('token').value = token;
         status = 'Paired. Home is connected.';
         $('pairbox').classList.add('hidden');
@@ -669,6 +679,7 @@ layoutLoader.start();
 if (tilesOn) { tiles.resetPage(); enterTiles(true); } else paint();
 void glasses.connect().then(() => shareLocation());
 setInterval(() => void shareLocation(), 30 * 60_000);
+remote.sync();
 void poll();
 setInterval(() => { if (foreground) void poll(); }, POLL_MS);
 // The open agent's conversation refreshes faster than the rest, so replies show up quickly.
