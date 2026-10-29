@@ -116,6 +116,7 @@ export class InputQueue {
         }
         if (next.kind !== 'external') this.host.log(next.kind, next.kind === 'input' ? `${label(next)} on ${this.host.screen()}` : `${next.id} from ${next.source} on ${this.host.screen()}`);
         const before = this.host.generation();
+        const screenBefore = this.host.screen();
         let job: void | Promise<void> = undefined;
         try {
           if (next.kind === 'input') job = this.host.apply(next.input);
@@ -124,6 +125,15 @@ export class InputQueue {
         } catch (error) { this.host.log('input.error', error instanceof Error ? error.message : String(error)); }
         // Screen changes from our own presses are not "unsolicited"; an update's are (an alert popping up).
         if (next.kind !== 'external') this.own += this.host.generation() - before;
+        // A press that left its screen (Back, or a select that opened or closed one): scrolling presses already waiting were
+        // meant for the screen left and must not move the cursor on the new one. A waiting back/select stays.
+        if (next.kind === 'input' && this.host.screen() !== screenBefore) {
+          this.pending = this.pending.filter(e => {
+            if (e.kind !== 'input' || (e.input !== 'up' && e.input !== 'down')) return true;
+            this.host.log('input.dropped', `${label(e)} (left ${screenBefore})`);
+            return false;
+          });
+        }
         await this.bounded(job);
         // Always wait, even with nothing queued yet: the next press (a remote sends them ~20 ms apart) must not
         // run until the glasses show this one's result.

@@ -69,7 +69,7 @@ function rig(slowFetch?: () => Promise<void>) {
   const queue = new InputQueue({
     apply, menu: () => {}, generation: () => model.generation, foreground: () => true, screen: () => model.screenKind,
     settled: capMs => glasses.settled(capMs),
-    log: (name, detail) => { if (name === 'shown' || name === 'settle-capped' || name === 'input') log.push(`${stamp()} ${name} ${detail}`); },
+    log: (name, detail) => { if (name === 'shown' || name === 'settle-capped' || name === 'input' || name === 'input.dropped') log.push(`${stamp()} ${name} ${detail}`); },
   });
   /** What the 1.2 s interval does on the agent page: new terminal text, a poll, a tiles refresh, each through the queue. */
   const tick = () => {
@@ -112,4 +112,23 @@ test('Back leaves an agent page at once even though its terminal fetch is stuck 
   assert.ok(took < 50, `back took ${took} ms`);
   await r.glasses.settled(1000);
   assert.ok(Date.now() - start < 500, 'home is shown within 0.5 s');
+});
+
+test('Back on an agent page drops the downs queued behind it: Home is shown, its cursor has not moved', async () => {
+  const r = rig();
+  r.model.openTarget({ kind: 'agent', key: 'lap/p1' });
+  r.model.setTerminal('lap/p1', r.lines);
+  r.queue.push('up', 'remote'); // being shown while the rest is pressed
+  r.queue.push('back', 'remote');
+  for (let i = 0; i < 3; i++) r.queue.push('down', 'remote');
+  await sleep(CAP_MS * 4);
+  assert.equal(r.model.screenKind, 'home');
+  assert.equal(r.glasses.shown, r.model.render(NOW));
+  const only = rig();
+  only.model.openTarget({ kind: 'agent', key: 'lap/p1' });
+  only.queue.push('up', 'remote');
+  only.queue.push('back', 'remote');
+  await sleep(CAP_MS * 4);
+  assert.equal(r.model.render(NOW), only.model.render(NOW), 'cursor unchanged');
+  assert.equal(r.log.filter(l => l.includes('input.dropped') && l.includes('left agent')).length, 3, r.log.join('\n'));
 });
