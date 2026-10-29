@@ -2,6 +2,7 @@ import './style.css';
 import { Glasses } from './glasses';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { HubPicker } from './hubpick';
+import { LayoutLoader } from './layoutcache';
 import { MuseCache } from './musecache';
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
@@ -290,11 +291,16 @@ async function refreshTiles(): Promise<void> {
   }
 }
 
-async function loadLayout(): Promise<void> {
-  try { tiles.setLayout(normalizeLayout(await api<Layout>('layout'))); } catch { /* the default layout stays */ }
-  buildEditor();
-  paint();
-}
+// The layout is remembered on the phone, so Tiles opens with your pages before the hub has answered, and a hub that
+// is slow to wake gets quick retries (2, 5, 10 s) before the 60 s timer takes over.
+const layoutLoader = new LayoutLoader({
+  get: () => store.get('home.layout'),
+  set: v => store.set('home.layout', v),
+  fetch: () => api<Layout>('layout'),
+  apply: layout => { tiles.setLayout(layout); buildEditor(); paint(); },
+  after: (ms, fn) => { setTimeout(fn, ms); },
+});
+function loadLayout(): Promise<void> { return layoutLoader.load(); }
 
 /** The phone's Tiles editor: one row per page, two dropdowns of everything Home knows. Not rebuilt while you are editing. */
 function setHideOldTexts(on: boolean): void {
@@ -349,6 +355,7 @@ $('tiles-save').onclick = async () => {
 
 async function saveLayout(layout: Layout): Promise<void> {
   tiles.setLayout(layout);
+  layoutLoader.remember(layout);
   editorDirty = false;
   try {
     await api('layout', { method: 'PUT', body: JSON.stringify(tiles.getLayout()) });
@@ -360,11 +367,11 @@ async function saveLayout(layout: Layout): Promise<void> {
   paint();
 }
 
-function enterTiles(): void {
+function enterTiles(startup = false): void {
   museTile.resetPage();
   tilesActive = true;
   fromTiles = false;
-  void loadLayout();
+  if (!startup) void loadLayout(); // at start-up layoutLoader.start() has already shown the remembered layout and asked the hub
   void refreshTiles();
   paint();
 }
@@ -657,7 +664,8 @@ async function shareLocation(): Promise<void> {
   if (at) await api('location', { method: 'POST', body: JSON.stringify(at) }).catch(() => {});
 }
 
-if (tilesOn) enterTiles(); else paint();
+layoutLoader.start();
+if (tilesOn) { tiles.resetPage(); enterTiles(true); } else paint();
 void glasses.connect().then(() => shareLocation());
 setInterval(() => void shareLocation(), 30 * 60_000);
 void poll();

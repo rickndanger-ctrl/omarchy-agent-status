@@ -532,6 +532,13 @@ export class Tiles implements TilesApi {
     this.layout = normalizeLayout(layout);
   }
 
+  /** Back to page 1 (Start in Tiles). A layout arriving later does not move you: setLayout keeps the page. */
+  resetPage(): void {
+    this.page = 0;
+    this.mode = { kind: 'page' };
+    this.scroll = 0;
+  }
+
   private widget(side: Side): Widget {
     return widgetFor(this.layout.pages[this.page][side]);
   }
