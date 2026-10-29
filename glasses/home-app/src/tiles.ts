@@ -355,9 +355,12 @@ function clockWidget(): Widget {
       const w = ctx.data?.weather;
       if (w) lines.push('', clip(`${Math.round(w.temp)}° ${w.desc}`, W), `High ${Math.round(w.hi)}° · low ${Math.round(w.lo)}°`);
       if (w?.rainAt) lines.push(clip(`Rain ${w.rainAt} · ${Math.round(w.rainChance)}%`, W));
-      if (ctx.battery !== undefined) lines.push(`Glasses ${Math.round(ctx.battery)}%`);
-      if (ctx.hub?.down) lines.push('Mini 1 and Neo unreachable');
-      else if (ctx.hub?.name) lines.push(`via ${ctx.hub.name}`);
+      // The hub line must never fall below the fold (8 body lines): battery and hub share a line, and blanks give way.
+      const battery = ctx.battery !== undefined ? `Glasses ${Math.round(ctx.battery)}%` : '';
+      if (ctx.hub?.down) lines.push(...(battery ? [battery] : []), 'Mini 1 and Neo unreachable');
+      else if (ctx.hub?.name) lines.push(clip(battery ? `${battery} · via ${ctx.hub.name}` : `via ${ctx.hub.name}`, W));
+      else if (battery) lines.push(battery);
+      for (let i = lines.indexOf(''); lines.length > BODY_LINES && i >= 0; i = lines.indexOf('')) lines.splice(i, 1);
       return lines;
     },
     actions: () => [],

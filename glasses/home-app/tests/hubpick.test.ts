@@ -78,3 +78,16 @@ test('Muse startup: nothing is read before the first /api/home, then exactly one
   assert.deepEqual(w.act('retry', ctx), { kind: 'action', action: { kind: 'loadMuse' } });
   assert.equal(c.pageFetchStart(0, true), null);        // Retry is a tap, not a timer: still no automatic read
 });
+
+test('clock tile: the worst case (rain, battery, hub) fits in 8 lines and shows the hub', () => {
+  const data = { now: T0, paused: false, machines: [], sessions: [], pending: [], messages: null, muse: false, weather: { temp: 12, desc: 'Cloudy', hi: 14, lo: 8, rainAt: '4 PM', rainChance: 70 } };
+  const w = widgetFor('clock');
+  const base = { ...clockCtx(), data, battery: 80 } as TileContext;
+  const via = w.body({ ...base, hub: { name: 'Neo', down: false } }, 27);
+  assert.ok(via.length <= 8, String(via.length));
+  assert.ok(via.includes('Glasses 80% · via Neo'));
+  assert.ok(via.every(l => l.length <= 27));
+  const down = w.body({ ...base, hub: { name: null, down: true } }, 27);
+  assert.ok(down.length <= 8, String(down.length));
+  assert.ok(down.includes('Mini 1 and Neo unreachable'));
+});
