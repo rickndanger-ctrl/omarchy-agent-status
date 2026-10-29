@@ -174,7 +174,7 @@ export class Glasses {
       this.connected = true;
       this.renderBlocked = false;
       this.shown = displayed;
-      this.options.onStatus('Home is showing on your glasses.');
+      this.options.onStatus('G2 OMAC is showing on your glasses.');
       this.scheduleRender();
       return true;
     } catch (error) {
@@ -264,7 +264,7 @@ export class Glasses {
       clearTimeout(this.renderTimer);
       this.renderTimer = undefined;
       this.options.onForeground(false);
-      this.options.onStatus('The glasses app was closed. Open Home again from the glasses menu.');
+      this.options.onStatus('The glasses app was closed. Open G2 OMAC again from the glasses menu.');
       this.notifySettled();
       return;
     }
