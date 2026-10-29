@@ -78,7 +78,7 @@ const convSentKey = 'home.convSent';
 const convSent = () => { try { return JSON.parse(store.get(convSentKey) || '[]') as string[]; } catch { return []; } };
 const conv = new ConversationSession({
   hub: () => convHubFor(base, token),
-  mic: { on: () => glasses.microphone(true), off: async () => { await glasses.microphone(false); } },
+  mic: { on: () => glasses.microphone(true), off: () => glasses.microphone(false) },
   voiceMicBusy: () => recording !== null,
   sent: { has: id => convSent().includes(id), add: id => store.set(convSentKey, JSON.stringify([...convSent(), id].slice(-30))) },
   diag: (name, detail = '') => diag(name, detail),

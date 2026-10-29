@@ -33,18 +33,18 @@ class FakeHub implements ConvHub {
   async get() { return this.state; }
 }
 
-function setup(over: { voiceBusy?: boolean; micOk?: boolean } = {}) {
+function setup(over: { voiceBusy?: boolean; micOk?: boolean; offResults?: boolean[]; failStore?: boolean } = {}) {
   const hub = new FakeHub();
   let now = 1_000_000;
-  const mic = { on: 0, off: 0, ok: over.micOk ?? true };
+  const mic = { on: 0, off: 0, ok: over.micOk ?? true, offResults: over.offResults ?? [], onGate: null as Promise<void> | null };
   const sentIds = new Set<string>();
   const diags: string[] = [];
   let changes = 0;
   const conv = new ConversationSession({
     hub: () => hub,
-    mic: { on: async () => { mic.on++; return mic.ok; }, off: async () => { mic.off++; } },
+    mic: { on: async () => { mic.on++; if (mic.onGate) await mic.onGate; return mic.ok; }, off: async () => { mic.off++; return mic.offResults.length ? mic.offResults.shift()! : true; } },
     voiceMicBusy: () => over.voiceBusy ?? false,
-    sent: { has: id => sentIds.has(id), add: id => sentIds.add(id) },
+    sent: { has: id => { if (over.failStore) throw new Error('storage'); return sentIds.has(id); }, add: id => { if (over.failStore) throw new Error('storage'); sentIds.add(id); } },
     diag: (name, detail = '') => { diags.push(`${name} ${detail}`); },
     changed: () => { changes++; },
     sleep: async () => {},
@@ -240,4 +240,87 @@ test('Send to Muse: a summary already sent stays sent after the app restarts (sa
   await finished(t);
   assert.equal(t.conv.view().sent, true);
   assert.equal(t.conv.sendToMuse(() => assert.fail('must not send')), false);
+});
+
+// ---- Codex review fixes ----
+
+test('Stop during "starting": a hub answer that comes late closes the session, the microphone never goes on', async () => {
+  const t = setup();
+  let release!: () => void;
+  const gate = new Promise<void>(r => { release = r; });
+  const realStart = t.hub.start.bind(t.hub);
+  t.hub.start = async b => { await gate; return realStart(b); };
+  const starting = t.conv.start('claude');
+  assert.equal(t.conv.view().phase, 'starting');
+  assert.equal(t.conv.isListening(), true); // the voice microphone stays away meanwhile
+  const stopping = t.conv.stop('background');
+  release();
+  await Promise.all([starting, stopping]);
+  await settle();
+  assert.equal(t.conv.view().phase, 'idle');
+  assert.equal(t.mic.on, 0);
+  assert.deepEqual(t.hub.stopped, ['c1']);
+  assert.equal(t.conv.isListening(), false);
+});
+
+test('Stop while the microphone is still starting: it is turned off and the hub session is stopped', async () => {
+  const t = setup();
+  let release!: () => void;
+  t.mic.onGate = new Promise<void>(r => { release = r; });
+  const starting = t.conv.start('claude');
+  await settle(); // the hub answered; the microphone is pending
+  const stopping = t.conv.stop('tap');
+  release();
+  await Promise.all([starting, stopping]);
+  await settle();
+  assert.equal(t.conv.view().phase, 'idle');
+  assert.equal(t.mic.off, 1);
+  assert.deepEqual(t.hub.stopped, ['c1']);
+  t.conv.onAudio(pcm(CHUNK_BYTES));
+  await settle();
+  assert.equal(t.hub.chunks.length, 0);
+});
+
+test('microphone off: a false answer is tried once more, and a second false leaves a warning', async () => {
+  const once = setup({ offResults: [false, true] });
+  await once.conv.start('claude');
+  await once.conv.stop('tap');
+  assert.equal(once.mic.off, 2);
+  assert.equal(once.conv.view().warning, '');
+  const twice = setup({ offResults: [false, false] });
+  await twice.conv.start('claude');
+  await twice.conv.stop('tap');
+  assert.equal(twice.mic.off, 2); // one retry, not more
+  assert.equal(twice.conv.view().warning, 'Microphone may still be on: close the app');
+  assert.equal(twice.conv.view().phase, 'summarizing'); // the summary still goes on
+  assert.ok(twice.diags.some(d => d.startsWith('conv.mic-off-failed')));
+});
+
+test('Send to Muse stays once-only when the store fails (in-memory ids), and is marked before Muse answers', async () => {
+  const t = setup({ failStore: true });
+  await finished(t);
+  const sent: Action[] = [];
+  let sentFlagDuringDispatch = false;
+  assert.equal(t.conv.sendToMuse(a => { sentFlagDuringDispatch = t.conv.view().sent; sent.push(a); }), true);
+  assert.equal(sentFlagDuringDispatch, true); // already marked while the request goes out
+  assert.equal(t.conv.view().sent, true);
+  assert.equal(t.conv.sendToMuse(a => sent.push(a)), false);
+  assert.equal(sent.length, 1);
+});
+
+test('skipped pieces are counted (a chunk that never got through), and reset by the next session', async () => {
+  const t = setup();
+  t.hub.chunkError = seq => (seq === 0 ? new Error('network') : null);
+  await t.conv.start('claude');
+  t.conv.onAudio(pcm(CHUNK_BYTES * 2));
+  await settle();
+  assert.deepEqual(t.hub.chunks.map(c => c.seq), [1]);
+  assert.equal(t.conv.view().skipped, 1);
+  await t.conv.stop('tap');
+  t.hub.chunkError = null;
+  t.hub.state = { id: 'c1', state: 'done', summary: ['x'] };
+  t.advance(2500);
+  await t.conv.tick();
+  await t.conv.start('claude');
+  assert.equal(t.conv.view().skipped, 0);
 });
