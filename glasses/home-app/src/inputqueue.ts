@@ -13,6 +13,8 @@ export const MAX_TOUCH_QUEUED = 10;
 export const APPLY_WAIT_MS = 3000;
 /** An update (poll, terminal, tiles) waits for its frame at most this long, and not at all while a press is waiting. */
 export const EXTERNAL_WAIT_MS = 300;
+/** A waiting update goes before the next press once it has waited this long, so a steady stream of presses cannot starve it (an alert). */
+export const EXTERNAL_MAX_DEFER_MS = 1000;
 
 export interface QueueHost {
   /** Apply one press (the app's handle flow). May return a promise to be awaited (microphone changes). */
@@ -36,7 +38,7 @@ export interface QueueHost {
 type Entry =
   | { kind: 'input'; input: Input; source: InputSource; stamp: number }
   | { kind: 'menu'; id: number; source: InputSource }
-  | { kind: 'external'; name: string; run: () => void };
+  | { kind: 'external'; name: string; run: () => void; since: number };
 const label = (e: Entry) => (e.kind === 'input' ? `${e.input} from ${e.source}` : e.kind === 'menu' ? `menu ${e.id} from ${e.source}` : `update ${e.name}`);
 
 export class InputQueue {
@@ -69,7 +71,7 @@ export class InputQueue {
   pushExternal(name: string, run: () => void): void {
     const waiting = this.pending.find((e): e is Extract<Entry, { kind: 'external' }> => e.kind === 'external' && e.name === name);
     if (waiting) { const older = waiting.run; waiting.run = () => { older(); run(); }; return; }
-    this.pending.push({ kind: 'external', name, run });
+    this.pending.push({ kind: 'external', name, run, since: Date.now() });
     if (!this.running) void this.drain();
   }
 
@@ -84,7 +86,7 @@ export class InputQueue {
 
   private add(entry: Entry): void {
     const waiting = this.pending.filter(p => p.kind !== 'external').length;
-    const cap = entry.kind === 'input' && entry.source === 'remote' ? this.max : this.maxTouch;
+    const cap = entry.kind !== 'external' && entry.source === 'remote' ? this.max : this.maxTouch;
     if (waiting >= cap) { this.host.log('input.dropped', `${label(entry)} (queue full)`); return; }
     this.pending.push(entry);
     if (!this.running) void this.drain();
@@ -101,6 +103,8 @@ export class InputQueue {
 
   /** Presses and menu choices go before waiting updates: a press must never queue behind a poll's or a terminal's repaint. */
   private takeNext(): Entry | undefined {
+    const late = this.pending.findIndex(e => e.kind === 'external' && Date.now() - e.since >= EXTERNAL_MAX_DEFER_MS);
+    if (late >= 0) return this.pending.splice(late, 1)[0];
     const i = this.pending.findIndex(e => e.kind !== 'external');
     return this.pending.splice(i < 0 ? 0 : i, 1)[0];
   }
@@ -127,7 +131,7 @@ export class InputQueue {
         if (next.kind !== 'external') this.own += this.host.generation() - before;
         // A press that left its screen (Back, or a select that opened or closed one): scrolling presses already waiting were
         // meant for the screen left and must not move the cursor on the new one. A waiting back/select stays.
-        if (next.kind === 'input' && this.host.screen() !== screenBefore) {
+        if (next.kind !== 'external' && this.host.screen() !== screenBefore) {
           this.pending = this.pending.filter(e => {
             if (e.kind !== 'input' || (e.input !== 'up' && e.input !== 'down')) return true;
             this.host.log('input.dropped', `${label(e)} (left ${screenBefore})`);

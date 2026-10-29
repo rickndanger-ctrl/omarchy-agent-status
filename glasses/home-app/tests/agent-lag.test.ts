@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { HomeModel, type HomeData } from '../src/model';
 import { Tiles, DEFAULT_LAYOUT, type TileContext } from '../src/tiles';
 import { makeHandle } from '../src/inputflow';
-import { InputQueue } from '../src/inputqueue';
+import { InputQueue, MAX_QUEUED } from '../src/inputqueue';
+import { TerminalCache } from '../src/terminalcache';
 import type { SettleResult } from '../src/settle';
 
 const NOW = Date.UTC(2026, 9, 26, 18, 42);
@@ -131,4 +132,68 @@ test('Back on an agent page drops the downs queued behind it: Home is shown, its
   await sleep(CAP_MS * 4);
   assert.equal(r.model.render(NOW), only.model.render(NOW), 'cursor unchanged');
   assert.equal(r.log.filter(l => l.includes('input.dropped') && l.includes('left agent')).length, 3, r.log.join('\n'));
+});
+
+/** A queue over a tiny fake app: a cursor, a screen name, and glasses that need `renderMs` to show anything. */
+function tiny(renderMs: number) {
+  const st = { screen: 'home', cursor: 0, alert: false, gen: 0 };
+  const log: string[] = [];
+  let busy = false;
+  const queue = new InputQueue({
+    apply: i => { if (i === 'down') st.cursor++; if (i === 'back') { st.screen = 'home'; st.gen++; } },
+    menu: id => { if (id === 12) { st.screen = 'settings'; st.cursor = 0; st.gen++; } },
+    generation: () => st.gen, foreground: () => true, screen: () => st.screen,
+    settled: async () => { busy = true; await sleep(renderMs); busy = false; return 'rendered' as const; },
+    log: (n, d) => log.push(`${n} ${d}`),
+  });
+  void busy;
+  return { st, queue, log };
+}
+
+test('presses every 300 ms for 5 s (real time here: every 120 ms for 2.5 s): a waiting alert still shows within about 1.5 s', async () => {
+  const t = tiny(250); // each press takes longer to show than the next one arrives: presses are always waiting
+  t.queue.push('down', 'touch');
+  let alertAt = -1;
+  const t0 = Date.now();
+  t.queue.pushExternal('alert', () => { alertAt = Date.now() - t0; t.st.alert = true; });
+  // real-time 1 s defer limit: keep pressing for 2.5 s
+  const timer = setInterval(() => t.queue.push('down', 'touch'), 120);
+  await sleep(2500);
+  clearInterval(timer);
+  console.log('alert shown after', alertAt, 'ms');
+  assert.ok(alertAt >= 0 && alertAt <= 1500, `alert shown after ${alertAt} ms`);
+});
+
+test('a failed terminal fetch forgets the text: an identical later success is applied and clears the error', () => {
+  const c = new TerminalCache();
+  const lines = ['a', 'b'];
+  assert.equal(c.shouldApply('k', lines, false), true);
+  assert.equal(c.shouldApply('k', lines, true), false, 'same text: no repaint');
+  assert.equal(c.shouldApply('k', null, true), true, 'a failure is shown');
+  assert.equal(c.shouldApply('k', lines, true), true, 'identical text after a failure replaces the error');
+  assert.equal(c.shouldApply('k', lines, true), false);
+  const model = new HomeModel(); model.update(data);
+  model.openTarget({ kind: 'agent', key: 'lap/p1' });
+  model.setTerminal('lap/p1', null);
+  assert.ok(model.render(NOW).includes('Could not read'));
+  model.setTerminal('lap/p1', lines);
+  assert.ok(!model.render(NOW).includes('Could not read'));
+});
+
+test('a remote menu choice that changes the screen (settings) drops the downs queued behind it; the settings cursor stays', async () => {
+  const t = tiny(40);
+  t.queue.push('down', 'remote'); // being shown
+  t.queue.pushMenu(12, 'remote');
+  for (let i = 0; i < 3; i++) t.queue.push('down', 'remote');
+  await sleep(400);
+  assert.equal(t.st.screen, 'settings');
+  assert.equal(t.st.cursor, 0, t.log.join('\n'));
+  assert.equal(t.log.filter(l => l.startsWith('input.dropped') && l.includes('left home')).length, 3);
+});
+
+test('remote menu entries count against the remote cap, not the touch cap', async () => {
+  const t = tiny(100);
+  t.queue.push('down', 'remote');
+  for (let i = 0; i < MAX_QUEUED + 3; i++) t.queue.pushMenu(99, 'remote');
+  assert.equal(t.log.filter(l => l.startsWith('input.dropped') && l.includes('queue full')).length, 3, t.log.join('\n'));
 });
