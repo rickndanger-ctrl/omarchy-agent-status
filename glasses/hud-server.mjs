@@ -21,6 +21,9 @@
 //   GET  /api/input/wait?after=<seq>          the glasses' long-poll for those buttons (25 s)
 //   POST /api/prompt {machine, pane, text|key} type a prompt into an agent's tmux pane (key: Escape)
 //   POST /api/transcribe  (16 kHz s16le mono PCM body) → {text}   speech-to-text via Groq Whisper
+//   POST /api/think {backend, system, prompt, timeoutSec}        one AI answer on this machine (docs/CONVERSATION.md)
+//   POST /api/conversation/start {backend}, POST /api/conversation/chunk?id&seq (PCM), POST /api/conversation/stop {id}
+//   GET  /api/conversation                    the conversation tile's session (idle, listening, summary)
 //   GET  /api/messages?chat=<id>              hub: last messages of one chat (read-only)
 //   GET  /api/muse                            hub: Muse's latest exchange (read-only, on demand)
 //   GET  /api/layout, PUT /api/layout         the Tiles pages (layout.json); hub.json peers keep them in step
@@ -41,6 +44,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { homedir, hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { think, THINK_BACKENDS } from './think.mjs'
+import { createConversations, CONVERSATION_MAX_BYTES } from './conversation.mjs'
 
 const run = promisify(execFile)
 // macOS keeps lsof in /usr/sbin, which launchd's default PATH leaves out.
@@ -1224,7 +1229,7 @@ async function transcribe(pcm) {
   form.append('model', 'whisper-large-v3-turbo')
   form.append('response_format', 'json')
   form.append('language', 'en')
-  const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+  const res = await fetch(process.env.HUD_TRANSCRIBE_URL || 'https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST', headers: { Authorization: `Bearer ${GROQ_KEY}` }, body: form, signal: AbortSignal.timeout(20_000),
   })
   if (!res.ok) throw new Error(`speech service said ${res.status}`)
@@ -1259,6 +1264,34 @@ async function serveStatic(res, pathname) {
 }
 
 // ---- tiles: the pages (layout.json), Reminders and url: plug-in tiles -----------------------
+// ---- the conversation tile (docs/CONVERSATION.md): think on the right node, listen in short chunks ------------
+// hub.json "conversation": {"local": "lap", "claude": "lap", "codex": "Mini 1"}. A backend with no entry, or "self",
+// runs on this machine; otherwise the named node runs it (POST /api/think, with that node's token).
+const CONVERSATION_NODES = HUB.conversation ?? {}
+async function thinkAt(args) {
+  const where = CONVERSATION_NODES[args.backend] || 'self'
+  if (where === 'self' || where === MACHINE) return think(args)
+  const node = NODES.find(n => n.name === where)
+  if (!node) throw new Error(`no node named ${where} in hub.json`)
+  try {
+    return await call(`${node.url}/api/think`, node.token, { method: 'POST', body: JSON.stringify(args), timeout: (Number(args.timeoutSec) + 5) * 1000 })
+  } catch {
+    throw new Error(`${where} did not answer`)
+  }
+}
+// Diagnostics for the conversation: names and counts or timings only, never transcript text.
+const conversationDiag = (name, detail) => {
+  diagnostics.push({ at: new Date().toISOString(), name, detail: clip(detail, 160) })
+  if (diagnostics.length > 1000) diagnostics.shift()
+}
+const CONVERSATION = createConversations({
+  transcribe,
+  think: thinkAt,
+  diag: conversationDiag,
+  dir: path.join(CONFIG_DIR, 'conversations'),
+  limitMs: Number(process.env.HUD_CONV_LIMIT_MS) || undefined,
+})
+
 // Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl", "remindersTokenFile", "remindersList").
 const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
 const REMINDERS_TOKEN = HUB.remindersTokenFile ? tokenFrom(HUB.remindersTokenFile) : ''
@@ -1529,6 +1562,38 @@ async function handle(req, res) {
       return send(res, 200, { text: await transcribe(pcm) })
     }
     // Step-by-step app diagnostics (names and sizes only, never audio or words), last 1000 in memory.
+    // One AI answer on this machine: the node side of the conversation tile (any node serves it).
+    if (req.method === 'POST' && p === '/api/think') {
+      // A summary request carries the whole talk, so this body may be much larger than the usual 16 KB.
+      const raw = await readRaw(req, 512 * 1024).catch(() => null)
+      let b = {}
+      try { b = JSON.parse(raw?.toString() || '{}') } catch { b = {} }
+      if (!THINK_BACKENDS.includes(b.backend)) return send(res, 400, { error: 'backend must be local, claude or codex' })
+      if (!String(b.prompt ?? '').trim()) return send(res, 400, { error: 'prompt is required' })
+      try {
+        return send(res, 200, await think({ backend: b.backend, system: String(b.system ?? ''), prompt: String(b.prompt), timeoutSec: Number(b.timeoutSec) || 60 }))
+      } catch (err) {
+        return send(res, 502, { error: clip(err.message, 160) })
+      }
+    }
+    if (req.method === 'POST' && p === '/api/conversation/start') {
+      const b = await readBody(req).catch(() => ({}))
+      const r = CONVERSATION.start(b.backend)
+      return send(res, r.status, r.body)
+    }
+    if (req.method === 'POST' && p === '/api/conversation/chunk') {
+      // About 9 s of 16 kHz PCM per chunk; a larger body is refused.
+      const pcm = await readRaw(req, CONVERSATION_MAX_BYTES).catch(() => null)
+      if (!pcm) return send(res, 413, { error: 'chunk too large' })
+      const r = CONVERSATION.chunk(url.searchParams.get('id'), Number(url.searchParams.get('seq')), pcm)
+      return send(res, r.status, r.body)
+    }
+    if (req.method === 'POST' && p === '/api/conversation/stop') {
+      const b = await readBody(req).catch(() => ({}))
+      const r = CONVERSATION.stop(String(b.id ?? ''))
+      return send(res, r.status, r.body)
+    }
+    if (req.method === 'GET' && p === '/api/conversation') return send(res, 200, CONVERSATION.state())
     if (req.method === 'POST' && p === '/api/diag') {
       const b = await readBody(req)
       diagnostics.push({ at: new Date().toISOString(), name: clip(b.name, 40), detail: clip(b.detail, 160) })
