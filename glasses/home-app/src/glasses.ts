@@ -33,6 +33,8 @@ export interface GlassesOptions {
   onAudio: (pcm: Uint8Array) => void;
   onSlowRender?: (ms: number) => void;
   onLifecycle?: (event: string) => void;
+  /** A render reached the glasses (what: rebuild, text, left or right). */
+  onFrame?: (what: string) => void;
   /** Where the Even app bridge comes from (tests pass a fake). Default: the SDK's waitForEvenAppBridge. */
   bridge?: () => Promise<EvenAppBridge>;
 }
@@ -47,6 +49,8 @@ const TILE_W = 288;
 type Frame = { kind: 'single'; text: string } | { kind: 'tiles'; key: string; focus: TilesFrame['focus']; left: string; right: string };
 // Each redraw is a Bluetooth write; too many in a row delays taps and swipes coming back.
 const MIN_RENDER_INTERVAL_MS = 450;
+/** After a failed update the glasses are tried again after this long, without waiting for a touch. */
+const RENDER_RETRY_MS = 1500;
 const BRIDGE_TIMEOUT_MS = 15000;
 
 function bounded<T>(promise: Promise<T>, stage: string, ms = BRIDGE_TIMEOUT_MS): Promise<T> {
@@ -80,6 +84,8 @@ export class Glasses {
   private renderTimer: ReturnType<typeof setTimeout> | undefined;
   private renderBusy = false;
   private renderBlocked = false;
+  private heldWhy = '';
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private lastRenderAt = -Infinity;
   private pressing = false;
   /** Taps before this time are dropped: the tap that brings Home back to the front isn't meant for Home. */
@@ -109,7 +115,7 @@ export class Glasses {
   }
 
   /** Stops the battery timer (tests; the app never calls it). */
-  dispose(): void { if (this.deviceTimer) clearInterval(this.deviceTimer); this.deviceTimer = undefined; this.epoch++; }
+  dispose(): void { if (this.deviceTimer) clearInterval(this.deviceTimer); this.deviceTimer = undefined; clearTimeout(this.retryTimer); this.epoch++; }
 
   /** rendered: nothing pending, no render running. not-visible: nothing can reach the glasses now. null: still on its way. */
   private settleState(): SettleResult | null {
@@ -336,6 +342,10 @@ export class Glasses {
 
   private scheduleRender(): void {
     this.notifySettled(); // nothing pending, or no way to render: whoever waits can go on
+    // A frame is wanted but cannot be sent: say why once, so the logs show a frame that is waiting rather than lost.
+    const why = !this.connected ? 'not connected' : !this.foreground ? 'not in front' : this.renderBlocked ? 'last update failed' : '';
+    if (why && this.pending() !== null && why !== this.heldWhy) this.options.onLifecycle?.(`frame held: ${why}`);
+    this.heldWhy = why;
     if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.renderTimer !== undefined || this.pending() === null) return;
     const wait = Math.max(0, MIN_RENDER_INTERVAL_MS - (performance.now() - this.lastRenderAt));
     this.renderTimer = setTimeout(() => { this.renderTimer = undefined; void this.flushRender(); }, wait);
@@ -372,12 +382,16 @@ export class Glasses {
       const took = performance.now() - this.lastRenderAt;
       if (took > 2000) this.options.onSlowRender?.(Math.round(took));
       if (!accepted) throw new Error('The Even app returned false for the text update.');
+      this.options.onFrame?.(todo);
       if (todo === 'rebuild' || want.kind === 'single') this.shown = want;
       else if (this.shown?.kind === 'tiles') this.shown = { ...this.shown, [todo]: want[todo as 'left' | 'right'] };
     } catch (error) {
       if (epoch === this.epoch) {
         this.renderBlocked = true;
         this.options.onStatus(`Glasses text update failed: ${reason(error)}`);
+        // Nothing may be left waiting for a touch: try again by itself (a newer setText also unblocks it at once).
+        clearTimeout(this.retryTimer);
+        this.retryTimer = setTimeout(() => { this.retryTimer = undefined; if (epoch === this.epoch) { this.renderBlocked = false; this.scheduleRender(); } }, RENDER_RETRY_MS);
       }
     } finally {
       this.renderBusy = false;

@@ -118,6 +118,7 @@ const glasses = new Glasses({
     paint();
   },
   onLifecycle: event => diag('lifecycle', event),
+  onFrame: what => diag('frame', `${model.screenKind} ${what}`),
   onSlowRender: ms => diag('render.slow', `${ms} ms on ${model.screenKind}`),
   onAudio: pcm => {
     const c = getConv();
