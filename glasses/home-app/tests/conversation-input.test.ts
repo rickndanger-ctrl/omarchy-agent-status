@@ -5,11 +5,13 @@ import assert from 'node:assert/strict';
 import { HomeModel } from '../src/model';
 import type { Action, Input } from '../src/model';
 import { Tiles, normalizeLayout, type TileContext, type TileEffect } from '../src/tiles';
-import { makeHandle, runConversationEffect } from '../src/inputflow';
+import { makeHandle, runConversationEffect, startConversation } from '../src/inputflow';
 import { InputQueue, type InputSource } from '../src/inputqueue';
+import { MENU, GLASSES_MENU, setHideDone } from '../src/menu';
 import { ConversationSession, CHUNK_BYTES, type Conversation, type ConvHub, type ConvBackend } from '../src/conversation';
 
 const NOW = Date.UTC(2026, 9, 29, 14, 32);
+const MENU_LISTEN = MENU.listen;
 
 function rig(opts: { micOk?: boolean; hubGate?: Promise<void>; capMs?: number } = {}) {
   const model = new HomeModel();
@@ -50,7 +52,7 @@ function rig(opts: { micOk?: boolean; hubGate?: Promise<void>; capMs?: number } 
   const log: string[] = [];
   const flags = { foreground: true };
   const queue = new InputQueue({
-    apply, menu: () => undefined,
+    apply, menu: id => (id === MENU_LISTEN ? startConversation(host) : undefined),
     generation: () => model.generation + (tilesActive ? 0 : 1000), foreground: () => flags.foreground,
     screen: () => (tilesActive ? 'tiles' : model.screenKind), settled: () => Promise.resolve('rendered' as const),
     log: (n, d) => log.push(`${n} ${d}`),
@@ -126,10 +128,46 @@ test('start, then stop from the touchpad: mic off, summarizing', async () => {
   assert.equal(r.conv.view().phase, 'summarizing');
 });
 
-test('there is no Listen item in the glasses menu (the SDK allows 10 and 0.4.9 had 11); the tile tap starts listening', async () => {
-  const { GLASSES_MENU } = await import('../src/menu');
-  assert.ok(!GLASSES_MENU.some(m => /listen/i.test(m.name)));
-  assert.ok(GLASSES_MENU.length <= 10);
+test('the glasses menu has Listen (id 11) and stays at 10 items', () => {
+  assert.equal(GLASSES_MENU.length, 10);
+  assert.deepEqual(GLASSES_MENU.find(m => m.id === MENU.listen), { id: 11, name: 'Listen' });
+  assert.ok(!GLASSES_MENU.some(m => /finished/i.test(m.name))); // moved to the phone page
+});
+
+test('Listen from the menu starts the conversation through the queue (touch and phone remote ordering alike)', async () => {
+  const r = rig();
+  r.setBackend('local');
+  r.queue.pushMenu(MENU_LISTEN);
+  await r.idle();
+  assert.deepEqual(r.hubCalls, ['start:local']);
+  assert.equal(r.conv.view().phase, 'listening');
+  assert.deepEqual(r.micLog, ['on']);
+  assert.ok(r.log.some(l => l.startsWith('menu 11 from touch')));
+  assert.ok(r.log.some(l => l === 'shown tiles'));
+  assert.ok(r.flashes.includes('Listening'));
+  // A remote press queued right behind the menu choice waits for the start to finish: tap = Stop on a listening tile.
+  const s = rig();
+  s.queue.pushMenu(MENU_LISTEN);
+  s.press('remote', 'select', 'select', 'select'); // page->choose, choose->tile, tile: stop
+  await s.idle();
+  assert.deepEqual(s.micLog, ['on', 'off']);
+  assert.ok(s.log.some(l => l === 'input select from remote on tiles'));
+  assert.equal(s.hubCalls.filter(c => c.startsWith('start')).length, 1);
+});
+
+test('the phone checkbox "Hide finished agents" flips hideDone and remembers it', () => {
+  const stored: Record<string, string> = {};
+  const model = { hideDone: false };
+  const store = { set: (k: string, v: string) => { stored[k] = v; } };
+  setHideDone(model, store, true);
+  assert.equal(model.hideDone, true);
+  assert.equal(stored['home.hideDone'], '1');
+  setHideDone(model, store, false);
+  assert.equal(model.hideDone, false);
+  assert.equal(stored['home.hideDone'], '0');
+  const real = new HomeModel(); // the real model reads the same flag
+  setHideDone(real, store, true);
+  assert.equal(real.hideDone, true);
 });
 
 test('a tap does nothing while the app is not in front (no listening in the background)', async () => {

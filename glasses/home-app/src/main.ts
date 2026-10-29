@@ -6,8 +6,8 @@ import { LayoutLoader } from './layoutcache';
 import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
 import { InputQueue, type InputSource } from './inputqueue';
-import { makeHandle, TOP_SCREENS, runConversationEffect } from './inputflow';
-import { MENU, GLASSES_MENU } from './menu';
+import { makeHandle, TOP_SCREENS, runConversationEffect, startConversation } from './inputflow';
+import { MENU, GLASSES_MENU, setHideDone } from './menu';
 import { Latest } from './latest';
 import { ConversationSession, ConvHttpError, CONV_BACKENDS, asBackend, type Conversation, type ConvHub } from './conversation';
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
@@ -135,6 +135,7 @@ $('app').innerHTML = `
   </section>
   <p id="status" class="status"></p>
   <label class="row"><input type="checkbox" id="hide-old"> Hide messages older than 24 h</label>
+  <label class="row"><input type="checkbox" id="hide-done"> Hide finished agents</label>
   <pre id="glass" class="glass"></pre>
   <div class="pad">
     <button data-input="up">▲ Swipe up</button>
@@ -367,6 +368,8 @@ function setHideOldTexts(on: boolean): void {
   $<HTMLInputElement>('hide-old').checked = on;
   paint();
 }
+$<HTMLInputElement>('hide-done').checked = model.hideDone;
+$<HTMLInputElement>('hide-done').onchange = () => { setHideDone(model, store, $<HTMLInputElement>('hide-done').checked); paint(); };
 $<HTMLInputElement>('hide-old').checked = model.hideOldTexts;
 $<HTMLInputElement>('hide-old').onchange = () => setHideOldTexts($<HTMLInputElement>('hide-old').checked);
 function syncStartInTiles(): void { $<HTMLInputElement>('start-tiles').checked = tilesOn; }
@@ -705,6 +708,11 @@ async function menu(id: number): Promise<void> {
   if (id === MENU.agents) model.goTo('agents');
   if (id === MENU.messages) model.goTo('messages');
   if (id === MENU.muse) { model.goTo('muse'); void run({ kind: 'loadMuse' }); }
+  if (id === MENU.listen) {
+    const host = convHost();
+    if (!host) { model.showFlash('Conversation is not available', Date.now()); return; }
+    return startConversation(host);
+  }
   if (id === MENU.tiles) enterTiles();
   if (id === MENU.editPage) { if (!showingTiles()) enterTiles(); tiles.startEdit(tileCtx()); }
   if (id === MENU.tilesOn) {
@@ -717,11 +725,7 @@ async function menu(id: number): Promise<void> {
     setHideOldTexts(!model.hideOldTexts);
     model.showFlash(model.hideOldTexts ? 'Texts older than 24 h hidden' : 'All texts shown', Date.now());
   }
-  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.hideOldTexts, MENU.pause, MENU.hideDone, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
-  if (id === MENU.hideDone) {
-    model.hideDone = !model.hideDone;
-    store.set('home.hideDone', model.hideDone ? '1' : '0');
-  }
+  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.listen, MENU.hideOldTexts, MENU.pause, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
   if (id === MENU.pause) {
     const paused = !model.data?.paused;
     try {

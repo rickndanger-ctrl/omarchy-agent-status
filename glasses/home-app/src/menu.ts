@@ -1,6 +1,6 @@
 // The glasses long-press menu. The Even SDK refuses a startup page with more than 10 items (TOO_MANY_MENU_ITEMS), and
 // then the app does not start at all, so main.ts takes the list from here and a test checks the limit.
-export const MENU = { pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7, tiles: 8, tilesOn: 9, editPage: 10, hideOldTexts: 1 };
+export const MENU = { pause: 2, home: 4, agents: 5, messages: 6, muse: 7, tiles: 8, tilesOn: 9, editPage: 10, hideOldTexts: 1, listen: 11 };
 export const GLASSES_MENU_MAX = 10;
 export const GLASSES_MENU: { id: number; name: string }[] = [
   { id: MENU.home, name: 'Home' },
@@ -12,5 +12,11 @@ export const GLASSES_MENU: { id: number; name: string }[] = [
   { id: MENU.editPage, name: 'Edit page' },
   { id: MENU.hideOldTexts, name: 'Hide old texts on/off' },
   { id: MENU.pause, name: 'Pause/resume approvals' },
-  { id: MENU.hideDone, name: 'Hide/show finished agents' },
+  { id: MENU.listen, name: 'Listen' },
 ];
+
+/** The phone page's "Hide finished agents" checkbox (it used to be a glasses menu item): flips the model and remembers it. */
+export function setHideDone(model: { hideDone: boolean }, store: { set(key: string, value: string): void }, on: boolean): void {
+  model.hideDone = on;
+  store.set('home.hideDone', on ? '1' : '0');
+}
