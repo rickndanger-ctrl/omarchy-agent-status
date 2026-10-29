@@ -18,7 +18,7 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import type { TilesFrame } from './tiles';
 import type { Input } from './model';
-import { SettleWaiters } from './settle';
+import { SettleWaiters, Serial, type SettleResult } from './settle';
 
 export interface MenuItem { id: number; name: string }
 export interface GlassesOptions {
@@ -82,19 +82,24 @@ export class Glasses {
   private quietUntil = 0;
   private deviceTimer: ReturnType<typeof setInterval> | undefined;
   private settleWaiters = new SettleWaiters();
+  /** Microphone on/off run one after another, so a stop can never overtake a start. */
+  private micChain = new Serial();
 
   constructor(private readonly options: GlassesOptions, private readonly menu: MenuItem[]) {}
 
   get isConnected(): boolean { return this.connected; }
 
-  /** True when nothing more will reach the glasses soon: nothing pending, no render running, or no way to render. */
-  private isSettled(): boolean {
-    return !this.connected || !this.foreground || this.renderBlocked || (!this.renderBusy && this.renderTimer === undefined && this.pending() === null);
+  /** rendered: nothing pending, no render running. not-visible: nothing can reach the glasses now. null: still on its way. */
+  private settleState(): SettleResult | null {
+    if (!this.connected || !this.foreground || this.renderBlocked) return 'not-visible';
+    return !this.renderBusy && this.renderTimer === undefined && this.pending() === null ? 'rendered' : null;
   }
 
+  private notifySettled(): void { this.settleWaiters.notify(() => this.settleState()); }
+
   /** Resolves when the glasses show what was last set (capped, so a stuck render cannot hold input back for long). */
-  settled(capMs = 1500): Promise<void> {
-    return this.settleWaiters.wait(() => this.isSettled(), capMs);
+  settled(capMs = 1500): Promise<SettleResult> {
+    return this.settleWaiters.wait(() => this.settleState(), capMs);
   }
 
   connect(): Promise<boolean> {
@@ -193,7 +198,11 @@ export class Glasses {
   }
 
   /** Glasses microphone on/off. Audio arrives through onAudio as 16 kHz s16le mono PCM. */
-  async microphone(on: boolean): Promise<boolean> {
+  microphone(on: boolean): Promise<boolean> {
+    return this.micChain.run(() => this.setMicrophone(on));
+  }
+
+  private async setMicrophone(on: boolean): Promise<boolean> {
     if (!this.sdk) return false;
     try {
       return await bounded(on ? this.sdk.audioControl(true, AudioInputSource.Glasses) : this.sdk.audioControl(false), 'Microphone');
@@ -233,6 +242,7 @@ export class Glasses {
       this.options.onLifecycle?.('foreground-exit');
       this.foreground = false;
       this.options.onForeground(false);
+      this.notifySettled();
       return;
     }
     if (system?.eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
@@ -253,6 +263,7 @@ export class Glasses {
       this.renderTimer = undefined;
       this.options.onForeground(false);
       this.options.onStatus('The glasses app was closed. Open Home again from the glasses menu.');
+      this.notifySettled();
       return;
     }
     if (event.audioEvent) {
@@ -298,12 +309,18 @@ export class Glasses {
   }
 
   private scheduleRender(): void {
+    this.notifySettled(); // nothing pending, or no way to render: whoever waits can go on
     if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.renderTimer !== undefined || this.pending() === null) return;
     const wait = Math.max(0, MIN_RENDER_INTERVAL_MS - (performance.now() - this.lastRenderAt));
     this.renderTimer = setTimeout(() => { this.renderTimer = undefined; void this.flushRender(); }, wait);
   }
 
+  /** Every way out of a render attempt tells the settle waiters (an early return can be the settled state). */
   private async flushRender(): Promise<void> {
+    try { await this.renderOnce(); } finally { this.notifySettled(); }
+  }
+
+  private async renderOnce(): Promise<void> {
     if (!this.sdk || !this.connected || !this.foreground || this.renderBusy) return;
     const todo = this.pending();
     if (todo === null) return;
@@ -339,7 +356,6 @@ export class Glasses {
     } finally {
       this.renderBusy = false;
       this.scheduleRender();
-      this.settleWaiters.notify(() => this.isSettled());
     }
   }
 }

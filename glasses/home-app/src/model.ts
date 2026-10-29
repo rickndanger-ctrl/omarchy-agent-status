@@ -410,7 +410,9 @@ export class HomeModel {
     return null;
   }
 
-  setChat(messages: ChatMessage[] | null, nowMs: number): void {
+  /** `forChat`: the chat these messages belong to; they are dropped if another screen is open by now. */
+  setChat(messages: ChatMessage[] | null, nowMs: number, forChat?: number): void {
+    if (forChat !== undefined && !(this.screen.kind === 'chat' && this.screen.id === forChat)) return;
     const shown = messages && recentMessages(messages, nowMs, this.hideOldTexts);
     this.chatLines = shown === null ? ['Could not load this chat.']
       : [...(shown.hidden ? ['(older messages hidden)'] : []), ...[...shown.messages].reverse().flatMap(m => wrap(`${m.fromMe ? 'Me' : m.from} (${age(m.when, nowMs)}): ${m.text}`))];
@@ -439,7 +441,11 @@ export class HomeModel {
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }
 
+  /** Bumped whenever the screen is replaced (by a press, an alert or a poll): queued presses use it to notice. */
+  generation = 0;
+
   private go(screen: Screen): void {
+    this.generation++;
     this.screen = screen;
     this.cursor = 0;
     this.scroll = 0;

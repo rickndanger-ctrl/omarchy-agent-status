@@ -32,7 +32,7 @@ export function makeHandle(host: FlowHost): (input: Input) => void {
       const result = host.tiles.input(input, host.tileCtx());
       if (result?.kind === 'exit') { host.leaveTiles(); return; }
       host.paint();
-      if (result) host.runTileEffect(result as TileEffect);
+      if (result) { host.runTileEffect(result as TileEffect); host.paint(); } // a screen it opened must be what settled() waits for
       const edited = host.tiles.takeEdited();
       if (edited) host.saveLayout(edited);
       host.refreshTiles();
@@ -44,7 +44,7 @@ export function makeHandle(host: FlowHost): (input: Input) => void {
     }
     const action = host.model.input(input, host.now());
     host.paint();
-    if (action) host.runModelAction(action);
+    if (action) { host.runModelAction(action); host.paint(); }
     host.refreshTerminal();
   };
 }

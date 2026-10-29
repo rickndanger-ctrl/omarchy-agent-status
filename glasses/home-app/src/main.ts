@@ -62,9 +62,9 @@ const MENU = { pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7, 
 let lastDevice = '';
 const glasses = new Glasses({
   onInput: input => handle(input, 'touch'),
-  onMenu: id => void menu(id),
+  onMenu: id => inputQueue.pushMenu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
-  onForeground: on => { foreground = on; remote.sync(); if (on) void poll(); },
+  onForeground: on => { foreground = on; if (!on) inputQueue.clear('left the front'); remote.sync(); if (on) void poll(); },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
     if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
@@ -139,7 +139,7 @@ $('save').onclick = () => {
   paint();
   void poll();
 };
-$('pause').onclick = () => void menu(MENU.pause);
+$('pause').onclick = () => inputQueue.pushMenu(MENU.pause);
 $('pair-top').onclick = () => { $<HTMLInputElement>('code').value = $<HTMLInputElement>('code-top').value; $('pair').click(); };
 // One-time pairing: a 6-digit code made on a hub exchanges for the access token, so nothing long has to be typed.
 $('pair').onclick = async () => {
@@ -496,7 +496,7 @@ async function run(action: Action): Promise<void> {
       model.showFlash(r.ok ? `Workspace ${action.workspace} on ${action.machine}` : 'Could not switch', Date.now());
     } else if (action.kind === 'loadChat') {
       const r = await api<{ messages: Parameters<HomeModel['setChat']>[0] }>(`messages?chat=${action.id}`).catch(() => null);
-      model.setChat(r ? r.messages : null, Date.now());
+      model.setChat(r ? r.messages : null, Date.now(), action.id);
     } else if (action.kind === 'prompt') {
       const r = await api<{ ok: boolean }>('prompt', { method: 'POST', body: JSON.stringify(action) });
       diag('prompt', `${action.machine} ${action.window ? 'window' : 'tmux'} ok=${r.ok}`);
@@ -539,7 +539,7 @@ async function run(action: Action): Promise<void> {
       diag('text.send', `ok=${r.ok}`);
       model.showFlash(r.ok ? `Text sent to ${action.name}` : 'Text not sent', Date.now());
       const fresh = await api<{ messages: Parameters<HomeModel['setChat']>[0] }>(`messages?chat=${action.chat}`).catch(() => null);
-      if (fresh && model.screenKind === 'chat') model.setChat(fresh.messages, Date.now());
+      if (fresh) model.setChat(fresh.messages, Date.now(), action.chat);
     } else if (action.kind === 'askMuse') {
       museTile.askStart(action.text);
       paint();
@@ -617,9 +617,19 @@ const applyInput = makeHandle({
   refreshTerminal: () => void refreshTerminal(),
   now: () => Date.now(),
 });
+/** Changes whenever the screen does: the model's screen plus Tiles shown/hidden (seen at each call). */
+let tilesFlips = 0;
+let wasShowingTiles = false;
+function screenGeneration(): number {
+  const now = showingTiles();
+  if (now !== wasShowingTiles) { tilesFlips++; wasShowingTiles = now; }
+  return model.generation + tilesFlips;
+}
 /** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
 const inputQueue = new InputQueue({
   apply: applyInput,
+  menu: id => void menu(id),
+  generation: screenGeneration,
   screen: () => (showingTiles() ? 'tiles' : model.screenKind),
   settled: () => glasses.settled(),
   log: (name, detail) => diag(name, detail),
