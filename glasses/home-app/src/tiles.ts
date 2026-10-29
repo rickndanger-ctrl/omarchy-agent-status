@@ -101,7 +101,7 @@ export interface Widget {
   title(ctx: TileContext): string;
   /** The tile's body, already wrapped to `width`; may be longer than `lines` (the model scrolls). Newest last. */
   body(ctx: TileContext, width: number): string[];
-  /** Actions for the tap menu. The model always adds "Full screen" and "Switch to other tile". */
+  /** Actions for the tap menu. The model always adds "Full screen". */
   actions(ctx: TileContext): TileAction[];
   act(actionId: string, ctx: TileContext): TileEffect | null;
   needs(ctx: TileContext): TileNeed[];
