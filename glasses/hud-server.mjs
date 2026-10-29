@@ -17,6 +17,8 @@
 //   POST /api/decide {machine, id, behavior}  behavior: allow | deny | desk
 //   POST /api/focus  {machine, workspace}     laptop only: switch Hyprland workspace
 //   POST /api/pause  {paused}                 stop sending approvals to the glasses
+//   POST /api/input  {input: up|down|select|back}  a phone remote's button (docs/REMOTE-INPUT.md)
+//   GET  /api/input/wait?after=<seq>          the glasses' long-poll for those buttons (25 s)
 //   POST /api/prompt {machine, pane, text|key} type a prompt into an agent's tmux pane (key: Escape)
 //   POST /api/transcribe  (16 kHz s16le mono PCM body) → {text}   speech-to-text via Groq Whisper
 //   GET  /api/messages?chat=<id>              hub: last messages of one chat (read-only)
@@ -1336,6 +1338,35 @@ function tileFrom(raw) {
   return { title: clip(raw?.title, 40) || 'Tile', lines, actions }
 }
 
+// ---- phone remote (docs/REMOTE-INPUT.md): a phone's four buttons, delivered to the glasses' long-poll ----------
+const INPUTS = new Set(['up', 'down', 'select', 'back'])
+const INPUT_RETAIN_MS = 2000 // an input is delivered only this long after it arrived, never replayed later
+const INPUT_LISTEN_MS = 3000 // a wait closed this recently still counts as the glasses listening
+const INPUT_RATE = 10 // inputs per second, shared by every phone
+const INPUT_WAIT_MS = Number(process.env.HUD_INPUT_WAIT_MS) || 25_000
+let inputSeq = 0
+let inputsKept = [] // {seq, input, at}
+const inputWaiters = new Set() // {after, finish}
+let openWaits = 0
+let lastWaitEnd = 0
+const inputTimes = [] // when the recent inputs arrived, for the shared rate limit
+
+// Inputs with a number above `after` that arrived in the last few seconds, oldest first.
+function freshInputs(after) {
+  const now = Date.now()
+  inputsKept = inputsKept.filter(i => now - i.at <= INPUT_RETAIN_MS)
+  return inputsKept.filter(i => i.seq > after)
+}
+const glassesListening = () => openWaits > 0 || Date.now() - lastWaitEnd < INPUT_LISTEN_MS
+// True when this input would go over the shared limit; otherwise it is counted.
+function overInputRate() {
+  const now = Date.now()
+  while (inputTimes.length && now - inputTimes[0] >= 1000) inputTimes.shift()
+  if (inputTimes.length >= INPUT_RATE) return true
+  inputTimes.push(now)
+  return false
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, 'http://x')
   const p = url.pathname.replace(/^\/hud(?=\/|$)/, '') || '/'
@@ -1500,6 +1531,54 @@ async function handle(req, res) {
       return send(res, 200, { ok: true })
     }
     if (req.method === 'GET' && p === '/api/diag') return send(res, 200, { diagnostics })
+    // The phone remote. A phone posts a button; the glasses' app holds one long-poll open and gets it at once.
+    if (req.method === 'POST' && p === '/api/input') {
+      const b = await readBody(req).catch(() => ({}))
+      const input = String(b?.input ?? '')
+      if (!INPUTS.has(input)) return send(res, 400, { ok: false, error: 'input must be up, down, select or back' })
+      if (overInputRate()) {
+        diagnostics.push({ at: new Date().toISOString(), name: 'remote.limited', detail: input })
+        if (diagnostics.length > 1000) diagnostics.shift()
+        return send(res, 429, { ok: false, error: 'too fast' })
+      }
+      if (!glassesListening()) {
+        diagnostics.push({ at: new Date().toISOString(), name: 'remote.input', detail: `${input} not delivered` })
+        return send(res, 200, { ok: true, delivered: false, reason: 'no glasses listening on this hub' })
+      }
+      const seq = ++inputSeq
+      inputsKept.push({ seq, input, at: Date.now() })
+      for (const w of [...inputWaiters]) if (w.after < seq) w.finish(freshInputs(w.after))
+      diagnostics.push({ at: new Date().toISOString(), name: 'remote.input', detail: `${input} delivered` })
+      if (diagnostics.length > 1000) diagnostics.shift()
+      return send(res, 200, { ok: true, delivered: true, seq })
+    }
+    if (req.method === 'GET' && p === '/api/input/wait') {
+      // `after` missing or 0 means "from now": only inputs that arrive after this wait opened are returned.
+      const given = Number(url.searchParams.get('after')) || 0
+      const after = given > 0 ? given : inputSeq
+      const ready = freshInputs(after)
+      if (ready.length) return send(res, 200, { seq: ready[ready.length - 1].seq, inputs: ready.map(({ seq, input, at }) => ({ seq, input, at })) })
+      openWaits++
+      await new Promise(resolve => {
+        let done = false
+        const finish = list => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          inputWaiters.delete(waiter)
+          openWaits--
+          lastWaitEnd = Date.now()
+          if (!res.headersSent) send(res, 200, list.length ? { seq: list[list.length - 1].seq, inputs: list.map(({ seq, input, at }) => ({ seq, input, at })) } : { seq: inputSeq, inputs: [] })
+          resolve()
+        }
+        const waiter = { after, finish }
+        inputWaiters.add(waiter)
+        const timer = setTimeout(() => finish([]), INPUT_WAIT_MS)
+        // The glasses went away mid-wait: the wait ends; the next one counts as listening again.
+        res.on('close', () => finish([]))
+      })
+      return
+    }
     if (req.method === 'POST' && p === '/api/pause') {
       paused = !!(await readBody(req)).paused
       if (paused) glassesSeen = 0
