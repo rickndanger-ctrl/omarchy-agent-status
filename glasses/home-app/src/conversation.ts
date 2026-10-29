@@ -208,6 +208,12 @@ export class ConversationSession {
     this.seq = 0; this.parts = []; this.bytes = 0; this.queue = []; this.lastPoll = this.now();
     this.startedAt = this.now(); this.stoppedAt = 0;
     await this.micOffPending;
+    if (this.cancelStart) {
+      // Stopped while waiting for an older microphone-off: the microphone never goes on.
+      void this.hub.stop(this.id).catch(() => {});
+      this.phase = 'idle'; this.id = ''; this.notice = 'Stopped before it began';
+      return;
+    }
     let on = false;
     try { on = await this.deps.mic.on(); } catch { on = false; }
     if (this.cancelStart) {

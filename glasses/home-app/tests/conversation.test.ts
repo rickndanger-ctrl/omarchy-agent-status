@@ -351,3 +351,28 @@ test('a hub 404 on a chunk, microphone-off slow: a quick Start waits for the old
   assert.deepEqual(order, ['on', 'off:begin', 'off:end', 'on']);
   assert.equal(t.conv.view().phase, 'listening');
 });
+
+test('Stop pressed while a new Start waits for the old microphone-off: idle, the microphone is never turned on', async () => {
+  const t = setup();
+  let finishOff!: () => void;
+  let ons = 0;
+  (t.conv as unknown as { deps: { mic: { on(): Promise<boolean>; off(): Promise<boolean> } } }).deps.mic = {
+    on: async () => { ons++; return true; },
+    off: () => new Promise<boolean>(res => { finishOff = () => res(true); }),
+  };
+  await t.conv.start('claude');
+  ons = 0;
+  t.hub.chunkError = () => new ConvHttpError('gone', 404);
+  t.conv.onAudio(pcm(CHUNK_BYTES));
+  await settle();
+  t.hub.chunkError = null;
+  const started = t.conv.start('claude');
+  await settle();
+  assert.equal(t.conv.view().phase, 'starting');
+  const stopped = t.conv.stop('tap');
+  finishOff();
+  await Promise.all([started, stopped]);
+  assert.equal(t.conv.view().phase, 'idle');
+  assert.equal(ons, 0);
+  assert.ok(t.hub.stopped.length >= 1);
+});
