@@ -33,7 +33,7 @@ summary. This is our own design; it is not based on any other product. Contract 
       hints: string[],          the latest 2–3 lines, each ≤ 40 characters
       summary?: string[],       up to 5 lines, once done
       actions?: string[],       action items, once done (may be empty)
-      fallback?: string,        set when the last hint/summary came from the local model because Claude failed
+      fallback?: string,        set when the last hint/summary came from another helper because the chosen one failed
       error?: string,           one plain line ("The local model is not running", "Transcription failed")
       chunks: number, words: number,
       skipped: number           chunks that could not be transcribed (the tile says "N pieces missed")
@@ -61,10 +61,19 @@ The app polls GET /api/conversation about every 2 s while a session is listening
 
 ## Backends (the owner's choice in Settings; default "claude")
 
-Fallback: when the claude backend fails or times out (hints: 20 s, summary: 60 s), the hub retries that one request
-on "local" and marks it, so the tile shows `(local model: Claude didn't answer)` under the hints or summary.
-The session keeps trying Claude on the next request. Conversation gets `fallback?: string` for that line.
-Local and codex have no fallback; their errors show as `error`.
+Helpers: each CLI is found once, when the hub or node starts: `HUD_CLAUDE_BIN` / `HUD_CODEX_BIN` if set (a path
+that does not exist means "not set up", with no search), else PATH, else `~/.local/bin`, `/opt/homebrew/bin` and
+`~/.local/share/mise/shims` (a LaunchAgent's PATH often lacks them). The path found is logged at start. A helper
+that is not found is "not set up on this hub", and the local model that does not answer is "isn't running on this
+hub". `GET /api/diag` adds `helpers: {claude: {path|null}, codex: {path|null}, local: {reachable}}` (no tokens).
+
+Fallback: the chosen helper is tried first. When it is not set up, fails or times out (hints: 20 s, summary: 60 s),
+the hub goes on down the chain Claude → Codex → local, skipping any that is not set up or not running, and the first
+one that answers does that request. The tile then shows the line `(<who> answered: <why the chosen one did not>)`,
+for example `(Codex answered: Claude didn't answer)` or `(local model answered: Claude isn't set up on this hub)`;
+Conversation gets `fallback?: string` for it. Each request starts again from the chosen helper, so the session keeps
+trying it. If nothing answers, the error is the chosen helper's own line, for example `Claude isn't set up on this
+hub`. The local model is the last step, so a Local choice has no fallback.
 
 The hub sends each think request to the node named for that backend in hub.json, and that node runs it on its
 own machine:
@@ -74,10 +83,10 @@ own machine:
     POST /api/think  {backend, system, prompt, timeoutSec}     (on a node, Bearer that node's token)
                                   → 200 {text, ms} | 4xx/5xx {error}
 
-- local: OpenAI-compatible chat on `http://127.0.0.1:18081/v1` on that node (Ornith 35B on the laptop).
+- local: OpenAI-compatible chat on `http://127.0.0.1:18081/v1` on that node (Ornith 35B on the laptop); `HUD_LOCAL_LLM_URL` overrides it.
   It is reached only on loopback by the node itself and is never exposed.
-- claude: `claude -p --tools "" --strict-mcp-config --no-session-persistence` in a fresh temp folder.
-- codex: `codex exec --skip-git-repo-check --sandbox read-only --ephemeral --ignore-user-config -C <temp> -` with the prompt on stdin. `--ignore-user-config` is in `codex exec --help` for codex-cli 0.162.0: "Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`".
+- claude: `$HUD_CLAUDE_BIN` or the found `claude -p --tools "" --strict-mcp-config --no-session-persistence` in a fresh temp folder.
+- codex: `$HUD_CODEX_BIN` or the found `codex exec --skip-git-repo-check --sandbox read-only --ephemeral --ignore-user-config -C <temp> -` with the prompt on stdin. `--ignore-user-config` is in `codex exec --help` for codex-cli 0.162.0: "Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`".
 
 The runners are the public Ask tile's backend code (public/g2-tiles/hub/ask.mjs, now g2-omac), moved into
 `glasses/think.mjs` so hud-server.mjs only imports it. Test hooks are environment variables:

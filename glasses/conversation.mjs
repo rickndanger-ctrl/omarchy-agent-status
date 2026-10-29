@@ -19,7 +19,9 @@ const GAP_POLL_MS = 250
 const HINT_MS = 20_000
 const SUMMARY_MS = 60_000
 const HINT_CONTEXT_MS = 120_000 // the hints read the last couple of minutes of the talk
-const FALLBACK = "(local model: Claude didn't answer)"
+// The order the helpers are tried in when the chosen one fails: Claude, then Codex, then the local model.
+const CHAIN = ['claude', 'codex', 'local']
+const WHO = { claude: 'Claude', codex: 'Codex', local: 'local model' }
 
 const HINT_SYSTEM = 'You help during a conversation. Reply with 2 or 3 lines, each under 40 characters, chosen from: a key point, a question worth asking, a useful fact. Nothing else.'
 const SUMMARY_SYSTEM = 'Summarize the conversation. Reply in this form: a line "SUMMARY:", then up to 5 short lines, then a line "ACTIONS:", then one line per action item starting with "- ". Nothing else.'
@@ -70,19 +72,22 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
     skipped: s.skipped,
   })
 
-  // One request on the session's backend. Claude failing retries that one request on the local model, and marks it.
+  // One request, down the chain from the session's backend. A helper that is not set up, not running or failing is
+  // passed over; the first one that answers does it. When it is not the chosen one, the tile says who answered and
+  // why the chosen one did not (its own error line). If none answers, the chosen one's error is the error.
   async function ask(s, system, prompt, timeoutMs) {
     const timeoutSec = timeoutMs / 1000
-    if (s.backend !== 'claude') return think({ backend: s.backend, system, prompt, timeoutSec })
-    try {
-      const r = await think({ backend: 'claude', system, prompt, timeoutSec })
-      s.fallback = undefined
-      return r
-    } catch {
-      const r = await think({ backend: 'local', system, prompt, timeoutSec })
-      s.fallback = FALLBACK
-      return r
+    let first = null
+    for (const backend of CHAIN.slice(CHAIN.indexOf(s.backend))) {
+      try {
+        const r = await think({ backend, system, prompt, timeoutSec })
+        s.fallback = backend === s.backend ? undefined : `(${WHO[backend]} answered: ${first.message})`
+        return r
+      } catch (err) {
+        first ??= err
+      }
     }
+    throw first
   }
 
   // Hints: never more than one request in flight; a request asked for meanwhile runs once after it.
