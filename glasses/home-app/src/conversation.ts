@@ -140,7 +140,16 @@ export class ConversationSession {
   }
 
   /** Microphone off; a refusal is tried once more, and a second one leaves a warning on the tile. */
-  private async micOff(): Promise<void> {
+  private micOffPending: Promise<void> | null = null;
+  /** Tracked, so a new Start waits for an older microphone-off that is still running (it must not silence the new session). */
+  private micOff(): Promise<void> {
+    const job = this.micOffNow();
+    this.micOffPending = job;
+    void job.then(() => { if (this.micOffPending === job) this.micOffPending = null; });
+    return job;
+  }
+
+  private async micOffNow(): Promise<void> {
     for (let attempt = 0; attempt < 2; attempt++) {
       let ok = false;
       try { ok = await this.deps.mic.off(); } catch { ok = false; }
@@ -198,6 +207,7 @@ export class ConversationSession {
     }
     this.seq = 0; this.parts = []; this.bytes = 0; this.queue = []; this.lastPoll = this.now();
     this.startedAt = this.now(); this.stoppedAt = 0;
+    await this.micOffPending;
     let on = false;
     try { on = await this.deps.mic.on(); } catch { on = false; }
     if (this.cancelStart) {
@@ -278,6 +288,7 @@ export class ConversationSession {
 
   private async doStop(reason: string): Promise<void> {
     this.phase = 'stopping';
+    await this.micOffPending;
     await this.micOff();
     if (this.bytes >= MIN_LAST_CHUNK_BYTES) this.enqueue(this.take()); else { this.parts = []; this.bytes = 0; }
     await this.pumping;

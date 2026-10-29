@@ -12,7 +12,7 @@ import { ConversationSession, CHUNK_BYTES, type Conversation, type ConvHub, type
 const NOW = Date.UTC(2026, 9, 29, 14, 32);
 const MENU_LISTEN = 11;
 
-function rig(opts: { micOk?: boolean; hubGate?: Promise<void> } = {}) {
+function rig(opts: { micOk?: boolean; hubGate?: Promise<void>; capMs?: number } = {}) {
   const model = new HomeModel();
   const tiles = new Tiles();
   tiles.setLayout(normalizeLayout({ pages: [{ left: 'conversation', right: 'empty' }] }));
@@ -55,7 +55,7 @@ function rig(opts: { micOk?: boolean; hubGate?: Promise<void> } = {}) {
     generation: () => model.generation + (tilesActive ? 0 : 1000), foreground: () => flags.foreground,
     screen: () => (tilesActive ? 'tiles' : model.screenKind), settled: () => Promise.resolve('rendered' as const),
     log: (n, d) => log.push(`${n} ${d}`),
-  });
+  }, undefined, undefined, opts.capMs);
   const press = (source: InputSource, ...inputs: Input[]) => inputs.forEach(i => queue.push(i, source));
   const idle = () => new Promise(r => setTimeout(r, 25));
   const finish = async () => { // listening -> summary shown
@@ -292,4 +292,22 @@ test('audio chunks keep flowing while presses go through (no direct handlers)', 
   r.conv.onAudio(new Uint8Array(CHUNK_BYTES));
   await r.idle();
   assert.ok(r.hubCalls.includes('chunk:0'));
+});
+
+test('a start slower than the queue cap: the 2nd tap (touch or remote) cancels it; idle, microphone never on', async () => {
+  for (const source of ['touch', 'remote'] as const) {
+    let release!: () => void;
+    const r = rig({ hubGate: new Promise<void>(res => { release = res; }), capMs: 20 }); // stands in for the 3 s cap
+    await openTile(r, source);
+    r.press(source, 'select'); // start: the hub is slow
+    await new Promise(res => setTimeout(res, 60)); // past the cap: the queue moved on
+    assert.equal(r.conv.view().phase, 'starting');
+    r.press(source, 'select'); // 2nd tap: must be Stop, not the "Starting…" menu
+    await r.idle();
+    release();
+    await new Promise(res => setTimeout(res, 60));
+    assert.equal(r.conv.view().phase, 'idle', source);
+    assert.deepEqual(r.micLog, [], source); // the microphone never came on
+    assert.ok(r.hubCalls.includes('stop:c1'), source); // the session the hub opened late was closed
+  }
 });

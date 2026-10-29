@@ -457,21 +457,21 @@ function conversationWidget(): Widget {
     tap: ctx => {
       const v = view(ctx);
       if (!v) return null;
-      if (v.phase === 'listening') return { kind: 'conversation', op: 'stop' };
+      if (v.phase === 'listening' || v.phase === 'starting') return { kind: 'conversation', op: 'stop' };
       return v.phase === 'idle' || v.phase === 'error' ? { kind: 'conversation', op: 'start' } : null;
     },
     actions: ctx => {
       const v = view(ctx);
       if (!v) return [];
-      if (v.phase === 'listening') return [{ id: 'stop', label: 'Stop listening' }];
+      if (v.phase === 'listening' || v.phase === 'starting') return [{ id: 'stop', label: 'Stop listening' }];
       if (v.phase === 'done') return [{ id: 'start', label: 'Start new' }, v.sent ? { id: 'sent', label: 'Sent to Muse' } : { id: 'muse', label: 'Send summary to Muse' }];
       if (v.phase === 'idle' || v.phase === 'error') return [{ id: 'start', label: 'Start listening' }];
-      return [{ id: 'wait', label: v.phase === 'starting' ? 'Starting…' : 'Summarizing…' }];
+      return [{ id: 'wait', label: 'Summarizing…' }];
     },
     act: (actionId, ctx) => {
       const v = view(ctx);
       if (!v) return null;
-      if (actionId === 'stop' && v.phase === 'listening') return { kind: 'conversation', op: 'stop' };
+      if (actionId === 'stop' && (v.phase === 'listening' || v.phase === 'starting')) return { kind: 'conversation', op: 'stop' };
       if (actionId === 'start' && (v.phase === 'idle' || v.phase === 'error' || v.phase === 'done')) return { kind: 'conversation', op: 'start' };
       if (actionId === 'muse' && v.phase === 'done' && !v.sent) return { kind: 'conversation', op: 'sendMuse' };
       return null;

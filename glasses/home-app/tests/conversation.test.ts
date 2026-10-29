@@ -324,3 +324,30 @@ test('skipped pieces are counted (a chunk that never got through), and reset by 
   await t.conv.start('claude');
   assert.equal(t.conv.view().skipped, 0);
 });
+
+test('a hub 404 on a chunk, microphone-off slow: a quick Start waits for the old off, then the new session is listening with the mic on', async () => {
+  const t = setup();
+  let finishOff!: () => void;
+  const order: string[] = [];
+  const hub = t.hub;
+  const realOff = t.mic;
+  // Replace the fake microphone's off with a slow one (shared log in `order`).
+  (t.conv as unknown as { deps: { mic: { on(): Promise<boolean>; off(): Promise<boolean> } } }).deps.mic = {
+    on: async () => { order.push('on'); return true; },
+    off: () => new Promise<boolean>(res => { order.push('off:begin'); finishOff = () => { order.push('off:end'); res(true); }; }),
+  };
+  void realOff;
+  await t.conv.start('claude');
+  hub.chunkError = () => new ConvHttpError('gone', 404);
+  t.conv.onAudio(pcm(CHUNK_BYTES));
+  await settle();
+  assert.equal(t.conv.view().phase, 'error'); // sessionLost: the old off is still running
+  hub.chunkError = null;
+  const started = t.conv.start('claude');
+  await settle();
+  assert.deepEqual(order, ['on', 'off:begin']); // the new mic is not turned on before the old off ends
+  finishOff();
+  await started;
+  assert.deepEqual(order, ['on', 'off:begin', 'off:end', 'on']);
+  assert.equal(t.conv.view().phase, 'listening');
+});
