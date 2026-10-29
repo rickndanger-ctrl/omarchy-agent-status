@@ -30,7 +30,7 @@ function rig(opts: { tiles?: boolean } = {}) {
   const calls: string[] = [];
   const ctx = (): TileContext => ({ data, now: NOW, timeZone: 'UTC', terminal: () => ['x'], chat: () => ['hi'], muse: () => ({ question: 'q', reply: 'a' }), reminders: () => [], url: () => null });
   const showing = () => tilesActive && !fromTiles;
-  const apply = makeHandle({
+  const apply = makeHandle({ isBlank: () => false, wake: () => {},
     model, tiles, tileCtx: ctx, showingTiles: showing,
     inOpenedScreen: () => tilesActive && fromTiles,
     leaveTiles: () => { tilesActive = false; model.goHome(); calls.push('paint'); },

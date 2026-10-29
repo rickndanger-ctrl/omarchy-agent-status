@@ -43,6 +43,10 @@ export type Action =
   | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string }
   | { kind: 'openTiles' }
   | { kind: 'startConversation' }
+  | { kind: 'displayOff' }
+  | { kind: 'brightness'; value: number }
+  | { kind: 'closeApp' }
+  | { kind: 'settingsBack' }
   | { kind: 'addReminder'; title: string };
 
 type Screen =
@@ -56,6 +60,7 @@ type Screen =
   | { kind: 'studio' }
   | { kind: 'tiles' }
   | { kind: 'conversation' } // only a Home row's target: selecting it starts listening, it is not a screen
+  | { kind: 'settings' }
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
   | { kind: 'reply'; key: string }
@@ -488,6 +493,7 @@ export class HomeModel {
     }
     if (d.muse) rows.push({ text: 'Muse · latest reply', open: { kind: 'muse' } });
     rows.push({ text: 'Listen · Conversation', open: { kind: 'conversation' } });
+    rows.push({ text: 'Settings · display, brightness', open: { kind: 'settings' } });
     if (d.studio) {
       const busy = d.studio.machines.filter(m => m.busy);
       rows.push({ text: clip(`Studio · ${busy.length ? `${busy.length} working · ${busy[0].name}: ${busy[0].line}` : 'standing by'}`, WIDTH - 2), open: { kind: 'studio' } });
@@ -588,6 +594,7 @@ export class HomeModel {
     if (this.screen.kind === 'confirm') return CONFIRM_CHOICES.map(text => ({ text }));
     if (this.screen.kind === 'workspaces') return this.workspaceRows().map(w => w.row);
     if (this.screen.kind === 'home') return this.homeRows(nowMs);
+    if (this.screen.kind === 'settings') return this.settingsRows().map(text => ({ text }));
     if (this.screen.kind === 'needs') return this.needsRows();
     if (this.screen.kind === 'agents') return this.agentRows(nowMs);
     if (this.screen.kind === 'messages') {
@@ -599,6 +606,12 @@ export class HomeModel {
     if (this.screen.kind === 'approval') return APPROVAL_CHOICES.map(c => ({ text: c.label }));
     return [];
   }
+
+  /** Text brightness 1..4 (saved by the app; 4 is the device default). */
+  brightness = 4;
+  private settingsRows(): string[] { return ['Display off', `Brightness: ${this.brightness} of 4`, 'Close app', 'Back']; }
+  /** The Quick settings screen: the phone remote's "settings" button and the Home row open it. */
+  openSettings(): void { this.returnTo = null; this.go({ kind: 'settings' }); }
 
   private session(): Session | undefined {
     const s = this.screen;
@@ -637,6 +650,13 @@ export class HomeModel {
       else if (s.kind === 'reply' || s.kind === 'confirm') this.go({ kind: 'agent', key: s.key });
       else this.go({ kind: 'home' });
       return null;
+    }
+    if (s.kind === 'settings' && input === 'select') {
+      if (this.cursor === 0) return { kind: 'displayOff' };
+      if (this.cursor === 1) { this.brightness = this.brightness >= 4 ? 1 : this.brightness + 1; return { kind: 'brightness', value: this.brightness }; }
+      if (this.cursor === 2) return { kind: 'closeApp' };
+      this.go({ kind: 'home' });
+      return { kind: 'settingsBack' };
     }
     if (s.kind === 'chat') {
       // A text conversation: tap replies by voice, swipe scrolls, swipe down at the newest opens quick texts.
@@ -948,6 +968,9 @@ export class HomeModel {
       lines[0] = clip(`MESSAGES › ${s.name}`);
       lines.push(...this.body(this.chatLines, 'Loading…'));
       if (this.chatLines) lines.push(this.chatAtBottom() ? `${this.data.voice ? 'tap: reply by voice · ' : ''}swipe up: scroll · down: quick texts` : 'swipe up/down: scroll');
+    } else if (s.kind === 'settings') {
+      lines[0] = 'QUICK SETTINGS';
+      lines.push(...this.list(this.listRows(nowMs)), '', 'tap: choose · double-tap: back');
     } else if (s.kind === 'studio') {
       lines[0] = 'HOME › STUDIO';
       lines.push(...this.body(this.studioLines(nowMs), 'Studio Routing is not running on the laptop.'), 'swipe: scroll');

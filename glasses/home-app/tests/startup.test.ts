@@ -27,7 +27,7 @@ test('main.ts builds the glasses with that menu list', () => {
 });
 
 /** A bridge that checks every page like the Even app's SDK does. `errors` collects what it would have refused. */
-function fakeBridge(errors: string[], pages: string[]) {
+function fakeBridge(errors: string[], pages: string[], shutdowns: number[] = []) {
   const check = (kind: string, container: unknown) => {
     const result = validateEvenHubPageContainer(container as Parameters<typeof validateEvenHubPageContainer>[0]);
     if (!('valid' in result) || result.valid) { pages.push(kind); return true; }
@@ -41,14 +41,15 @@ function fakeBridge(errors: string[], pages: string[]) {
     rebuildPageContainer: async (c: unknown) => check('rebuild', c),
     textContainerUpgrade: async () => true,
     audioControl: async () => true,
+    shutDownPageContainer: async (mode?: number) => { shutdowns.push(mode ?? 0); return true; },
   } as unknown as EvenAppBridge;
 }
 
-async function boot(menu: { id: number; name: string }[]) {
+async function boot(menu: { id: number; name: string }[], shutdowns: number[] = []) {
   const errors: string[] = []; const pages: string[] = []; const statuses: string[] = [];
   const g = new Glasses({
     onInput: () => {}, onMenu: () => {}, onStatus: s => statuses.push(s), onForeground: () => {}, onDevice: () => {}, onAudio: () => {},
-    bridge: async () => fakeBridge(errors, pages),
+    bridge: async () => fakeBridge(errors, pages, shutdowns),
   }, menu);
   const connected = await g.connect();
   return { g, connected, errors, pages, statuses };
@@ -80,5 +81,37 @@ test('the harness catches the 0.4.9 failure: 11 menu items are refused and the a
     assert.equal(connected, false);
     assert.match(errors.join(' '), /TOO_MANY_MENU_ITEMS|11 menuItems/);
     assert.match(statuses.at(-1) ?? '', /Glasses display .* failed/);
+  } finally { g.dispose(); }
+});
+
+test('the blank page (Display off) and every brightness 1..4, single and tiles (unfocused one step dimmer, min 0), pass the SDK validation', async () => {
+  const { g, connected, errors } = await boot(GLASSES_MENU);
+  try {
+    assert.equal(connected, true);
+    g.setText(' '); // Display off
+    assert.equal(await g.settled(5000), 'rendered');
+    for (let b = 1; b <= 4; b++) {
+      g.setBrightness(b);
+      g.setText(`HOME at brightness ${b}`);
+      assert.equal(await g.settled(5000), 'rendered', `single ${b}`);
+      for (const focus of ['page', 'choose-left', 'choose-right', 'left', 'right'] as const) {
+        g.setTiles(`b${b}`, focus, 'left', 'right');
+        assert.equal(await g.settled(5000), 'rendered', `${b} ${focus}`);
+      }
+    }
+    g.setBrightness(0); // the lowest the SDK allows; unfocused stays at 0 (never negative)
+    g.setTiles('b0', 'left', 'left', 'right');
+    assert.equal(await g.settled(5000), 'rendered');
+    assert.deepEqual(errors, []);
+  } finally { g.dispose(); }
+});
+
+test('Close app asks the glasses to confirm (shutDownPageContainer exit mode 1)', async () => {
+  const shutdowns: number[] = [];
+  const { g, connected } = await boot(GLASSES_MENU, shutdowns);
+  try {
+    assert.equal(connected, true);
+    assert.equal(await g.shutDown(), true);
+    assert.deepEqual(shutdowns, [1]);
   } finally { g.dispose(); }
 });

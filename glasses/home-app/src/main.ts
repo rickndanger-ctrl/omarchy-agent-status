@@ -6,8 +6,8 @@ import { LayoutLoader } from './layoutcache';
 import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
 import { InputQueue, type InputSource } from './inputqueue';
-import { makeHandle, TOP_SCREENS, runConversationEffect, startConversation } from './inputflow';
-import { MENU, GLASSES_MENU, setHideDone } from './menu';
+import { makeHandle, TOP_SCREENS, runConversationEffect, startConversation, openSettings, runSettingsAction } from './inputflow';
+import { MENU, GLASSES_MENU, INTERNAL_MENU, setHideDone } from './menu';
 import { Latest } from './latest';
 import { ConversationSession, ConvHttpError, CONV_BACKENDS, asBackend, type Conversation, type ConvHub } from './conversation';
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
@@ -51,11 +51,13 @@ let foreground = true;
 // The phone remote: while Home is in front, one long-poll to the current hub brings the phone's buttons; each one goes through handle() like a gesture.
 const remote = new RemoteInput({
   hub: () => base, token: () => token, active: () => foreground,
-  apply: input => handle(input, 'remote'),
+  apply: input => (input === 'settings' ? inputQueue.pushMenu(INTERNAL_MENU.settings, 'remote') : handle(input, 'remote')),
 });
 
+function savedBrightness(): number { const n = Number(store.get('home.brightness')); return n >= 1 && n <= 4 ? Math.round(n) : 4; }
 const model = new HomeModel();
 model.hideDone = store.get('home.hideDone') === '1';
+model.brightness = savedBrightness();
 // Texts older than 24 h are hidden on the glasses unless switched off (phone checkbox or the glasses menu).
 model.hideOldTexts = store.get('home.hideOldTexts') !== '0';
 let recording: Uint8Array[] | null = null;
@@ -124,6 +126,7 @@ const glasses = new Glasses({
     if (recording.length < 4000) recording.push(pcm);
   },
 }, GLASSES_MENU);
+glasses.setBrightness(model.brightness);
 
 $('app').innerHTML = `
 <main>
@@ -460,12 +463,26 @@ function runTileEffect(effect: TileEffect): void | Promise<void> {
 }
 
 let prevKind = model.screenKind;
+/** Display off (Quick settings): a blank page until any press or remote action. */
+let blank = false;
+function wake(): void { blank = false; diag('display', 'on'); paint(); }
+const settingsHost = {
+  model, isBlank: () => blank, wake, setBlank: () => { blank = true; diag('display', 'off'); },
+  showingTiles: () => showingTiles(), markOpenedFromTile: () => { fromTiles = true; },
+  returnToTiles: () => { if (tilesActive && fromTiles) { fromTiles = false; void refreshTiles(); } },
+  saveBrightness: (value: number) => { store.set('home.brightness', String(value)); glasses.setBrightness(value); diag('brightness', value); },
+  closeApp: async () => { diag('close', await glasses.shutDown()); },
+  paint: () => paint(),
+};
 function paint(): void {
   // A reminder that was added or cancelled (or whose voice failed) ends on Home: that is back in Tiles.
   if (fromTiles && model.screenKind === 'home' && (prevKind === 'listen' || prevKind === 'confirm')) fromTiles = false;
   prevKind = model.screenKind;
   let preview: string;
-  if (showingTiles()) {
+  if (blank) {
+    preview = '(display off: any press wakes it)';
+    glasses.setText(' ');
+  } else if (showingTiles()) {
     const frame = tiles.render(tileCtx());
     glasses.setTiles(`p${frame.page}`, frame.focus, frame.left, frame.right);
     const l = frame.left.split('\n');
@@ -655,6 +672,9 @@ async function run(action: Action): Promise<void> {
       if (r.ok) { justAdded = { title: action.title, at: Date.now() }; setTimeout(paint, 5100); }
       if (fromTiles) fromTiles = false;
       void refreshTiles();
+    } else if (action.kind === 'displayOff' || action.kind === 'brightness' || action.kind === 'closeApp' || action.kind === 'settingsBack') {
+      // Quick settings: see inputflow.ts
+      await runSettingsAction(settingsHost, action).job;
     } else if (action.kind === 'startConversation') {
       const host = convHost();
       if (!host) model.showFlash('Conversation is not available', Date.now()); else await startConversation(host);
@@ -678,7 +698,7 @@ const applyInput = makeHandle({
   inOpenedScreen: () => tilesActive && fromTiles,
   leaveTiles: () => { tilesActive = false; model.goHome(); paint(); },
   backToTiles: () => { fromTiles = false; paint(); void refreshTiles(); },
-  paint, runTileEffect,
+  paint, isBlank: () => blank, wake, runTileEffect,
   runModelAction: action => run(action),
   saveLayout: layout => void saveLayout(layout),
   refreshTiles: () => void refreshTiles(),
@@ -707,6 +727,8 @@ function handle(input: Input, source: InputSource = 'touch'): void { inputQueue.
 
 async function menu(id: number): Promise<void> {
   diag('menu', id);
+  if (blank) { wake(); return; } // the wake press is not passed on
+  if (id === INTERNAL_MENU.settings) { openSettings(settingsHost); return; }
   if (id === MENU.home) model.goTo('home');
   if (id === MENU.agents) model.goTo('agents');
   if (id === MENU.messages) model.goTo('messages');
@@ -728,7 +750,7 @@ async function menu(id: number): Promise<void> {
     setHideOldTexts(!model.hideOldTexts);
     model.showFlash(model.hideOldTexts ? 'Texts older than 24 h hidden' : 'All texts shown', Date.now());
   }
-  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.listen, MENU.hideOldTexts, MENU.pause, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
+  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.listen, INTERNAL_MENU.settings, MENU.hideOldTexts, MENU.pause, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
   if (id === MENU.pause) {
     const paused = !model.data?.paused;
     try {

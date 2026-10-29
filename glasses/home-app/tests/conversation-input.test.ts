@@ -41,7 +41,7 @@ function rig(opts: { micOk?: boolean; hubGate?: Promise<void>; capMs?: number } 
   const host = { conv, backend: () => backend, dispatch: (a: Action) => { muse.push(a); }, flash: (t: string) => { flashes.push(t); }, paint: () => {} };
   let tilesActive = true;
   const ctx = (): TileContext => ({ data: null, now: NOW, timeZone: 'UTC', terminal: () => null, chat: () => null, muse: () => null, reminders: () => [], url: () => null, conversation: () => conv.view() });
-  const apply = makeHandle({
+  const apply = makeHandle({ isBlank: () => false, wake: () => {},
     model, tiles, tileCtx: ctx, showingTiles: () => tilesActive,
     inOpenedScreen: () => false,
     leaveTiles: () => { tilesActive = false; model.goHome(); },
@@ -361,21 +361,21 @@ test('Home worst case: every row present, Listen right after Muse, render <= 10 
   while (m.screenKind !== 'home') m.input('back', NOW); // dismiss the pop-up
   const seen = new Set<string>();
   let lastHome = '';
-  for (let i = 0; i < 9; i++) {
+  for (let i = 0; i < 10; i++) {
     const text = m.render(NOW);
     lastHome = text;
     assert.ok(text.split('\n').length <= 10, `${text.split('\n').length} lines at cursor ${i}`);
     assert.match(text, /Offline: m1/); // the offline line is always there
     assert.doesNotMatch(text, /^MENU$/m);
-    for (const row of ['Agents ·', 'Messages ·', 'Muse · latest reply', 'Listen · Conversation', 'Studio ·', '! Needs you', 'Tiles ·']) if (text.includes(row)) seen.add(row);
+    for (const row of ['Agents ·', 'Messages ·', 'Muse · latest reply', 'Listen · Conversation', 'Studio ·', 'Settings ·', '! Needs you', 'Tiles ·']) if (text.includes(row)) seen.add(row);
     m.input('down', NOW);
   }
-  assert.equal(seen.size, 7, [...seen].join(' | ')); // every row is reachable
+  assert.equal(seen.size, 8, [...seen].join(' | ')); // every row is reachable
   assert.match(lastHome, /Offline: m1/);
   const m2 = new HomeModel();
   m2.update(homeData());
   const rows = m2.render(NOW);
-  assert.match(rows, /Muse · latest reply\n[ >] Listen · Conversation\n[ >] Studio ·/);
+  assert.match(rows, /Muse · latest reply\n[ >] Listen · Conversation\n[ >] Settings · display, brightness/);
 });
 
 test('selecting Home\'s Listen row starts Conversation through the queue, from touch and from the phone remote', async () => {
@@ -391,7 +391,7 @@ test('selecting Home\'s Listen row starts Conversation through the queue, from t
     const host = { conv, backend: () => 'local' as ConvBackend, dispatch: () => {}, flash: () => {}, paint: () => {} };
     const tiles = new Tiles();
     const actions: string[] = [];
-    const apply = makeHandle({
+    const apply = makeHandle({ isBlank: () => false, wake: () => {},
       model, tiles, tileCtx: () => ({ data: null, now: NOW, timeZone: 'UTC', terminal: () => null, chat: () => null, muse: () => null, reminders: () => [], url: () => null }),
       showingTiles: () => false, inOpenedScreen: () => false, leaveTiles: () => {}, backToTiles: () => {}, paint: () => {},
       runTileEffect: () => {}, runModelAction: action => { actions.push(action.kind); if (action.kind === 'startConversation') return startConversation(host); },

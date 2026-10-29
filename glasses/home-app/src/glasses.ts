@@ -4,6 +4,8 @@
 // is left out; long press, the glasses menu and battery are added.
 import {
   AudioInputSource,
+  MAX_TEXT_BRIGHTNESS,
+  MIN_TEXT_BRIGHTNESS,
   CreateStartUpPageContainer,
   MenuContainerProperty,
   MenuItemProperty,
@@ -83,6 +85,8 @@ export class Glasses {
   /** Taps before this time are dropped: the tap that brings Home back to the front isn't meant for Home. */
   private quietUntil = 0;
   private deviceTimer: ReturnType<typeof setInterval> | undefined;
+  /** Text brightness 0..4 (SDK range). Unfocused tiles are one step dimmer. */
+  private brightness = MAX_TEXT_BRIGHTNESS;
   private settleWaiters = new SettleWaiters();
   /** Microphone on/off run one after another, so a stop can never overtake a start. */
   private micChain = new Serial();
@@ -90,6 +94,19 @@ export class Glasses {
   constructor(private readonly options: GlassesOptions, private readonly menu: MenuItem[]) {}
 
   get isConnected(): boolean { return this.connected; }
+
+  /** Text brightness for every page from now on (1..4 in the app; the SDK range is 0..4). Rebuilds the page. */
+  setBrightness(value: number): void {
+    this.brightness = Math.min(MAX_TEXT_BRIGHTNESS, Math.max(MIN_TEXT_BRIGHTNESS, Math.round(value)));
+    this.shown = null; // a brightness change needs the page rebuilt
+    this.scheduleRender();
+  }
+
+  /** Close app: the glasses ask the owner to confirm (exit mode 1). */
+  async shutDown(): Promise<boolean> {
+    if (!this.sdk) return false;
+    try { return await bounded(this.sdk.shutDownPageContainer(1), 'Close app'); } catch (error) { this.options.onStatus(`Close app failed: ${reason(error)}`); return false; }
+  }
 
   /** Stops the battery timer (tests; the app never calls it). */
   dispose(): void { if (this.deviceTimer) clearInterval(this.deviceTimer); this.deviceTimer = undefined; this.epoch++; }
@@ -120,7 +137,7 @@ export class Glasses {
     if (frame.kind === 'single') {
       return [new TextContainerProperty({
         xPosition: 0, yPosition: 0, width: 576, height: 288, borderWidth: 0, paddingLength: 4,
-        containerID: CONTAINER_ID, containerName: CONTAINER_NAME, isEventCapture: 1, content: frame.text,
+        containerID: CONTAINER_ID, containerName: CONTAINER_NAME, isEventCapture: 1, content: frame.text, textColor: this.brightness,
       })];
     }
     // At page level no tile is lit: the left one catches the gestures, with no border on either.
@@ -131,6 +148,8 @@ export class Glasses {
       xPosition: side === 'left' ? 0 : TILE_W, yPosition: 0, width: TILE_W, height: 288,
       borderWidth: border(side), borderColor: 13, borderRadius: 4, paddingLength: 4,
       containerID: TILE_IDS[side], containerName: TILE_NAMES[side], isEventCapture: side === owner ? 1 : 0, content: frame[side],
+      // Where you are is the bright one; the other tile is a step dimmer (at page level both are bright).
+      textColor: frame.focus === 'page' || frame.focus.endsWith(side) ? this.brightness : Math.max(MIN_TEXT_BRIGHTNESS, this.brightness - 1),
     }));
   }
 

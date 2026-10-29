@@ -401,8 +401,9 @@ test('home keeps the menu first; waiting items are one row that opens the Needs 
   while (m.screenKind !== 'home') m.input('back', NOW); // dismiss the pop-ups
   const text = m.render(NOW);
   assert.match(text, /^─+\n> Agents/m);
-  assert.match(text, /Muse · latest reply\n  Listen · Conversation\n  ! Needs you · 3 \(2 approvals\)/);
-  for (let i = 0; i < 4; i++) m.input('down', NOW);
+  assert.match(text, /Muse · latest reply\n  Listen · Conversation\n  Settings · display, brightness/ );
+  for (let i = 0; i < 5; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /> ! Needs you · 3 \(2 approvals\)/); // scrolled into the window
   m.input('select', NOW);
   assert.equal(m.screenKind, 'needs');
   const page = m.render(NOW);
@@ -485,7 +486,8 @@ test('studio row opens a scrolling page of computers and the conversation', () =
   m.update(base({ sessions: [], studio }));
   assert.match(m.render(NOW), /  Studio · 1 working · Laptop: Reverser · step 5/);
   m.input('down', NOW);
-  m.input('down', NOW); // (Listen · Conversation sits before Studio)
+  m.input('down', NOW); // (Listen · Conversation and Settings sit before Studio)
+  m.input('down', NOW);
   m.input('select', NOW);
   assert.equal(m.screenKind, 'studio');
   const page = m.render(NOW);

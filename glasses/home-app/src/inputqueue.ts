@@ -54,9 +54,9 @@ export class InputQueue {
     this.add({ kind: 'input', input, source, stamp: this.unsolicited() });
   }
 
-  pushMenu(id: number): void {
+  pushMenu(id: number, source: InputSource = 'touch'): void {
     if (!this.host.foreground()) { this.host.log('input.ignored', `menu ${id} (not in front)`); return; }
-    this.add({ kind: 'menu', id, source: 'touch' });
+    this.add({ kind: 'menu', id, source });
   }
 
   /**

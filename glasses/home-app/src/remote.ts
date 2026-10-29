@@ -3,8 +3,8 @@
 // exactly like a gesture. Free of the DOM and of Muse; the only timers are the wait's own timeout and the
 // error back-off.
 
-export type RemoteInputName = 'up' | 'down' | 'select' | 'back';
-const INPUTS: RemoteInputName[] = ['up', 'down', 'select', 'back'];
+export type RemoteInputName = 'up' | 'down' | 'select' | 'back' | 'settings';
+const INPUTS: RemoteInputName[] = ['up', 'down', 'select', 'back', 'settings'];
 /** After an error: wait this long (ms) before the next try; the third and later failures keep the last value. */
 export const BACKOFF_MS = [1000, 2000, 5000];
 /** The hub answers after 25 s at most; give it a little longer. */

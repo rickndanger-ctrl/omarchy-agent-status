@@ -5,7 +5,7 @@ import type { ConversationSession, ConvBackend } from './conversation';
 import type { Layout, TileContext, TileEffect, Tiles } from './tiles';
 
 /** Screens a tile opens: one double-tap there goes straight back to Tiles. */
-export const TOP_SCREENS = ['agent', 'chat', 'muse', 'messages', 'needs', 'studio', 'home'];
+export const TOP_SCREENS = ['agent', 'chat', 'muse', 'messages', 'needs', 'studio', 'home', 'settings'];
 
 export interface FlowHost {
   model: HomeModel;
@@ -19,6 +19,9 @@ export interface FlowHost {
   /** Double-tap on a screen a tile opened: back to Tiles. */
   backToTiles(): void;
   paint(): void;
+  /** Display off: the glasses show a blank page. Any press wakes it and is not passed on. */
+  isBlank(): boolean;
+  wake(): void;
   /** May return a promise (a Conversation start/stop); the queue waits for it, capped. */
   runTileEffect(effect: TileEffect): void | Promise<void>;
   /** May return a promise; the microphone actions' promises are awaited by the queue. */
@@ -31,6 +34,7 @@ export interface FlowHost {
 
 export function makeHandle(host: FlowHost): (input: Input) => void | Promise<void> {
   return input => {
+    if (host.isBlank()) { host.wake(); return; }
     if (host.showingTiles()) {
       const result = host.tiles.input(input, host.tileCtx());
       if (result?.kind === 'exit') { host.leaveTiles(); return; }
@@ -53,7 +57,7 @@ export function makeHandle(host: FlowHost): (input: Input) => void | Promise<voi
     if (action) host.paint();
     host.refreshTerminal();
     // Microphone on/off and a Conversation start must finish before the next press (a stop must not overtake its start); other actions go on in the background.
-    return action && (action.kind === 'startMic' || action.kind === 'stopMic' || action.kind === 'cancelMic' || action.kind === 'startConversation') ? job : undefined;
+    return action && (action.kind === 'startMic' || action.kind === 'stopMic' || action.kind === 'cancelMic' || action.kind === 'startConversation' || action.kind === 'closeApp') ? job : undefined;
   };
 }
 
@@ -80,4 +84,39 @@ export function runConversationEffect(h: ConversationHost, op: 'start' | 'stop' 
   if (op === 'stop') return h.conv.stop('tap').then(() => h.paint());
   h.conv.sendToMuse(action => h.dispatch(action));
   h.paint();
+}
+
+/** What Quick settings needs from the app (main.ts supplies it; tests supply fakes). */
+export interface SettingsHost {
+  model: HomeModel;
+  isBlank(): boolean;
+  wake(): void;
+  setBlank(): void;
+  showingTiles(): boolean;
+  /** The screen is opened from Tiles: a double-tap there goes back to Tiles. */
+  markOpenedFromTile(): void;
+  /** Settings was left with Back: if it was opened from Tiles, return to Tiles. */
+  returnToTiles(): void;
+  saveBrightness(value: number): void;
+  closeApp(): Promise<unknown>;
+  paint(): void;
+}
+
+/** The phone remote's "settings" button (arrives as a queue menu choice): wakes a blank display instead, else opens Quick settings. */
+export function openSettings(h: SettingsHost): void {
+  if (h.isBlank()) { h.wake(); return; }
+  if (h.showingTiles()) h.markOpenedFromTile();
+  h.model.openSettings();
+  h.paint();
+}
+
+/** Quick settings rows: the model decided; this does the work. Returns undefined for an action that is not Quick settings. */
+export function runSettingsAction(h: SettingsHost, action: NonNullable<ReturnType<HomeModel['input']>>): { handled: boolean; job?: Promise<unknown> } {
+  switch (action.kind) {
+    case 'displayOff': h.setBlank(); return { handled: true };
+    case 'brightness': h.saveBrightness(action.value); return { handled: true };
+    case 'closeApp': return { handled: true, job: h.closeApp() };
+    case 'settingsBack': h.returnToTiles(); return { handled: true };
+    default: return { handled: false };
+  }
 }
