@@ -21,7 +21,7 @@
 //   POST /api/transcribe  (16 kHz s16le mono PCM body) → {text}   speech-to-text via Groq Whisper
 //   GET  /api/messages?chat=<id>              hub: last messages of one chat (read-only)
 //   GET  /api/muse                            hub: Muse's latest exchange (read-only, on demand)
-//   GET  /api/layout, PUT /api/layout         the Tiles pages (layout.json in the config folder)
+//   GET  /api/layout, PUT /api/layout         the Tiles pages (layout.json); hub.json peers keep them in step
 //   GET  /api/reminders                       hub: open Apple Reminders (Mini 1 relay)
 //   POST /api/reminders/done {id}, /api/reminders/add {title, list?}
 //   GET  /api/tile?url=<endpoint>             hub: a url: plug-in tile (only endpoints in layout.json)
@@ -1282,7 +1282,36 @@ function checkLayout(raw) {
   const pages = raw.pages.map(pg => (pg && ok(pg.left) && ok(pg.right) ? { left: pg.left, right: pg.right } : null))
   return pages.every(Boolean) ? { pages } : null
 }
-const loadLayout = () => checkLayout(readJson(TILE_LAYOUT_FILE)) ?? DEFAULT_LAYOUT
+// The layout on disk and when it was saved (ms). A file from before updatedAt existed counts as 0.
+function loadLayout() {
+  const raw = readJson(TILE_LAYOUT_FILE)
+  const layout = checkLayout(raw)
+  return layout ? { ...layout, updatedAt: Number(raw.updatedAt) || 0 } : { ...DEFAULT_LAYOUT, updatedAt: 0 }
+}
+function saveLayout(layout, updatedAt) {
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
+  writeFileSync(TILE_LAYOUT_FILE, JSON.stringify({ pages: layout.pages, updatedAt }, null, 2) + '\n', { mode: 0o600 })
+}
+// Hubs in hub.json "peers" keep one layout. A saved change goes to each peer once, marked relayed; a relayed
+// copy is kept only if it is newer and is never passed on, so two hubs cannot loop. On start, each hub takes
+// the newest copy from its peers. Fire and forget, like the location.
+function pushLayout(layout) {
+  for (const peer of HUB.peers ?? []) {
+    call(`${String(peer.url).replace(/\/$/, '')}/api/layout`, peer.tokenFile ? tokenFrom(peer.tokenFile) : TOKEN, { method: 'PUT', body: JSON.stringify({ ...layout, relayed: true }), timeout: 8000 }).catch(() => {})
+  }
+}
+async function pullLayouts() {
+  for (const peer of HUB.peers ?? []) {
+    try {
+      const theirs = await call(`${String(peer.url).replace(/\/$/, '')}/api/layout`, peer.tokenFile ? tokenFrom(peer.tokenFile) : TOKEN, { timeout: 8000 })
+      const layout = checkLayout(theirs)
+      const updatedAt = Number(theirs.updatedAt) || 0
+      if (layout && updatedAt > loadLayout().updatedAt) saveLayout(layout, updatedAt)
+    } catch {
+      // The peer is down: keep what this hub has.
+    }
+  }
+}
 
 // The endpoints of the url: tiles in the saved layout. Nothing else is ever fetched for a tile.
 function layoutUrlEndpoints() {
@@ -1541,11 +1570,19 @@ async function handle(req, res) {
     }
     if (req.method === 'GET' && p === '/api/layout') return send(res, 200, loadLayout())
     if (req.method === 'PUT' && p === '/api/layout') {
-      const layout = checkLayout(await readBody(req))
+      const body = await readBody(req)
+      const layout = checkLayout(body)
       if (!layout) return send(res, 400, { error: `layout needs ${PAGE_COUNT} pages of {left, right} widget ids` })
-      mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
-      writeFileSync(TILE_LAYOUT_FILE, JSON.stringify(layout, null, 2) + '\n', { mode: 0o600 })
-      return send(res, 200, layout)
+      if (body.relayed) {
+        // A peer's copy: kept only if newer, and never passed on.
+        const updatedAt = Number(body.updatedAt) || 0
+        if (updatedAt > loadLayout().updatedAt) saveLayout(layout, updatedAt)
+        return send(res, 200, { ok: true })
+      }
+      const updatedAt = Math.max(Date.now(), loadLayout().updatedAt + 1)
+      saveLayout(layout, updatedAt)
+      pushLayout({ ...layout, updatedAt })
+      return send(res, 200, loadLayout())
     }
     if (req.method === 'GET' && p === '/api/reminders') {
       if (DEMO) return send(res, 200, { reminders: demoReminders() })
@@ -1702,6 +1739,7 @@ export function start() {
   if (MODE === 'hub') {
     void refreshWeather()
     setInterval(() => void refreshWeather(), 15 * 60_000)
+    void pullLayouts()
   }
   if (NTFY) {
     let busy = false

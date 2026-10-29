@@ -9,6 +9,8 @@ RELAY_PORT=${RELAY_PORT:-5391}
 HUB_PORT=${HUB_PORT:-5392}
 BARE_PORT=${BARE_PORT:-5393}
 DOWN_PORT=${DOWN_PORT:-5394}
+PEER_A_PORT=${PEER_A_PORT:-5395}
+PEER_B_PORT=${PEER_B_PORT:-5396}
 RELAY="http://127.0.0.1:$RELAY_PORT"
 HUB="http://127.0.0.1:$HUB_PORT"
 BARE="http://127.0.0.1:$BARE_PORT"
@@ -247,6 +249,54 @@ req POST "$HUB" /api/tile/action "{\"url\":\"$RELAY/not-in-layout\",\"id\":\"ref
 check "POST /api/tile/action refuses an endpoint not in the layout" 404
 req POST "$HUB" /api/tile/action "{\"url\":\"$PLUGIN\"}"
 check "POST /api/tile/action needs an action id" 400
+
+echo "Two hubs keeping one layout"
+PA="http://127.0.0.1:$PEER_A_PORT"
+PB="http://127.0.0.1:$PEER_B_PORT"
+mkdir -p "$work/homeA/.config/agent-glasses" "$work/homeB/.config/agent-glasses"
+printf '{"peers":[{"url":"%s","tokenFile":"%s"}]}\n' "$PB" "$work/hud.token" > "$work/peer-a.json"
+printf '{"peers":[{"url":"%s","tokenFile":"%s"}]}\n' "$PA" "$work/hud.token" > "$work/peer-b.json"
+if grep -qi 'muse' "$work/peer-a.json" "$work/peer-b.json"; then
+  echo "  FAIL  the peer test configs must not mention muse (Muse is off limits to this test)"
+  exit 1
+fi
+HOME="$work/homeA" HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/peer-a.json" node "$here/hud-server.mjs" --mode hub --port "$PEER_A_PORT" --machine "Peer A" >"$work/peer-a.log" 2>&1 & pidA=$!; pids+=("$pidA")
+HOME="$work/homeB" HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/peer-b.json" node "$here/hud-server.mjs" --mode hub --port "$PEER_B_PORT" --machine "Peer B" >"$work/peer-b.log" 2>&1 & pidB=$!; pids+=("$pidB")
+wait_up() { for _ in $(seq 50); do curl -s -o /dev/null "$1/api/health" && return 0; sleep 0.2; done; return 1; }
+wait_up "$PA" && wait_up "$PB"
+# wait_until COMMAND: retries for about 4 s (peers push in the background)
+wait_until() { local i; for i in $(seq 20); do eval "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; return 1; }
+layout_field() { curl -s -H "Authorization: Bearer $TOKEN" "$1/api/layout" | python3 -c "import json,sys; d=json.load(sys.stdin); print($2)"; }
+b_left() { layout_field "$PB" "d['pages'][0]['left']"; }
+# relayed_body PAGES [UPDATED_AT]: a body as a peer sends it (relayed, with or without updatedAt)
+relayed_body() { python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['relayed']=True; sys.argv[2] and d.update(updatedAt=int(sys.argv[2])); print(json.dumps(d))" "$1" "$2"; }
+XPAGES='{"pages":[{"left":"clock","right":"agent:Dell/claude"},{"left":"chat:recent","right":"agent:Mini 1/codex"},{"left":"reminders","right":"studio"},{"left":"approvals","right":"messages"},{"left":"clock","right":"empty"}]}'
+YPAGES=${XPAGES/clock/approvals}
+ZPAGES=${XPAGES/clock/studio}
+
+req PUT "$PA" /api/layout "$XPAGES"
+check "A saves a layout and stamps it" 200 "d['updatedAt']>0"
+upA1=$(layout_field "$PA" "d['updatedAt']")
+if wait_until '[ "$(b_left)" = clock ]'; then ok "B shows the change made on A"; else bad "B shows the change made on A"; fi
+if [ "$(layout_field "$PB" "d['updatedAt']")" = "$upA1" ]; then ok "B keeps A's stamp"; else bad "B keeps A's stamp"; fi
+sleep 1
+if [ "$(layout_field "$PA" "d['updatedAt']")" = "$upA1" ]; then ok "no loop: A is not re-stamped by B's copy"; else bad "no loop: A is not re-stamped by B's copy"; fi
+
+req PUT "$PB" /api/layout "$(relayed_body "$ZPAGES" $((upA1 - 1000)))"
+if [ "$CODE" = 200 ] && [ "$(b_left)" = clock ]; then ok "an older relayed copy is ignored"; else bad "an older relayed copy is ignored"; fi
+req PUT "$PB" /api/layout "$(relayed_body "$ZPAGES" "")"
+if [ "$CODE" = 200 ] && [ "$(b_left)" = clock ]; then ok "a relayed copy with no updatedAt counts as 0 and is ignored"; else bad "a relayed copy with no updatedAt counts as 0 and is ignored"; fi
+req PUT "$PB" /api/layout "$(relayed_body "$ZPAGES" $((upA1 + 500)))"
+if wait_until '[ "$(b_left)" = studio ]'; then ok "a newer relayed copy is saved"; else bad "a newer relayed copy is saved"; fi
+if [ "$(layout_field "$PA" "d['pages'][0]['left']")" = clock ]; then ok "a relayed copy is not passed back to A"; else bad "a relayed copy is not passed back to A"; fi
+
+kill "$pidB"; wait "$pidB" 2>/dev/null
+req PUT "$PA" /api/layout "$YPAGES"
+check "A saves a newer layout while B is down" 200 "d['updatedAt']>$upA1"
+HOME="$work/homeB" HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/peer-b.json" node "$here/hud-server.mjs" --mode hub --port "$PEER_B_PORT" --machine "Peer B" >"$work/peer-b2.log" 2>&1 & pidB=$!; pids+=("$pidB")
+wait_up "$PB"
+if wait_until '[ "$(b_left)" = approvals ]'; then ok "a restarted B pulls A's newer layout on start"; else bad "a restarted B pulls A's newer layout on start"; fi
+if [ "$(layout_field "$PB" "d['updatedAt']")" = "$(layout_field "$PA" "d['updatedAt']")" ]; then ok "after the pull B and A hold the same stamp"; else bad "after the pull B and A hold the same stamp"; fi
 
 echo
 echo "$pass passed, $fail failed"
