@@ -52,7 +52,8 @@ function setup(over: { voiceBusy?: boolean; micOk?: boolean; offResults?: boolea
   return { hub, conv, mic, sentIds, diags, advance: (ms: number) => { now += ms; }, changes: () => changes };
 }
 const pcm = (n: number) => new Uint8Array(n);
-const settle = () => new Promise(r => setTimeout(r, 20));
+// Let every pending promise step run (no wall-clock wait, so a loaded machine cannot make it flaky).
+const settle = async () => { for (let i = 0; i < 200; i++) await new Promise<void>(r => setImmediate(r)); };
 
 test('nothing listens until Start; Start opens the mic and the hub session with the chosen backend', async () => {
   const t = setup();

@@ -553,7 +553,7 @@ async function refreshTerminal(): Promise<void> {
   } catch { /* shown as "could not load" */ } finally {
     terminalBusy = false;
     // The same text as last time changes nothing on the glasses: no update, no repaint.
-    if (terminalCache.shouldApply(target.key, lines, model.hasTerminal(target.key))) inputQueue.pushExternal('terminal', () => { model.setTerminal(target.key, lines); paint(); });
+    if (terminalCache.shouldApply(target.key, lines, model.hasTerminal(target.key))) inputQueue.pushExternal('terminal', () => { if (model.setTerminal(target.key, lines)) terminalCache.record(target.key, lines); paint(); });
   }
 }
 

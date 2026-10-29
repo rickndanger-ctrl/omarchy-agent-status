@@ -342,8 +342,11 @@ export class HomeModel {
     return { machine: x.machine, pane: x.pane ?? '', ...(x.window ? { window: x.window } : {}), ...(x.appThread ? { appThread: x.appThread } : {}), key: s.key };
   }
 
-  setTerminal(key: string, lines: string[] | null): void {
-    if (this.screen.kind === 'agent' && this.screen.key === key) this.terminal = { key, lines: lines ?? ['(Could not read this agent.)'] };
+  /** Returns whether the text was taken (it is dropped when the agent screen was left meanwhile). */
+  setTerminal(key: string, lines: string[] | null): boolean {
+    if (this.screen.kind !== 'agent' || this.screen.key !== key) return false;
+    this.terminal = { key, lines: lines ?? ['(Could not read this agent.)'] };
+    return true;
   }
 
   hasTerminal(key: string): boolean { return this.terminal?.key === key; }

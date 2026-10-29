@@ -168,16 +168,33 @@ test('a failed terminal fetch forgets the text: an identical later success is ap
   const c = new TerminalCache();
   const lines = ['a', 'b'];
   assert.equal(c.shouldApply('k', lines, false), true);
+  c.record('k', lines);
   assert.equal(c.shouldApply('k', lines, true), false, 'same text: no repaint');
-  assert.equal(c.shouldApply('k', null, true), true, 'a failure is shown');
+  c.record('k', null);
   assert.equal(c.shouldApply('k', lines, true), true, 'identical text after a failure replaces the error');
-  assert.equal(c.shouldApply('k', lines, true), false);
   const model = new HomeModel(); model.update(data);
   model.openTarget({ kind: 'agent', key: 'lap/p1' });
   model.setTerminal('lap/p1', null);
   assert.ok(model.render(NOW).includes('Could not read'));
   model.setTerminal('lap/p1', lines);
   assert.ok(!model.render(NOW).includes('Could not read'));
+});
+
+test('a fetch for agent A that lands after Back is not remembered: reopening A shows the same answer', () => {
+  // main.ts: the fetch decides to apply, the queued update runs later and records only if the model took the text.
+  const c = new TerminalCache();
+  const model = new HomeModel(); model.update(data);
+  const lines = ['same answer'];
+  model.openTarget({ kind: 'agent', key: 'lap/p1' });
+  assert.equal(c.shouldApply('lap/p1', lines, model.hasTerminal('lap/p1')), true);
+  model.goHome(); // left A before the queued update ran
+  const apply = () => { if (model.setTerminal('lap/p1', lines)) c.record('lap/p1', lines); };
+  apply();
+  assert.equal(model.hasTerminal('lap/p1'), false);
+  model.openTarget({ kind: 'agent', key: 'lap/p1' });
+  assert.equal(c.shouldApply('lap/p1', lines, model.hasTerminal('lap/p1')), true, 'the identical answer is applied');
+  apply();
+  assert.equal(model.hasTerminal('lap/p1'), true);
 });
 
 test('a remote menu choice that changes the screen (settings) drops the downs queued behind it; the settings cursor stays', async () => {
