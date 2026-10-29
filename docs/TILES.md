@@ -66,14 +66,24 @@ http.createServer((req, res) => {
 
 ## Gestures
 
+Three levels: page, choose, tile. Each double tap goes one level up.
+
 | On a page | |
 |---|---|
 | swipe up / down | previous / next page (wraps around) |
-| tap | focus the left tile |
+| tap | choose a tile: the left one is lit, or the side you lit last on this page while Home is open |
 | double tap | leave Tiles, back to Home |
 
-| On a focused tile | |
+| Choosing a tile | |
+|---|---|
+| swipe (either way) | switch between the left and the right tile |
+| tap | go into the lit tile |
+| double tap | back to the page |
+
+The lit tile starts its title with `> ` and has a thin border; the left title always carries the page (`1/5`).
+
+| In a tile | |
 |---|---|
 | swipe | scroll the tile |
-| tap | the action list: the tile's actions, plus Full screen and Switch to other tile |
-| double tap | back to the page |
+| tap | the action list: the tile's actions, plus Full screen |
+| double tap | back to choosing, same side lit (closes the action list first) |

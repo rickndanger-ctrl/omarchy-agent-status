@@ -101,6 +101,7 @@ $('app').innerHTML = `
   <details id="tiles-editor">
     <summary>Tiles</summary>
     <p class="muted">Five pages, two apps each. This is what the glasses show in Tiles.</p>
+    <p class="muted">Gestures: on a page, swipe changes page and tap lets you choose a tile. Choosing: swipe switches left/right, tap opens it, double-tap goes back to the page. In a tile: swipe scrolls, tap opens its actions, double-tap goes back to choosing. Double-tap on a page leaves Tiles.</p>
     <label class="row"><input type="checkbox" id="start-tiles"> Start in Tiles</label>
     <div id="tile-rows"></div>
     <div class="row"><button id="tiles-save">Save tiles</button></div>

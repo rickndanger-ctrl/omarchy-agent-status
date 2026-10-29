@@ -86,8 +86,7 @@ export type TileEffect =
   | { kind: 'action'; action: Action }
   | { kind: 'open'; target: OpenTarget }
   | { kind: 'reminderDone'; id: string }
-  | { kind: 'urlAction'; endpoint: string; id: string }
-  | { kind: 'switchTile' };
+  | { kind: 'urlAction'; endpoint: string; id: string };
 
 export interface TileAction { id: string; label: string }
 
@@ -109,7 +108,7 @@ export interface Widget {
 }
 
 /** One frame of the tiled page: each tile is at most TILE_LINES lines of at most TILE_WIDTH characters. */
-export interface TilesFrame { page: number; focus: 'page' | 'left' | 'right'; left: string; right: string }
+export interface TilesFrame { page: number; focus: 'page' | 'choose-left' | 'choose-right' | 'left' | 'right'; left: string; right: string }
 
 /** What a gesture led to. */
 export type TilesResult = TileEffect | { kind: 'exit' } | null;
@@ -474,7 +473,8 @@ export function normalizeLayout(raw: unknown): Layout {
 }
 
 type Side = 'left' | 'right';
-type Mode = { kind: 'page' } | { kind: 'tile'; side: Side; menu: number | null };
+/** Three levels: PAGE (swipe = page), CHOOSE (swipe toggles the highlighted tile), TILE (swipe scrolls). */
+type Mode = { kind: 'page' } | { kind: 'choose'; side: Side } | { kind: 'tile'; side: Side; menu: number | null };
 
 export class Tiles implements TilesApi {
   private layout: Layout = normalizeLayout(DEFAULT_LAYOUT);
@@ -485,6 +485,8 @@ export class Tiles implements TilesApi {
   /** "Edit page": pick the left, then the right widget for the current page from everything Home knows. */
   private edit: { side: Side; cursor: number; left: WidgetId } | null = null;
   private edited: Layout | null = null;
+  /** The side last highlighted on each page while Home is open; a page not visited yet starts on the left. */
+  private sides: Side[] = [];
 
   getLayout(): Layout { return this.layout; }
 
@@ -539,6 +541,11 @@ export class Tiles implements TilesApi {
     this.scroll = 0;
   }
 
+  private highlight(side: Side): void {
+    this.mode = { kind: 'choose', side };
+    this.sides[this.page] = side;
+  }
+
   private widget(side: Side): Widget {
     return widgetFor(this.layout.pages[this.page][side]);
   }
@@ -548,7 +555,7 @@ export class Tiles implements TilesApi {
 
   private menuItems(w: Widget, ctx: TileContext): TileAction[] {
     const full = w.act(FULL, ctx) ? [{ id: FULL, label: 'Full screen' }] : [];
-    return [...w.actions(ctx), ...full, { id: 'switch', label: 'Switch to other tile' }];
+    return [...w.actions(ctx), ...full];
   }
 
   /** The body lines to show for a scroll offset, and whether there is more above or below. */
@@ -568,9 +575,16 @@ export class Tiles implements TilesApi {
         this.scroll = 0;
         return null;
       }
-      if (input === 'select') { this.mode = { kind: 'tile', side: 'left', menu: null }; this.scroll = 0; return null; }
+      if (input === 'select') { this.mode = { kind: 'choose', side: this.sides[this.page] ?? 'left' }; this.scroll = 0; return null; }
       return { kind: 'exit' };
     }
+    if (mode.kind === 'choose') {
+      if (input === 'up' || input === 'down') { this.highlight(mode.side === 'left' ? 'right' : 'left'); return null; }
+      if (input === 'select') { this.mode = { kind: 'tile', side: mode.side, menu: null }; this.scroll = 0; return null; }
+      this.mode = { kind: 'page' };
+      return null;
+    }
+    this.sides[this.page] = mode.side;
     const w = this.widget(mode.side);
     if (mode.menu !== null) {
       const items = this.menuItems(w, ctx);
@@ -580,10 +594,9 @@ export class Tiles implements TilesApi {
       const item = items[mode.menu];
       mode.menu = null;
       if (!item) return null;
-      if (item.id === 'switch') { this.mode = { kind: 'tile', side: mode.side === 'left' ? 'right' : 'left', menu: null }; this.scroll = 0; return null; }
       return w.act(item.id, ctx);
     }
-    if (input === 'back') { this.mode = { kind: 'page' }; this.scroll = 0; return null; }
+    if (input === 'back') { this.mode = { kind: 'choose', side: mode.side }; this.scroll = 0; return null; }
     if (input === 'select') { mode.menu = 0; return null; }
     const lines = w.body(ctx, W);
     const max = Math.max(0, lines.length - BODY_LINES);
@@ -594,10 +607,12 @@ export class Tiles implements TilesApi {
   }
 
   render(ctx: TileContext): TilesFrame {
-    const focus: TilesFrame['focus'] = this.mode.kind === 'page' ? 'page' : this.mode.side;
+    const m = this.mode;
+    const focus: TilesFrame['focus'] = m.kind === 'page' ? 'page' : m.kind === 'choose' ? `choose-${m.side}` : m.side;
     const tile = (side: Side): string => {
       const w = this.widget(side);
-      const focused = focus === side;
+      const lit = m.kind !== 'page' && m.side === side;
+      const focused = m.kind === 'tile' && lit;
       const menu = focused && this.mode.kind === 'tile' ? this.mode.menu : null;
       let title = w.title(ctx);
       if (side === 'left') title = `${this.page + 1}/${this.layout.pages.length} ${title}`;
@@ -618,7 +633,7 @@ export class Tiles implements TilesApi {
         view = win.view;
         mark = `${win.above ? '▲' : ''}${win.below ? '▼' : ''}`;
       }
-      const lead = focused ? '> ' : '';
+      const lead = lit ? '> ' : '';
       const room = W - lead.length - (mark ? mark.length + 1 : 0);
       const head = clip(title, room);
       const first = mark ? `${lead}${head.padEnd(room)} ${mark}` : `${lead}${head}`;

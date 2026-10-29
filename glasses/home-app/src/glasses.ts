@@ -16,6 +16,7 @@ import {
   type EvenAppBridge,
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk';
+import type { TilesFrame } from './tiles';
 import type { Input } from './model';
 
 export interface MenuItem { id: number; name: string }
@@ -38,7 +39,7 @@ const TILE_IDS = { left: 2, right: 3 } as const;
 const TILE_NAMES = { left: 'tile-left', right: 'tile-right' } as const;
 const TILE_W = 288;
 /** What the glasses should show: one full-screen text block, or two tiles. `key` is page + focus: a change rebuilds the page. */
-type Frame = { kind: 'single'; text: string } | { kind: 'tiles'; key: string; focus: 'page' | 'left' | 'right'; left: string; right: string };
+type Frame = { kind: 'single'; text: string } | { kind: 'tiles'; key: string; focus: TilesFrame['focus']; left: string; right: string };
 // Each redraw is a Bluetooth write; too many in a row delays taps and swipes coming back.
 const MIN_RENDER_INTERVAL_MS = 450;
 const BRIDGE_TIMEOUT_MS = 15000;
@@ -100,11 +101,13 @@ export class Glasses {
         containerID: CONTAINER_ID, containerName: CONTAINER_NAME, isEventCapture: 1, content: frame.text,
       })];
     }
-    // At page level no tile is focused: the left one catches the gestures, with no border on either.
-    const owner = frame.focus === 'right' ? 'right' : 'left';
+    // At page level no tile is lit: the left one catches the gestures, with no border on either.
+    // Choosing a tile draws a thin border, being inside it a thick one.
+    const owner = frame.focus.endsWith('right') ? 'right' : 'left';
+    const border = (side: 'left' | 'right') => (frame.focus === side ? 2 : frame.focus === `choose-${side}` ? 1 : 0);
     return (['left', 'right'] as const).map(side => new TextContainerProperty({
       xPosition: side === 'left' ? 0 : TILE_W, yPosition: 0, width: TILE_W, height: 288,
-      borderWidth: frame.focus === side ? 2 : 0, borderColor: 13, borderRadius: 4, paddingLength: 4,
+      borderWidth: border(side), borderColor: 13, borderRadius: 4, paddingLength: 4,
       containerID: TILE_IDS[side], containerName: TILE_NAMES[side], isEventCapture: side === owner ? 1 : 0, content: frame[side],
     }));
   }
@@ -195,7 +198,7 @@ export class Glasses {
   }
 
   /** Tiles mode. `layoutKey` names the page; changing it or the focus rebuilds the page, a text change only updates that tile. */
-  setTiles(layoutKey: string, focus: 'page' | 'left' | 'right', left: string, right: string): void {
+  setTiles(layoutKey: string, focus: TilesFrame['focus'], left: string, right: string): void {
     this.want = { kind: 'tiles', key: `${layoutKey}/${focus}`, focus, left: glassesSafe(left).slice(0, 400) || ' ', right: glassesSafe(right).slice(0, 400) || ' ' };
     this.renderBlocked = false;
     this.scheduleRender();

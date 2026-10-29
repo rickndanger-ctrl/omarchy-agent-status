@@ -24,7 +24,11 @@ test('frame: titles on line 1, page indicator left, focus marker, size limits', 
   assert.equal(f.focus, 'page');
   assert.match(f.left.split('\n')[0], /^1\/5 Muse/);
   assert.match(f.right.split('\n')[0], /^Claude · busy/);
-  t.input('select', ctx());
+  t.input('select', ctx()); // page -> choose
+  f = t.render(ctx());
+  assert.equal(f.focus, 'choose-left');
+  assert.match(f.left.split('\n')[0], /^> 1\/5 Muse/);
+  t.input('select', ctx()); // choose -> tile
   f = t.render(ctx());
   assert.equal(f.focus, 'left');
   assert.match(f.left.split('\n')[0], /^> 1\/5 Muse/);
@@ -46,20 +50,21 @@ test('page level: up/down change page and wrap, tap focuses, back exits', () => 
 
 test('tile level: open the action list, run an action, back to page', () => {
   const u = new Tiles();
-  u.input('select', ctx()); u.input('select', ctx()); // menu on Muse
+  u.input('select', ctx()); u.input('select', ctx()); u.input('select', ctx()); // choose, tile, menu on Muse
   const f = u.render(ctx());
   assert.match(f.left, /> Ask Muse/);
   assert.match(f.left, /Full screen/);
-  assert.match(f.left, /Switch to other tile/);
+  assert.doesNotMatch(f.left, /Switch to other tile/);
   assert.deepEqual(u.input('select', ctx()), { kind: 'open', target: { kind: 'muse', then: 'listen' } });
-  u.input('back', ctx());
+  u.input('back', ctx()); // tile -> choose (same side)
+  assert.equal(u.render(ctx()).focus, 'choose-left');
+  u.input('back', ctx()); // choose -> page
   assert.equal(u.render(ctx()).focus, 'page');
 });
 
 test('agent tile follows the newest bottom lines and scrolls up', () => {
   const t = new Tiles();
-  t.input('select', ctx());
-  t.input('select', ctx()); t.input('down', ctx()); t.input('down', ctx()); t.input('select', ctx()); // Muse: switch tile
+  t.input('select', ctx()); t.input('down', ctx()); t.input('select', ctx()); // choose the right tile, enter it
   assert.equal(t.render(ctx()).focus, 'right');
   assert.match(t.render(ctx()).right, /line 29/);
   t.input('up', ctx());
@@ -283,7 +288,7 @@ test('Muse tile: a long reply shows its start right under the question, and swip
   assert.equal(body[3], 'answer line 0');
   assert.match(body[1], /…$/);
   const t = new Tiles();
-  t.input('select', c);
+  t.input('select', c); t.input('select', c);
   const frame = t.render(c).left.split('\n');
   assert.equal(frame[4], 'answer line 0'); // title, then question, blank, answer: not scrolled to the end
   t.input('down', c); t.input('down', c); // scroll later text
@@ -328,4 +333,80 @@ test('Muse: one /api/muse read per page view, none after an ask', async () => {
   assert.equal(cache.pageFetchStart(2), null);     // so nothing is read after the ask either
   cache.resetPage();                               // entering Tiles again
   assert.notEqual(cache.pageFetchStart(2), null);
+});
+
+test('3 levels: every transition', () => {
+  const t = new Tiles();
+  const focus = () => t.render(ctx()).focus;
+  assert.equal(focus(), 'page');
+  t.input('select', ctx()); assert.equal(focus(), 'choose-left');   // PAGE tap -> CHOOSE
+  t.input('down', ctx()); assert.equal(focus(), 'choose-right');    // either swipe toggles
+  t.input('down', ctx()); assert.equal(focus(), 'choose-left');
+  t.input('up', ctx()); assert.equal(focus(), 'choose-right');
+  t.input('up', ctx()); assert.equal(focus(), 'choose-left');
+  t.input('down', ctx());
+  t.input('select', ctx()); assert.equal(focus(), 'right');         // CHOOSE tap -> TILE
+  t.input('back', ctx()); assert.equal(focus(), 'choose-right');    // TILE dbl-tap -> CHOOSE, same side
+  t.input('back', ctx()); assert.equal(focus(), 'page');            // CHOOSE dbl-tap -> PAGE
+  assert.deepEqual(t.input('back', ctx()), { kind: 'exit' });       // PAGE dbl-tap -> exit
+});
+
+test('3 levels: the choose header shows the page and the highlighted side', () => {
+  const t = new Tiles();
+  t.input('select', ctx());
+  let f = t.render(ctx());
+  assert.match(f.left.split('\n')[0], /^> 1\/5 /);
+  assert.doesNotMatch(f.right.split('\n')[0], /^>/);
+  t.input('up', ctx());
+  f = t.render(ctx());
+  assert.doesNotMatch(f.left.split('\n')[0], /^>/);
+  assert.match(f.left.split('\n')[0], /^1\/5 /);
+  assert.match(f.right.split('\n')[0], /^> /);
+});
+
+test('3 levels: the highlighted side is remembered per page', () => {
+  const t = new Tiles();
+  t.input('select', ctx()); t.input('down', ctx()); // page 1: right
+  t.input('back', ctx());
+  t.input('down', ctx());                           // page 2
+  t.input('select', ctx());
+  assert.equal(t.render(ctx()).focus, 'choose-left'); // never highlighted there: left
+  t.input('back', ctx());
+  t.input('up', ctx());                             // back to page 1
+  t.input('select', ctx());
+  assert.equal(t.render(ctx()).focus, 'choose-right');
+  t.input('select', ctx()); t.input('back', ctx());  // via a tile
+  t.input('back', ctx()); t.input('down', ctx()); t.input('up', ctx());
+  t.input('select', ctx());
+  assert.equal(t.render(ctx()).focus, 'choose-right');
+});
+
+test('3 levels: no swipe is swallowed on a page or in choose; tiles scroll when there is more', () => {
+  const t = new Tiles();
+  for (const dir of ['up', 'down'] as const) {
+    const before = JSON.stringify(t.render(ctx()));
+    t.input(dir, ctx());
+    assert.notEqual(JSON.stringify(t.render(ctx())), before, `page ${dir}`);
+  }
+  t.input('select', ctx());
+  for (const dir of ['up', 'down'] as const) {
+    const before = JSON.stringify(t.render(ctx()));
+    t.input(dir, ctx());
+    assert.notEqual(JSON.stringify(t.render(ctx())), before, `choose ${dir}`);
+  }
+  t.input('down', ctx()); // highlight the right tile
+  t.input('select', ctx()); // the agent tile has 30 lines
+  const before = JSON.stringify(t.render(ctx()));
+  t.input('up', ctx());
+  assert.notEqual(JSON.stringify(t.render(ctx())), before, 'tile up');
+  t.input('down', ctx());
+  assert.equal(JSON.stringify(t.render(ctx())), before, 'tile down returns');
+});
+
+test('3 levels: the tile action list has no Switch to other tile, and back closes it first', () => {
+  const t = new Tiles();
+  t.input('select', ctx()); t.input('select', ctx()); t.input('select', ctx());
+  assert.doesNotMatch(t.render(ctx()).left, /Switch/);
+  t.input('back', ctx()); // closes the list, stays on the tile
+  assert.equal(t.render(ctx()).focus, 'left');
 });
