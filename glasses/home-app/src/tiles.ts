@@ -60,6 +60,8 @@ export interface TileContext {
   muse(): { question: string; reply: string } | null;
   reminders(): Reminder[] | null;
   url(endpoint: string): UrlTile | null;
+  /** Which hub Home talks to, for the clock tile ("via Mini 1"); down = no allowed hub answers. Optional. */
+  hub?: { name: string | null; down: boolean };
 }
 
 /** Something the tile asks for in the background so it can render: main.ts polls these for the visible page. */
