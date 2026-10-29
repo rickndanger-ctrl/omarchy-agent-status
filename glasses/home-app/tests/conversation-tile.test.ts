@@ -82,3 +82,16 @@ test('the tile says how many pieces were missed, and keeps the microphone warnin
   assert.ok(lines.join(' ').includes('Microphone may still be on'));
   for (const l of lines) assert.ok(l.length <= 27, l);
 });
+
+test('hub error and fallback text are shown as the hub wrote them, wrapped to the tile width (Codex fallback, not set up)', () => {
+  const error = "Claude isn't set up on this hub. Ask the owner to sign in to Claude there.";
+  const fallback = "(ChatGPT (Codex): Claude didn't answer)";
+  for (const phase of ['error', 'listening', 'done'] as const) {
+    const lines = w.body(ctx({ phase, error, fallback, hints: ['Ask about the budget'], summary: ['We agreed the plan.'] }), 27);
+    for (const line of lines) assert.ok(line.length <= 27, `${phase}: ${line}`);
+    const text = lines.join(' ').replace(/\s+/g, ' ');
+    assert.ok(phase === 'done' || text.includes("Claude isn't set up on this hub."), `${phase}: error text`);
+    if (phase !== 'error') assert.ok(text.includes("(ChatGPT (Codex): Claude didn't answer)"), `${phase}: fallback text`);
+  }
+  assert.match(w.body(ctx({ phase: 'error', error }), 27).join(' '), /Tap to start again/);
+});
