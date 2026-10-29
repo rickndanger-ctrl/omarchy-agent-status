@@ -52,8 +52,8 @@ export function makeHandle(host: FlowHost): (input: Input) => void | Promise<voi
     const job = action ? host.runModelAction(action) : undefined;
     if (action) host.paint();
     host.refreshTerminal();
-    // Microphone on/off must finish before the next press (a stop must not overtake its start); other actions go on in the background.
-    return action && (action.kind === 'startMic' || action.kind === 'stopMic' || action.kind === 'cancelMic') ? job : undefined;
+    // Microphone on/off and a Conversation start must finish before the next press (a stop must not overtake its start); other actions go on in the background.
+    return action && (action.kind === 'startMic' || action.kind === 'stopMic' || action.kind === 'cancelMic' || action.kind === 'startConversation') ? job : undefined;
   };
 }
 

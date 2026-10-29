@@ -2,7 +2,7 @@
 // runConversationEffect. Real model, Tiles, queue and session; fake hub, microphone and Muse.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { HomeModel } from '../src/model';
+import { HomeModel, type HomeData } from '../src/model';
 import type { Action, Input } from '../src/model';
 import { Tiles, normalizeLayout, type TileContext, type TileEffect } from '../src/tiles';
 import { makeHandle, runConversationEffect, startConversation } from '../src/inputflow';
@@ -343,5 +343,70 @@ test('a start slower than the queue cap: the 2nd tap (touch or remote) cancels i
     assert.equal(r.conv.view().phase, 'idle', source);
     assert.deepEqual(r.micLog, [], source); // the microphone never came on
     assert.ok(r.hubCalls.includes('stop:c1'), source); // the session the hub opened late was closed
+  }
+});
+
+// --- the Home row "Listen · Conversation" ---
+const homeData = (over: Partial<HomeData> = {}): HomeData => ({
+  now: NOW, paused: false, machines: [{ name: 'lap', online: true }, { name: 'm1', online: false }],
+  sessions: [{ agent: 'claude', name: 'Claude', session: 'a', state: 'working', page: 'p', at: NOW / 1000 - 120, workspace: '1', machine: 'lap', pane: 'x' }],
+  pending: [], messages: [{ id: 7, name: 'Mum', unread: true, when: 5, snippet: 'Call me', fromMe: false }], muse: true,
+  studio: { at: NOW / 1000, machines: [{ name: 'Laptop', line: 'step 5', busy: true }], feed: [] },
+  ...over,
+});
+
+test('Home worst case: every row present, Listen right after Muse, render <= 10 lines at every cursor position', () => {
+  const m = new HomeModel();
+  m.update(homeData({ pending: [{ id: 'p1', agent: 'claude', page: 'proj', tool: 'Bash', summary: 'git push', at: NOW, machine: 'lap' }] }));
+  while (m.screenKind !== 'home') m.input('back', NOW); // dismiss the pop-up
+  const seen = new Set<string>();
+  let lastHome = '';
+  for (let i = 0; i < 9; i++) {
+    const text = m.render(NOW);
+    lastHome = text;
+    assert.ok(text.split('\n').length <= 10, `${text.split('\n').length} lines at cursor ${i}`);
+    assert.match(text, /Offline: m1/); // the offline line is always there
+    assert.doesNotMatch(text, /^MENU$/m);
+    for (const row of ['Agents ·', 'Messages ·', 'Muse · latest reply', 'Listen · Conversation', 'Studio ·', '! Needs you', 'Tiles ·']) if (text.includes(row)) seen.add(row);
+    m.input('down', NOW);
+  }
+  assert.equal(seen.size, 7, [...seen].join(' | ')); // every row is reachable
+  assert.match(lastHome, /Offline: m1/);
+  const m2 = new HomeModel();
+  m2.update(homeData());
+  const rows = m2.render(NOW);
+  assert.match(rows, /Muse · latest reply\n[ >] Listen · Conversation\n[ >] Studio ·/);
+});
+
+test('selecting Home\'s Listen row starts Conversation through the queue, from touch and from the phone remote', async () => {
+  for (const source of ['touch', 'remote'] as const) {
+    const model = new HomeModel();
+    model.update(homeData());
+    const hubCalls: string[] = []; const micLog: string[] = [];
+    const conv = new ConversationSession({
+      hub: () => ({ start: async b => { hubCalls.push(`start:${b}`); return { id: 'c1', startedAt: 1 }; }, chunk: async () => {}, stop: async () => {}, get: async () => ({ state: 'idle' }) }),
+      mic: { on: async () => { micLog.push('on'); return true; }, off: async () => { micLog.push('off'); return true; } },
+      voiceMicBusy: () => false, sent: { has: () => false, add: () => {} }, diag: () => {}, changed: () => {}, sleep: async () => {},
+    });
+    const host = { conv, backend: () => 'local' as ConvBackend, dispatch: () => {}, flash: () => {}, paint: () => {} };
+    const tiles = new Tiles();
+    const actions: string[] = [];
+    const apply = makeHandle({
+      model, tiles, tileCtx: () => ({ data: null, now: NOW, timeZone: 'UTC', terminal: () => null, chat: () => null, muse: () => null, reminders: () => [], url: () => null }),
+      showingTiles: () => false, inOpenedScreen: () => false, leaveTiles: () => {}, backToTiles: () => {}, paint: () => {},
+      runTileEffect: () => {}, runModelAction: action => { actions.push(action.kind); if (action.kind === 'startConversation') return startConversation(host); },
+      saveLayout: () => {}, refreshTiles: () => {}, refreshTerminal: () => {}, now: () => NOW,
+    });
+    const log: string[] = [];
+    const queue = new InputQueue({ apply, menu: () => {}, generation: () => model.generation, foreground: () => true, screen: () => model.screenKind, settled: () => Promise.resolve('rendered' as const), log: (n, d) => log.push(`${n} ${d}`) });
+    // Agents, Messages, Muse, Listen: three downs, then select.
+    for (const i of ['down', 'down', 'down', 'select'] as const) queue.push(i, source);
+    await new Promise(r => setTimeout(r, 40));
+    assert.deepEqual(actions, ['startConversation'], source);
+    assert.deepEqual(hubCalls, ['start:local'], source);
+    assert.deepEqual(micLog, ['on'], source);
+    assert.equal(conv.view().phase, 'listening');
+    assert.ok(log.includes(`input select from ${source} on home`), source);
+    assert.equal(model.screenKind, 'home'); // listening starts; Home stays where it is
   }
 });

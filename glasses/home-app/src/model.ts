@@ -42,6 +42,7 @@ export type Action =
   | { kind: 'loadFolders'; machine: string }
   | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string }
   | { kind: 'openTiles' }
+  | { kind: 'startConversation' }
   | { kind: 'addReminder'; title: string };
 
 type Screen =
@@ -54,6 +55,7 @@ type Screen =
   | { kind: 'muse' }
   | { kind: 'studio' }
   | { kind: 'tiles' }
+  | { kind: 'conversation' } // only a Home row's target: selecting it starts listening, it is not a screen
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
   | { kind: 'reply'; key: string }
@@ -473,9 +475,8 @@ export class HomeModel {
       .map(state => `${counts.get(state)} ${STATE_WORD[state]}`)
       .join(' · ');
     const rows: Row[] = [title(clip(`AGENTS │ ${summary || 'none running'}`, WIDTH - 2)), title(RULE)];
-    // The menu always comes first; anything waiting is one row that opens its own page.
+    // The items come first (no MENU title: its line is needed for the Listen row); anything waiting is one row that opens its own page.
     const waiting = d.pending.length + this.notices.length;
-    rows.push(title('MENU'));
     const online = d.machines.filter(m => m.online).length;
     rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
     if (d.messages) {
@@ -486,6 +487,7 @@ export class HomeModel {
       rows.push({ text: clip(`Messages${unread ? ` · ${unread} new` : ''} · ${latest}`, WIDTH - 2), open: { kind: 'messages' } });
     }
     if (d.muse) rows.push({ text: 'Muse · latest reply', open: { kind: 'muse' } });
+    rows.push({ text: 'Listen · Conversation', open: { kind: 'conversation' } });
     if (d.studio) {
       const busy = d.studio.machines.filter(m => m.busy);
       rows.push({ text: clip(`Studio · ${busy.length ? `${busy.length} working · ${busy[0].name}: ${busy[0].line}` : 'standing by'}`, WIDTH - 2), open: { kind: 'studio' } });
@@ -774,6 +776,7 @@ export class HomeModel {
     const target = rows[this.cursor]?.open;
     if (!target) return null;
     if (target.kind === 'tiles') return { kind: 'openTiles' };
+    if (target.kind === 'conversation') return { kind: 'startConversation' };
     if (target.kind === 'agent') this.notices = this.notices.filter(n => n.key !== target.key);
     this.go(target);
     if (target.kind === 'chat') { this.chatLines = null; return { kind: 'loadChat', id: target.id }; }

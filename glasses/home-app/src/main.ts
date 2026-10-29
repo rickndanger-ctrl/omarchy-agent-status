@@ -655,6 +655,9 @@ async function run(action: Action): Promise<void> {
       if (r.ok) { justAdded = { title: action.title, at: Date.now() }; setTimeout(paint, 5100); }
       if (fromTiles) fromTiles = false;
       void refreshTiles();
+    } else if (action.kind === 'startConversation') {
+      const host = convHost();
+      if (!host) model.showFlash('Conversation is not available', Date.now()); else await startConversation(host);
     } else if (action.kind === 'openTiles') {
       enterTiles();
     } else if (action.kind === 'loadMuse') {
