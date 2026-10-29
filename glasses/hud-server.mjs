@@ -44,7 +44,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { homedir, hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { think, THINK_BACKENDS } from './think.mjs'
+import { helpers, think, THINK_BACKENDS } from './think.mjs'
 import { createConversations, CONVERSATION_MAX_BYTES } from './conversation.mjs'
 
 const run = promisify(execFile)
@@ -1273,11 +1273,21 @@ async function thinkAt(args) {
   if (where === 'self' || where === MACHINE) return think(args)
   const node = NODES.find(n => n.name === where)
   if (!node) throw new Error(`no node named ${where} in hub.json`)
+  // The node's own error line (say, "Claude isn't set up on this hub") is passed on as it is.
+  let res
   try {
-    return await call(`${node.url}/api/think`, node.token, { method: 'POST', body: JSON.stringify(args), timeout: (Number(args.timeoutSec) + 5) * 1000 })
+    res = await fetch(`${node.url}/api/think`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${node.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+      signal: AbortSignal.timeout((Number(args.timeoutSec) + 5) * 1000),
+    })
   } catch {
     throw new Error(`${where} did not answer`)
   }
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.error || `${where} did not answer`)
+  return body
 }
 // Diagnostics for the conversation: names and counts or timings only, never transcript text.
 const conversationDiag = (name, detail) => {
@@ -1600,7 +1610,8 @@ async function handle(req, res) {
       if (diagnostics.length > 1000) diagnostics.shift()
       return send(res, 200, { ok: true })
     }
-    if (req.method === 'GET' && p === '/api/diag') return send(res, 200, { diagnostics })
+    // helpers: which AI helpers this machine has (paths only, no tokens); the local model's reachability.
+    if (req.method === 'GET' && p === '/api/diag') return send(res, 200, { diagnostics, helpers: await helpers() })
     // The phone remote. A phone posts a button; the glasses' app holds one long-poll open and gets it at once.
     if (req.method === 'POST' && p === '/api/input') {
       const b = await readBody(req).catch(() => ({}))

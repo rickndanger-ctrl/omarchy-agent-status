@@ -42,7 +42,9 @@ FAKE
 chmod +x "$work/bin/claude" "$work/bin/codex"
 
 python3 - "$here" "$work" <<'PY'
-import http.client, http.server, json, os, socket, subprocess, sys, threading, time, stat
+import http.client, http.server, json, os, shutil, socket, subprocess, sys, threading, time, stat
+
+NODE = shutil.which("node")  # the hubs are started by full path, so a test PATH can leave node's folder out
 
 HERE, WORK = sys.argv[1], sys.argv[2]
 HOME = os.environ["HOME"]
@@ -50,6 +52,10 @@ HUB_PORT, HUB_B, HUB_C, HUB_D, NODE_PORT, FAKE_PORT, DEAD_PORT = (
     int(os.environ.get(k, v)) for k, v in [
         ("CONV_HUB_PORT", 5401), ("CONV_HUB_B_PORT", 5402), ("CONV_HUB_C_PORT", 5403),
         ("CONV_HUB_D_PORT", 5404), ("CONV_NODE_PORT", 5405), ("CONV_FAKE_PORT", 5406), ("CONV_DEAD_PORT", 5407)])
+HUB_B2, HUB_E, HUB_F1, HUB_F2, HUB_F3, HUB_F4 = (
+    int(os.environ.get(k, v)) for k, v in [
+        ("CONV_HUB_B2_PORT", 5409), ("CONV_HUB_E_PORT", 5408), ("CONV_HUB_F1_PORT", 5410),
+        ("CONV_HUB_F2_PORT", 5411), ("CONV_HUB_F3_PORT", 5412), ("CONV_HUB_F4_PORT", 5413)])
 TOKEN, NODE_TOKEN = "conversation-test-token", "conversation-node-token"
 HUB_TOKEN_FILE, NODE_TOKEN_FILE = os.path.join(WORK, "hub.token"), os.path.join(WORK, "node.token")
 open(HUB_TOKEN_FILE, "w").write(TOKEN + "\n")
@@ -125,9 +131,11 @@ def start(port, mode, env_extra, hub_json=None, token_file=HUB_TOKEN_FILE, tag="
                HUD_TRANSCRIBE_URL=WHISPER, GROQ_API_KEY="test-groq-key",
                PATH=os.path.join(WORK, "bin") + ":" + os.environ["PATH"])
     env.pop("HUD_THINK_FAKE", None)
+    for name in ("HUD_CLAUDE_BIN", "HUD_CODEX_BIN", "HUD_LOCAL_LLM_URL"):  # a test sets these itself, or not at all
+        env.pop(name, None)
     env.update(env_extra)
     log = open(os.path.join(WORK, f"{tag}-{port}.log"), "w")
-    proc = subprocess.Popen(["node", os.path.join(HERE, "hud-server.mjs"), "--mode", mode, "--port", str(port),
+    proc = subprocess.Popen([NODE, os.path.join(HERE, "hud-server.mjs"), "--mode", mode, "--port", str(port),
                              "--machine", "Conv Test"], env=env, stdout=log, stderr=subprocess.STDOUT)
     procs.append(proc)
     for _ in range(100):
@@ -291,24 +299,29 @@ check("the diagnostics hold no transcript text", "part " not in details and "bud
 stop_all()
 
 # ================================================================================================================
-print("Scenario B: the real runners; Claude fails and the local model takes over")
-b = start(HUB_B, "hub", {"HUD_LOCAL_LLM_URL": LOCAL}, {"conversation": {"local": "self", "claude": "self", "codex": "self"}})
+print("Scenario B: the real runners; Claude fails and the local model takes over (Codex is not set up here)")
+b = start(HUB_B, "hub", {"HUD_LOCAL_LLM_URL": LOCAL, "HUD_CODEX_BIN": "/nonexistent/codex"}, {"conversation": {"local": "self", "claude": "self", "codex": "self"}})
 code, body = call(HUB_B, "POST", "/api/conversation/start", {"backend": "claude"})
 cid = body.get("id")
 chunk(HUB_B, cid, 0, 2000)
 check("Claude fails: the hints come from the local model", wait_for(lambda: "LOCAL hint one" in view(HUB_B).get("hints", [])) is not None)
-check("and the tile is told it was the fallback", view(HUB_B).get("fallback") == "(local model: Claude didn't answer)")
+check("and the tile says who answered and why", view(HUB_B).get("fallback") == "(local model answered: Claude didn't answer)")
 call(HUB_B, "POST", "/api/conversation/stop", {"id": cid})
 check("the summary comes from the local model too", wait_for(lambda: view(HUB_B).get("state") == "done") is not None and view(HUB_B).get("summary") == ["LOCAL talk summary."] and view(HUB_B).get("actions") == ["Local action"])
 code, body = call(HUB_B, "POST", "/api/think", {"backend": "claude", "system": "x", "prompt": "SLEEP", "timeoutSec": 1})
-check("a Claude that does not answer in time is 502 with the time", code == 502 and body.get("error") == "Claude did not answer in 1 s")
-code, body = call(HUB_B, "POST", "/api/conversation/start", {"backend": "codex"})
+check("a Claude that does not answer in time is 502 with the time", code == 502 and body.get("error") == "Claude didn't answer in 1 s")
+stop_all()
+
+# ================================================================================================================
+print("Scenario B2: codex runs read-only and answers, with no fallback")
+b2 = start(HUB_B2, "hub", {"HUD_LOCAL_LLM_URL": LOCAL}, {"conversation": {"local": "self", "claude": "self", "codex": "self"}})
+code, body = call(HUB_B2, "POST", "/api/conversation/start", {"backend": "codex"})
 cid = body.get("id")
-chunk(HUB_B, cid, 0, 2000)
-check("codex runs read-only and answers with its own hints", wait_for(lambda: "CODEX hint one" in view(HUB_B).get("hints", [])) is not None)
-check("codex has no fallback", "fallback" not in view(HUB_B))
-call(HUB_B, "POST", "/api/conversation/stop", {"id": cid})
-check("codex's summary is parsed", wait_for(lambda: view(HUB_B).get("state") == "done") is not None and view(HUB_B).get("summary") == ["CODEX talk summary."])
+chunk(HUB_B2, cid, 0, 2000)
+check("codex runs read-only and answers with its own hints", wait_for(lambda: "CODEX hint one" in view(HUB_B2).get("hints", [])) is not None)
+check("codex has no fallback", "fallback" not in view(HUB_B2))
+call(HUB_B2, "POST", "/api/conversation/stop", {"id": cid})
+check("codex's summary is parsed", wait_for(lambda: view(HUB_B2).get("state") == "done") is not None and view(HUB_B2).get("summary") == ["CODEX talk summary."])
 stop_all()
 
 # ================================================================================================================
@@ -317,7 +330,7 @@ d = start(HUB_D, "hub", {"HUD_LOCAL_LLM_URL": f"http://127.0.0.1:{DEAD_PORT}/v1"
 code, body = call(HUB_D, "POST", "/api/conversation/start", {"backend": "local"})
 cid = body.get("id")
 chunk(HUB_D, cid, 0, 2000)
-check("a local model that is not running is shown as an error", wait_for(lambda: view(HUB_D).get("error")) is not None and view(HUB_D).get("error") == f"The local model is not running at http://127.0.0.1:{DEAD_PORT}/v1")
+check("a local model that is not running is shown as an error", wait_for(lambda: view(HUB_D).get("error")) is not None and view(HUB_D).get("error") == "The local model isn't running on this hub")
 call(HUB_D, "POST", "/api/conversation/stop", {"id": cid})
 check("the session still finishes", wait_for(lambda: view(HUB_D).get("state") in ("done", "error")) is not None)
 stop_all()
@@ -340,7 +353,6 @@ stop_all()
 
 # ================================================================================================================
 print("Scenario E: a failed hint shows as an error; the next good hint and the summary clear it")
-HUB_E = int(os.environ.get("CONV_HUB_E_PORT", 5408))
 f = start(HUB_E, "hub", {"HUD_LOCAL_LLM_URL": FLAKY_LOCAL}, {"conversation": {"local": "self"}})
 code, body = call(HUB_E, "POST", "/api/conversation/start", {"backend": "local"})
 cid = body.get("id")
@@ -350,6 +362,83 @@ chunk(HUB_E, cid, 1, 2000)  # the next hint succeeds
 check("a good hint clears the error", wait_for(lambda: view(HUB_E).get("hints") and not view(HUB_E).get("error")) is not None)
 call(HUB_E, "POST", "/api/conversation/stop", {"id": cid})
 check("a good summary also leaves no error", wait_for(lambda: view(HUB_E).get("state") == "done") is not None and "error" not in view(HUB_E))
+stop_all()
+
+# ================================================================================================================
+print("Scenario F: helpers on the hub: found outside PATH, missing, overridden, and the fallback names who answered")
+# A LaunchAgent's PATH: node's folder and the system folders only. The helper lives in the temp HOME's ~/.local/bin.
+BARE_PATH = ":".join(p for p in [os.path.dirname(NODE), "/usr/bin", "/bin"] if p)
+check("the test PATH has no claude or codex in it", shutil.which("claude", path=BARE_PATH) is None and shutil.which("codex", path=BARE_PATH) is None)
+LOCAL_BIN = os.path.join(HOME, ".local", "bin")
+os.makedirs(LOCAL_BIN, exist_ok=True)
+with open(os.path.join(LOCAL_BIN, "claude"), "w") as f:
+    f.write("#!/usr/bin/env bash\n"
+            "input=$(cat)\n"
+            "case \"$input\" in *Summarize*) printf 'SUMMARY:\\nHOME talk summary.\\nACTIONS:\\n- Home action\\n' ;;\n"
+            "  *) printf 'HOME hint one\\nHOME hint two\\n' ;; esac\n")
+os.chmod(os.path.join(LOCAL_BIN, "claude"), 0o755)
+DEAD_LOCAL = f"http://127.0.0.1:{DEAD_PORT}/v1"
+NODE_CONF = {"conversation": {"local": "self", "claude": "self", "codex": "self"}}
+
+# F1: claude is only in ~/.local/bin, which PATH lacks. It is found, logged, and answers.
+f1 = start(HUB_F1, "hub", {"PATH": BARE_PATH, "HUD_CODEX_BIN": "/nonexistent/codex", "HUD_LOCAL_LLM_URL": DEAD_LOCAL}, NODE_CONF)
+code, body = call(HUB_F1, "GET", "/api/diag")
+h = body.get("helpers", {})
+check("claude is found in ~/.local/bin although PATH lacks it", h.get("claude", {}).get("path") == os.path.join(LOCAL_BIN, "claude"))
+check("codex and the local model are not set up here", h.get("codex", {}).get("path") is None and h.get("local", {}).get("reachable") is False)
+log1 = open(os.path.join(WORK, f"hub-{HUB_F1}.log")).read()
+check("the hub logs the path it found", f"conversation helpers: claude {os.path.join(LOCAL_BIN, 'claude')}" in log1)
+code, body = call(HUB_F1, "POST", "/api/conversation/start", {"backend": "claude"})
+cid = body.get("id")
+chunk(HUB_F1, cid, 0, 2000)
+check("the claude from ~/.local/bin gives the hints", wait_for(lambda: "HOME hint one" in view(HUB_F1).get("hints", [])) is not None)
+check("no fallback line when the chosen helper answers", "fallback" not in view(HUB_F1))
+call(HUB_F1, "POST", "/api/conversation/stop", {"id": cid})
+check("and the summary", wait_for(lambda: view(HUB_F1).get("state") == "done") is not None and view(HUB_F1).get("summary") == ["HOME talk summary."])
+stop_all()
+
+# F2: nothing is set up and the local model is down: one plain error line, and the diagnostics say so.
+f2 = start(HUB_F2, "hub", {"HUD_CLAUDE_BIN": "/nonexistent/claude", "HUD_CODEX_BIN": "/nonexistent/codex", "HUD_LOCAL_LLM_URL": DEAD_LOCAL}, NODE_CONF)
+code, body = call(HUB_F2, "POST", "/api/conversation/start", {"backend": "claude"})
+cid = body.get("id")
+chunk(HUB_F2, cid, 0, 2000)
+check("with no helper set up, the error is the chosen one's plain line", wait_for(lambda: view(HUB_F2).get("error")) is not None and view(HUB_F2).get("error") == "Claude isn't set up on this hub")
+check("and there is no fallback line", "fallback" not in view(HUB_F2))
+call(HUB_F2, "POST", "/api/conversation/stop", {"id": cid})
+code, body = call(HUB_F2, "GET", "/api/diag")
+h = body.get("helpers", {})
+check("the diagnostics show no claude, no codex, and the local model unreachable", h.get("claude", {}).get("path") is None and h.get("codex", {}).get("path") is None and h.get("local", {}).get("reachable") is False)
+check("the diagnostics hold no token", TOKEN not in json.dumps(body) and NODE_TOKEN not in json.dumps(body))
+stop_all()
+
+# F3: the overrides win, and when Claude fails, Codex answers and the tile says so.
+f3 = start(HUB_F3, "hub", {"HUD_CLAUDE_BIN": os.path.join(WORK, "bin", "claude"), "HUD_CODEX_BIN": os.path.join(WORK, "bin", "codex"), "HUD_LOCAL_LLM_URL": DEAD_LOCAL}, NODE_CONF)
+code, body = call(HUB_F3, "GET", "/api/diag")
+h = body.get("helpers", {})
+check("the overrides are the helpers' paths", h.get("claude", {}).get("path") == os.path.join(WORK, "bin", "claude") and h.get("codex", {}).get("path") == os.path.join(WORK, "bin", "codex"))
+code, body = call(HUB_F3, "POST", "/api/conversation/start", {"backend": "claude"})
+cid = body.get("id")
+chunk(HUB_F3, cid, 0, 2000)
+check("Claude fails and Codex gives the hints", wait_for(lambda: "CODEX hint one" in view(HUB_F3).get("hints", [])) is not None)
+check("the fallback line names Codex and the reason", view(HUB_F3).get("fallback") == "(Codex answered: Claude didn't answer)")
+call(HUB_F3, "POST", "/api/conversation/stop", {"id": cid})
+check("Codex also gives the summary", wait_for(lambda: view(HUB_F3).get("state") == "done") is not None and view(HUB_F3).get("summary") == ["CODEX talk summary."])
+stop_all()
+
+# F4: both CLIs missing: the local model takes over for Claude, and for Codex.
+f4 = start(HUB_F4, "hub", {"HUD_CLAUDE_BIN": "/nonexistent/claude", "HUD_CODEX_BIN": "/nonexistent/codex", "HUD_LOCAL_LLM_URL": LOCAL}, NODE_CONF)
+code, body = call(HUB_F4, "POST", "/api/conversation/start", {"backend": "claude"})
+cid = body.get("id")
+chunk(HUB_F4, cid, 0, 2000)
+check("missing Claude and Codex: the local model answers", wait_for(lambda: "LOCAL hint one" in view(HUB_F4).get("hints", [])) is not None)
+check("the fallback line says the local model answered, and why", view(HUB_F4).get("fallback") == "(local model answered: Claude isn't set up on this hub)")
+call(HUB_F4, "POST", "/api/conversation/stop", {"id": cid})
+wait_for(lambda: view(HUB_F4).get("state") == "done")
+code, body = call(HUB_F4, "POST", "/api/conversation/start", {"backend": "codex"})
+cid = body.get("id")
+chunk(HUB_F4, cid, 0, 2000)
+check("a Codex session with no Codex also falls back to the local model", wait_for(lambda: view(HUB_F4).get("fallback") == "(local model answered: Codex isn't set up on this hub)") is not None)
+call(HUB_F4, "POST", "/api/conversation/stop", {"id": cid})
 stop_all()
 
 print()
