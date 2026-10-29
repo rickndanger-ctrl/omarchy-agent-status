@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests the phone remote's hub routes (docs/REMOTE-INPUT.md): POST /api/input and the glasses' long-poll
 # GET /api/input/wait. A fake glasses app holds the long-poll and a fake phone posts; the timing, the 429,
-# the 400 and 401 answers, the 3 s "closed recently" rule, and the 2 s no-replay rule are all checked.
+# the 400 and 401 answers, the 3 s "closed recently" rule, the 2 s no-replay rule, and a hub restart in
+# the middle (the glasses keep their old seq) are all checked.
 # The hub runs with HOME in a temp folder, with a 1.5 s wait timeout (HUD_INPUT_WAIT_MS), so your real
 # ~/.config/agent-glasses is never read or written, and no real hub or Muse is contacted.
 #   bash glasses/test-hub-input.sh          (needs node and python3)
@@ -27,12 +28,24 @@ if grep -qi 'muse' "$work/hub.json"; then
 fi
 echo "  ok    the test hub config does not mention muse"
 
-HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hub.json" HUD_INPUT_WAIT_MS=1500 \
-  node "$here/hud-server.mjs" --mode hub --port "$HUB_PORT" --machine "Input Test" >"$work/hub.log" 2>&1 & pids+=($!)
-for _ in $(seq 50); do curl -s -o /dev/null "$HUB/api/health" && break; sleep 0.2; done
+# start_hub / restart_hub: the hub runs in the background; a restart stops it and starts it again, so its inputs
+# are numbered from 0 again, as a real restart does.
+start_hub() {
+  HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hub.json" HUD_INPUT_WAIT_MS=1500 \
+    node "$here/hud-server.mjs" --mode hub --port "$HUB_PORT" --machine "Input Test" >>"$work/hub.log" 2>&1 &
+  HUB_PID=$!
+  pids+=($HUB_PID)
+  for _ in $(seq 50); do curl -s -o /dev/null "$HUB/api/health" && break; sleep 0.2; done
+}
+restart_hub() {
+  kill "$HUB_PID" 2>/dev/null
+  for _ in $(seq 50); do curl -s -o /dev/null "$HUB/api/health" || break; sleep 0.1; done
+  start_hub
+}
+start_hub
 
-# The fake glasses app and the fake phone, in Python: timings are measured where the requests are made.
-python3 - "$HUB" "$TOKEN" <<'PY'
+# The fake glasses app and the fake phone live in phone.py, so the timings are measured where the requests are made.
+cat > "$work/phone.py" <<'PY'
 import http.client, json, sys, threading, time
 from urllib.parse import urlparse
 
@@ -50,6 +63,9 @@ def bad(label):
     global fail_count
     fail_count += 1
     print(f"  FAIL  {label}", flush=True)
+
+def check(label, cond):
+    (ok if cond else bad)(label)
 
 def call(method, path, body=None, token=TOKEN, timeout=10):
     conn = http.client.HTTPConnection(host.hostname, host.port, timeout=timeout)
@@ -73,7 +89,7 @@ def post(value, token=TOKEN):
     return call("POST", "/api/input", {"input": value}, token=token)
 
 def wait_in_background(after, out, token=TOKEN):
-    # The fake glasses app's long-poll: records what came back and when.
+    # The fake glasses app's long-poll: records what came back, and when.
     def run():
         started = time.monotonic()
         code, body = call("GET", f"/api/input/wait?after={after}", token=token, timeout=20)
@@ -82,8 +98,15 @@ def wait_in_background(after, out, token=TOKEN):
     thread.start()
     return thread
 
-def check(label, cond):
-    (ok if cond else bad)(label)
+def summary():
+    print(f"\n{pass_count} passed, {fail_count} failed")
+    return fail_count == 0
+PY
+
+cat > "$work/main.py" <<'PY'
+import sys, time
+sys.path.insert(0, sys.argv[0].rsplit("/", 1)[0])
+from phone import *
 
 print("Phone remote: the hub's routes")
 
@@ -109,7 +132,6 @@ waiter = wait_in_background(0, first)
 time.sleep(0.3)  # the wait is open before the phone presses
 sent_at = time.monotonic()
 code, body = post("select")
-posted = time.monotonic()
 waiter.join(timeout=10)
 latency = first["at"] - sent_at
 check("a listening glasses app gets the input: delivered true, with a seq", code == 200 and body.get("delivered") is True and isinstance(body.get("seq"), int))
@@ -149,10 +171,60 @@ details = [d["detail"] for d in body.get("diagnostics", []) if d["name"] == "rem
 check("remote.input is recorded for each post", "remote.input" in names and any("delivered" in d for d in details))
 check("remote.limited is recorded when a post is rate-limited", "remote.limited" in names)
 
-print()
-print(f"{pass_count} passed, {fail_count} failed")
-sys.exit(0 if fail_count == 0 else 1)
+sys.exit(0 if summary() else 1)
 PY
-status=$?
+
+cat > "$work/restart-a.py" <<'PY'
+import sys, time
+sys.path.insert(0, sys.argv[0].rsplit("/", 1)[0])
+from phone import *
+
+print("Restart: the glasses hold an old seq; the hub numbers its presses again from 0")
+seq = None
+for _ in range(3):
+    got = {}
+    waiter = wait_in_background(0, got)
+    time.sleep(0.3)
+    code, body = post("up")
+    waiter.join(timeout=10)
+    seq = body.get("seq")
+check("three presses before the restart, with seq numbers", isinstance(seq, int) and seq >= 3)
+open(sys.argv[3], "w").write(str(seq))
+sys.exit(0 if summary() else 1)
+PY
+
+cat > "$work/restart-b.py" <<'PY'
+import sys, time
+sys.path.insert(0, sys.argv[0].rsplit("/", 1)[0])
+from phone import *
+
+old = int(open(sys.argv[3]).read())
+got = {}
+waiter = wait_in_background(old, got)  # the glasses still hold the pre-restart seq
+time.sleep(0.3)
+sent = time.monotonic()
+code, body = post("select")
+waiter.join(timeout=10)
+latency = got.get("at", 0) - sent
+inputs = [i["input"] for i in got.get("body", {}).get("inputs", [])]
+check("the restarted hub accepts the press, its numbers begun again", code == 200 and body.get("delivered") is True and body.get("seq", old) < old)
+check(f"the old wait (after={old}) gets the press after the restart", inputs == ["select"])
+check(f"and within 300 ms ({latency * 1000:.0f} ms)", 0 <= latency < 0.3)
+sys.exit(0 if summary() else 1)
+PY
+
 echo
-[ "$status" = 0 ]
+python3 "$work/main.py" "$HUB" "$TOKEN"
+status=$?
+
+echo
+python3 "$work/restart-a.py" "$HUB" "$TOKEN" "$work/seq.txt"
+status_a=$?
+
+restart_hub
+echo
+python3 "$work/restart-b.py" "$HUB" "$TOKEN" "$work/seq.txt"
+status_b=$?
+
+echo
+[ "$status" = 0 ] && [ "$status_a" = 0 ] && [ "$status_b" = 0 ]

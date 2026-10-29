@@ -1358,6 +1358,11 @@ function freshInputs(after) {
   return inputsKept.filter(i => i.seq > after)
 }
 const glassesListening = () => openWaits > 0 || Date.now() - lastWaitEnd < INPUT_LISTEN_MS
+// One diagnostic for the phone remote: a name and a short detail, capped like the others.
+function remoteDiag(name, detail) {
+  diagnostics.push({ at: new Date().toISOString(), name, detail })
+  if (diagnostics.length > 1000) diagnostics.shift()
+}
 // True when this input would go over the shared limit; otherwise it is counted.
 function overInputRate() {
   const now = Date.now()
@@ -1537,25 +1542,25 @@ async function handle(req, res) {
       const input = String(b?.input ?? '')
       if (!INPUTS.has(input)) return send(res, 400, { ok: false, error: 'input must be up, down, select or back' })
       if (overInputRate()) {
-        diagnostics.push({ at: new Date().toISOString(), name: 'remote.limited', detail: input })
-        if (diagnostics.length > 1000) diagnostics.shift()
+        remoteDiag('remote.limited', input)
         return send(res, 429, { ok: false, error: 'too fast' })
       }
       if (!glassesListening()) {
-        diagnostics.push({ at: new Date().toISOString(), name: 'remote.input', detail: `${input} not delivered` })
+        remoteDiag('remote.input', `${input} not delivered`)
         return send(res, 200, { ok: true, delivered: false, reason: 'no glasses listening on this hub' })
       }
       const seq = ++inputSeq
       inputsKept.push({ seq, input, at: Date.now() })
       for (const w of [...inputWaiters]) if (w.after < seq) w.finish(freshInputs(w.after))
-      diagnostics.push({ at: new Date().toISOString(), name: 'remote.input', detail: `${input} delivered` })
-      if (diagnostics.length > 1000) diagnostics.shift()
+      remoteDiag('remote.input', `${input} delivered`)
       return send(res, 200, { ok: true, delivered: true, seq })
     }
     if (req.method === 'GET' && p === '/api/input/wait') {
       // `after` missing or 0 means "from now": only inputs that arrive after this wait opened are returned.
+      // An `after` above the latest seq belongs to a hub that has since restarted (its numbers began again at 0),
+      // so it also means "from now"; otherwise the glasses would wait until the new numbers passed the old one.
       const given = Number(url.searchParams.get('after')) || 0
-      const after = given > 0 ? given : inputSeq
+      const after = given > 0 && given <= inputSeq ? given : inputSeq
       const ready = freshInputs(after)
       if (ready.length) return send(res, 200, { seq: ready[ready.length - 1].seq, inputs: ready.map(({ seq, input, at }) => ({ seq, input, at })) })
       openWaits++
