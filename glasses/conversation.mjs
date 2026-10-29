@@ -11,7 +11,9 @@ import path from 'node:path'
 import { THINK_BACKENDS } from './think.mjs'
 
 export const CONVERSATION_MAX_BYTES = 1024 * 1024
-const LIMIT_MS = 30 * 60_000 // listening stops by itself after 30 minutes
+// The hub's guard: the session stops by itself at 31 minutes, and a chunk after that is 410. The app stops at 30
+// minutes and sends its last chunk, which must still count.
+const LIMIT_MS = 31 * 60_000
 const GAP_MS = 8_000 // how long the queue waits for a missing chunk before going on without it
 const GAP_POLL_MS = 250
 const HINT_MS = 20_000
@@ -65,6 +67,7 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
     ...(s.error ? { error: s.error } : {}),
     chunks: s.chunks,
     words: s.words,
+    skipped: s.skipped,
   })
 
   // One request on the session's backend. Claude failing retries that one request on the local model, and marks it.
@@ -115,6 +118,7 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
     try {
       text = String(await transcribe(pcm) ?? '').trim()
     } catch {
+      s.skipped += 1
       diag('conv.error', `chunk ${seq}: transcription failed`)
       return
     }
@@ -193,11 +197,11 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
     s.skipGaps = true
     await drain(s)
     try {
-      if (!s.transcript.length) {
-        s.summary = []
-        s.actions = []
-        s.state = 'done'
-        diag('conv.stop', `0 chunks, ${reason}`)
+      if (s.words === 0) {
+        // Nothing at all could be transcribed: an error, not an empty summary.
+        s.state = 'error'
+        s.error = 'Nothing could be transcribed'
+        diag('conv.error', `no words, ${s.chunks} chunks, ${s.skipped} skipped, ${reason}`)
         writeRecord(s)
         return
       }
@@ -242,7 +246,8 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
         transcript: [],
         pending: new Map(),
         seen: new Set(),
-        nextSeq: 1,
+        nextSeq: 0, // seq counts from 0, in send order
+        skipped: 0,
         gapMs: 0,
         skipGaps: false,
         pump: null,
@@ -257,8 +262,10 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
     chunk(id, seq, pcm) {
       const s = current
       if (!s || s.id !== id || s.state !== 'listening') return { status: 404, body: { error: 'unknown or finished conversation' } }
-      if (now() - s.startedAt > (limitMs * 31) / 30) return { status: 410, body: { error: 'over 31 minutes' } }
-      if (!Number.isInteger(seq) || seq < 1) return { status: 400, body: { error: 'seq must be a number from 1' } }
+      if (now() - s.startedAt > limitMs) return { status: 410, body: { error: 'over 31 minutes' } }
+      if (!Number.isInteger(seq) || seq < 0) return { status: 400, body: { error: 'seq must be a number from 0' } }
+      // A seq below the next expected one is a late chunk (its gap was given up) or a repeat: dropped, not heard.
+      if (seq < s.nextSeq) return { status: 200, body: { ok: true } }
       if (!s.seen.has(seq)) {
         s.seen.add(seq)
         s.pending.set(seq, pcm)

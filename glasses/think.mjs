@@ -86,7 +86,8 @@ async function viaClaude({ system, prompt, timeoutMs }) {
 async function viaCodex({ system, prompt, timeoutMs }) {
   const dir = mkdtempSync(path.join(tmpdir(), 'agent-glasses-think-'))
   try {
-    const out = await runCli('codex', ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--ephemeral', '-C', dir, '-'], {
+    // --ignore-user-config: checked on codex-cli 0.162.0, a real "echo hi | codex exec" still answers with it.
+    const out = await runCli('codex', ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config', '-C', dir, '-'], {
       input: `${system}\n\n${prompt}`, cwd: dir, timeoutMs, label: 'Codex',
     })
     return out.trim()
