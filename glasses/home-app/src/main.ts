@@ -91,7 +91,7 @@ const glasses = new Glasses({
 
 $('app').innerHTML = `
 <main>
-  <header><b>HOME</b><span>G2 · ${BUILD}</span></header>
+  <header><b>G2 OMAC</b><span>G2 · ${BUILD}</span></header>
   <section id="pairbox" class="pairbox ${token ? 'hidden' : ''}">
     <p><b>Pair G2 OMAC</b> with your computers. Enter the 6-digit code from Claude.</p>
     <input id="code-top" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456">
