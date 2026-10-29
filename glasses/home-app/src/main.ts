@@ -93,7 +93,7 @@ $('app').innerHTML = `
 <main>
   <header><b>HOME</b><span>G2 · ${BUILD}</span></header>
   <section id="pairbox" class="pairbox ${token ? 'hidden' : ''}">
-    <p><b>Pair Home</b> with your computers. Enter the 6-digit code from Claude.</p>
+    <p><b>Pair G2 OMAC</b> with your computers. Enter the 6-digit code from Claude.</p>
     <input id="code-top" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456">
     <button id="pair-top">Pair</button>
   </section>
@@ -152,7 +152,7 @@ $('pair').onclick = async () => {
         store.set('home.token', token);
         remote.sync();
         $<HTMLInputElement>('token').value = token;
-        status = 'Paired. Home is connected.';
+        status = 'Paired. G2 OMAC is connected.';
         $('pairbox').classList.add('hidden');
         void poll().then(() => shareLocation());
         paint();
@@ -446,7 +446,7 @@ async function autoPair(): Promise<boolean> {
 
 let polling = false;
 async function poll(): Promise<void> {
-  if (!token && !(await autoPair())) { model.setError('Pair Home on the phone screen'); paint(); return; }
+  if (!token && !(await autoPair())) { model.setError('Pair G2 OMAC on the phone screen'); paint(); return; }
   if (polling) return;
   polling = true;
   void maybeReturnToPrimary();
