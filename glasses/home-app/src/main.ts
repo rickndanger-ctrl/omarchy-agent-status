@@ -7,6 +7,7 @@ import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
 import { InputQueue, type InputSource } from './inputqueue';
 import { makeHandle, TOP_SCREENS } from './inputflow';
+import { Latest } from './latest';
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
@@ -276,30 +277,36 @@ async function refreshTiles(): Promise<void> {
   if (!showingTiles() || tilesBusy) return;
   tilesBusy = true;
   const page = tiles.render(tileCtx()).page;
+  // What the tiles fetched is shown through the input queue (a press made before it acts on what the owner saw).
+  const writes: (() => void)[] = [];
   try {
     await Promise.all(tiles.needs(tileCtx()).map(async need => {
       try {
         if (need.kind === 'terminal') {
           const query = new URLSearchParams({ machine: need.machine, pane: need.pane, ...(need.window ? { window: need.window } : {}), ...(need.appThread ? { appThread: need.appThread } : {}), stamps: '1' });
-          tileData.terminals.set(need.key, (await api<{ lines: string[] }>(`terminal?${query}`)).lines);
+          const lines = (await api<{ lines: string[] }>(`terminal?${query}`)).lines;
+          writes.push(() => tileData.terminals.set(need.key, lines));
         } else if (need.kind === 'chat') {
           const r = await api<{ messages: ChatMessage[] }>(`messages?chat=${need.id}`);
           const shown = recentMessages(r.messages, Date.now(), model.hideOldTexts);
-          tileData.chats.set(need.id, [...(shown.hidden ? ['(older messages hidden)'] : []), ...[...shown.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`)]);
+          const chatLines = [...(shown.hidden ? ['(older messages hidden)'] : []), ...[...shown.messages].reverse().map(m => `${m.fromMe ? 'Me' : m.from} (${age(m.when, Date.now())}): ${m.text}`)];
+          writes.push(() => tileData.chats.set(need.id, chatLines));
         } else if (need.kind === 'muse') {
           const stamp = museTile.pageFetchStart(page, homeLoaded);
           if (stamp === null) return; // already read for this page view, or an ask is in flight (its reply is the newest word)
           try { museTile.fetchDone(stamp, await api<{ question: string; reply: string }>('muse')); } catch { museTile.fetchFailed(stamp); }
         } else if (need.kind === 'reminders') {
-          tileData.reminders = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
+          const list = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
+          writes.push(() => { tileData.reminders = list; });
         } else if (need.kind === 'url') {
-          tileData.urls.set(need.endpoint, await api<UrlTile>(`tile?url=${encodeURIComponent(need.endpoint)}`));
+          const tile = await api<UrlTile>(`tile?url=${encodeURIComponent(need.endpoint)}`);
+          writes.push(() => tileData.urls.set(need.endpoint, tile));
         }
       } catch { /* keep what the tile showed; it says Loading… if it never had anything */ }
     }));
   } finally {
     tilesBusy = false;
-    paint();
+    inputQueue.pushExternal('tiles', () => { for (const write of writes) write(); paint(); });
   }
 }
 
@@ -452,18 +459,18 @@ async function poll(): Promise<void> {
   polling = true;
   void maybeReturnToPrimary();
   try {
-    model.update(await api<HomeData>('home'));
+    const fresh = await api<HomeData>('home');
     homeLoaded = true;
-    buildEditor();
+    inputQueue.pushExternal('poll', () => { model.update(fresh); buildEditor(); paint(); });
     // No weather yet? Try sharing the location again (at most every 2 minutes).
-    if (!model.data?.weather && Date.now() - lastLocationTry > 120_000) void shareLocation();
+    if (!fresh.weather && Date.now() - lastLocationTry > 120_000) void shareLocation();
   } catch (error) {
     // Token no longer accepted (changed on the hubs)? Re-pair quietly, then try again next poll.
     if (error instanceof HttpError && error.message === 'wrong token') void autoPair();
-    model.setError(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    inputQueue.pushExternal('poll', () => { model.setError(message); paint(); });
   } finally {
     polling = false;
-    paint();
   }
 }
 
@@ -474,16 +481,18 @@ async function refreshTerminal(): Promise<void> {
   if (!target || terminalBusy) return;
   terminalBusy = true;
   const query = new URLSearchParams({ machine: target.machine, pane: target.pane, ...(target.window ? { window: target.window } : {}), ...(target.appThread ? { appThread: target.appThread } : {}), stamps: '1' });
+  let lines: string[] | null = null;
   try {
-    model.setTerminal(target.key, (await api<{ lines: string[] }>(`terminal?${query}`)).lines);
-  } catch {
-    model.setTerminal(target.key, null);
-  } finally {
+    lines = (await api<{ lines: string[] }>(`terminal?${query}`)).lines;
+  } catch { /* shown as "could not load" */ } finally {
     terminalBusy = false;
-    paint();
+    inputQueue.pushExternal('terminal', () => { model.setTerminal(target.key, lines); paint(); });
   }
 }
 
+/** Only the newest chat load / microphone start counts: an older answer arriving late is ignored. */
+const chatLoads = new Latest();
+const recordings = new Latest();
 const FLASH = { allow: 'Allowed', deny: 'Denied', desk: 'Left for the desk' };
 async function run(action: Action): Promise<void> {
   try {
@@ -495,22 +504,27 @@ async function run(action: Action): Promise<void> {
       const r = await api<{ ok: boolean }>('focus', { method: 'POST', body: JSON.stringify(action) });
       model.showFlash(r.ok ? `Workspace ${action.workspace} on ${action.machine}` : 'Could not switch', Date.now());
     } else if (action.kind === 'loadChat') {
+      const req = chatLoads.next();
       const r = await api<{ messages: Parameters<HomeModel['setChat']>[0] }>(`messages?chat=${action.id}`).catch(() => null);
-      model.setChat(r ? r.messages : null, Date.now(), action.id);
+      if (chatLoads.isLatest(req)) model.setChat(r ? r.messages : null, Date.now(), action.id);
     } else if (action.kind === 'prompt') {
       const r = await api<{ ok: boolean }>('prompt', { method: 'POST', body: JSON.stringify(action) });
       diag('prompt', `${action.machine} ${action.window ? 'window' : 'tmux'} ok=${r.ok}`);
       model.showFlash(r.ok ? (action.key ? 'Stopped' : 'Sent') : 'Could not send to that agent', Date.now());
       for (const wait of [500, 1500, 3000]) setTimeout(() => void refreshTerminal(), wait);
     } else if (action.kind === 'startMic') {
+      const id = recordings.next();
       recording = [];
       const on = await glasses.microphone(true);
       diag('mic.start', on);
-      if (!on) { recording = null; model.setTranscript(null, Date.now()); }
+      // A start that failed late must not undo a newer recording (or a cancel) made meanwhile.
+      if (!on && recordings.isLatest(id)) { recording = null; model.setTranscript(null, Date.now()); }
     } else if (action.kind === 'cancelMic') {
+      recordings.invalidate();
       recording = null;
       await glasses.microphone(false);
     } else if (action.kind === 'stopMic') {
+      const id = recordings.next(); // a later start or cancel makes this recording's transcript out of date
       await glasses.microphone(false);
       const chunks = recording ?? [];
       recording = null;
@@ -528,18 +542,21 @@ async function run(action: Action): Promise<void> {
         const body = await res.json() as { text?: string; error?: string };
         if (!res.ok) throw new Error(body.error || `server said ${res.status}`);
         diag('voice.text', `${(body.text ?? '').length} characters`);
-        model.setTranscript(body.text ?? '', Date.now());
+        if (recordings.isLatest(id)) model.setTranscript(body.text ?? '', Date.now()); else diag('voice.stale', id);
       } catch (error) {
         diag('voice.error', error instanceof Error ? error.message : String(error));
-        model.setTranscript(null, Date.now());
-        status = `Voice: ${error instanceof Error ? error.message : error}`;
+        if (recordings.isLatest(id)) {
+          model.setTranscript(null, Date.now());
+          status = `Voice: ${error instanceof Error ? error.message : error}`;
+        }
       }
     } else if (action.kind === 'sendText') {
       const r = await api<{ ok: boolean; error?: string }>('messages/send', { method: 'POST', body: JSON.stringify({ chat: action.chat, text: action.text }) }).catch(e => ({ ok: false, error: String(e.message ?? e) }));
       diag('text.send', `ok=${r.ok}`);
       model.showFlash(r.ok ? `Text sent to ${action.name}` : 'Text not sent', Date.now());
+      const req = chatLoads.next();
       const fresh = await api<{ messages: Parameters<HomeModel['setChat']>[0] }>(`messages?chat=${action.chat}`).catch(() => null);
-      if (fresh) model.setChat(fresh.messages, Date.now(), action.chat);
+      if (fresh && chatLoads.isLatest(req)) model.setChat(fresh.messages, Date.now(), action.chat);
     } else if (action.kind === 'askMuse') {
       museTile.askStart(action.text);
       paint();
@@ -611,7 +628,7 @@ const applyInput = makeHandle({
   leaveTiles: () => { tilesActive = false; model.goHome(); paint(); },
   backToTiles: () => { fromTiles = false; paint(); void refreshTiles(); },
   paint, runTileEffect,
-  runModelAction: action => void run(action),
+  runModelAction: action => run(action),
   saveLayout: layout => void saveLayout(layout),
   refreshTiles: () => void refreshTiles(),
   refreshTerminal: () => void refreshTerminal(),
@@ -628,7 +645,8 @@ function screenGeneration(): number {
 /** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
 const inputQueue = new InputQueue({
   apply: applyInput,
-  menu: id => void menu(id),
+  menu: id => menu(id),
+  foreground: () => foreground,
   generation: screenGeneration,
   screen: () => (showingTiles() ? 'tiles' : model.screenKind),
   settled: () => glasses.settled(),

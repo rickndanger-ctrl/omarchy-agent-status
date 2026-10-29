@@ -5,6 +5,7 @@ import { Tiles, DEFAULT_LAYOUT, type TileContext, type TileEffect, type OpenTarg
 import { makeHandle } from '../src/inputflow';
 import { InputQueue, MAX_QUEUED, type InputSource } from '../src/inputqueue';
 import { SettleWaiters, Serial, type SettleResult } from '../src/settle';
+import { Latest } from '../src/latest';
 import type { Input } from '../src/model';
 
 const NOW = Date.UTC(2026, 9, 26, 18, 42);
@@ -45,15 +46,16 @@ function rig(opts: { tiles?: boolean } = {}) {
   let was = showing();
   const generation = () => { const n = showing(); if (n !== was) { flips++; was = n; } return model.generation + flips; };
   const menus: number[] = [];
+  const flags = { foreground: true, menuJob: null as Promise<void> | null };
   const queue = new InputQueue({
-    apply, menu: id => { menus.push(id); if (id === 4) model.goHome(); }, generation,
+    apply, menu: id => { menus.push(id); if (id === 4) model.goHome(); return flags.menuJob ?? undefined; }, generation, foreground: () => flags.foreground,
     screen: () => (showing() ? 'tiles' : model.screenKind),
     settled: () => (gate.open ? Promise.resolve(gate.result) : new Promise<SettleResult>(r => gate.release.push(() => r(gate.result)))),
     log: (n, d) => log.push(`${n} ${d}`),
   });
   const press = (...inputs: Input[]) => inputs.forEach(i => queue.push(i, 'remote'));
   const idle = () => new Promise(r => setTimeout(r, 15));
-  return { model, tiles, queue, log, calls, menus, press, idle, gate, ctx, state: () => (showing() ? `tiles:${JSON.stringify(tiles.render(ctx()))}` : `${model.screenKind}:${model.render(NOW)}`), apply };
+  return { model, tiles, queue, log, calls, menus, flags, press, idle, gate, ctx, state: () => (showing() ? `tiles:${JSON.stringify(tiles.render(ctx()))}` : `${model.screenKind}:${model.render(NOW)}`), apply };
 }
 
 test('remote select on home opens the first item (Agents)', async () => {
@@ -137,7 +139,7 @@ test('touch and remote share the queue and are logged with their source', async 
 
 test('a failing apply does not stop the queue', async () => {
   const log: string[] = [];
-  const q = new InputQueue({ apply: i => { if (i === 'up') throw new Error('boom'); }, menu: () => {}, generation: () => 0, screen: () => 's', settled: async () => 'rendered' as const, log: (n, d) => log.push(`${n} ${d}`) });
+  const q = new InputQueue({ apply: i => { if (i === 'up') throw new Error('boom'); }, menu: () => {}, generation: () => 0, foreground: () => true, screen: () => 's', settled: async () => 'rendered' as const, log: (n, d) => log.push(`${n} ${d}`) });
   q.push('up', 'remote'); q.push('down', 'remote');
   await new Promise(r => setTimeout(r, 10));
   assert.ok(log.includes('input.error boom'));
@@ -203,24 +205,126 @@ test('(3) leaving the front or disconnecting clears what is waiting (input.cance
   assert.deepEqual(r.menus, []);
 });
 
-test('(5) overflow: the oldest remote up/down goes; with none, the new remote press is dropped; touch may queue to 10', async () => {
+test('(a) overflow: when full the NEW press is dropped; nothing waiting is removed; touch and menu cap at 10 by the same rule', async () => {
   const r = rig();
   r.gate.open = false;
-  r.queue.push('down', 'touch'); // runs, then waits
-  r.press('select', 'back', 'select', 'back', 'select'); // 5 waiting, none up/down
+  r.queue.push('select', 'touch'); // runs, then waits
+  r.press('down', 'up', 'select', 'back', 'select'); // 5 waiting
   assert.equal(r.queue.length, MAX_QUEUED);
-  r.press('down'); // nothing droppable: the new one is dropped
+  r.press('down', 'back');
   assert.equal(r.queue.length, MAX_QUEUED);
-  assert.ok(r.log.some(l => l.startsWith('input.dropped down from remote') && l.endsWith('(new)')));
-  const q = rig();
-  q.gate.open = false;
-  q.queue.push('select', 'touch');
-  q.press('down', 'up', 'select', 'select', 'select'); // 5 waiting; the down/up are droppable
-  q.press('down'); // drops the oldest remote up/down (the first down)
-  assert.equal(q.queue.length, MAX_QUEUED);
-  assert.ok(q.log.includes('input.dropped down from remote'));
-  for (let i = 0; i < 12; i++) q.queue.push('select', 'touch');
-  assert.ok(q.queue.length <= 10);
+  assert.equal(r.log.filter(l => l.startsWith('input.dropped') && l.endsWith('(queue full)')).length, 2);
+  assert.ok(r.log.includes('input.dropped down from remote (queue full)'));
+  r.gate.open = true;
+  r.gate.release.splice(0).forEach(f => f());
+  await r.idle();
+  assert.deepEqual(r.log.filter(l => l.startsWith('input ')).map(l => l.split(' on ')[0]), ['input select from touch', 'input down from remote', 'input up from remote', 'input select from remote', 'input back from remote', 'input select from remote']);
+  const t = rig();
+  t.gate.open = false;
+  t.queue.push('select', 'touch');
+  for (let i = 0; i < 12; i++) t.queue.push('down', 'touch');
+  t.queue.pushMenu(4);
+  assert.equal(t.queue.length, 10);
+  assert.equal(t.log.filter(l => l.startsWith('input.dropped')).length, 3);
+});
+
+test('(b) presses are ignored while the app is not in front; after not-visible the rest of the queue is cleared', async () => {
+  const r = rig();
+  r.flags.foreground = false;
+  r.press('select');
+  r.queue.pushMenu(4);
+  await r.idle();
+  assert.equal(r.model.screenKind, 'home');
+  assert.deepEqual(r.log, ['input.ignored select from remote (not in front)', 'input.ignored menu 4 (not in front)']);
+  r.flags.foreground = true;
+  const n = rig();
+  n.gate.result = 'not-visible';
+  n.press('down', 'down', 'select');
+  await n.idle();
+  assert.equal(n.log.filter(l => l.startsWith('input ')).length, 1); // the other two would have been blind
+  assert.equal(n.log.filter(l => l.startsWith('input.cancelled')).length, 2);
+  assert.ok(n.log.includes('not-visible home'));
+});
+
+test('(c) polls and refreshes take their turn: earlier presses act on what was seen, later ones wait for the new frame', async () => {
+  const r = rig();
+  r.gate.open = false;
+  r.press('select'); // runs: opens Agents; waits for the glasses
+  r.press('down'); // queued before the update
+  r.queue.pushExternal('poll', () => { r.calls.push('update'); });
+  r.press('back'); // queued after it
+  await r.idle();
+  r.gate.open = true;
+  r.gate.release.splice(0).forEach(f => f());
+  await r.idle();
+  const order = r.log.filter(l => l.startsWith('input ')).map(l => l.split(' ')[1]);
+  assert.deepEqual(order, ['select', 'down', 'back']);
+  const upd = r.calls.indexOf('update');
+  assert.ok(upd >= 0);
+  // one waiting update per name is merged and keeps its order
+  const m = rig();
+  m.gate.open = false;
+  m.press('down');
+  const seen: string[] = [];
+  m.queue.pushExternal('tiles', () => seen.push('a'));
+  m.queue.pushExternal('tiles', () => seen.push('b'));
+  m.gate.open = true;
+  m.gate.release.splice(0).forEach(f => f());
+  await m.idle();
+  assert.deepEqual(seen, ['a', 'b']);
+});
+
+test('(c) an update that brings an alert makes the earlier queued press stale; ordinary updates do not', async () => {
+  const r = rig();
+  r.gate.open = false;
+  r.press('down');
+  r.queue.pushExternal('poll', () => r.model.update({ ...data, pending: [{ id: 'p9', agent: 'Claude', page: 'p', tool: 'Bash', summary: 'x', at: NOW, machine: 'm1' }] }));
+  r.press('select'); // pressed while the home list was still shown, runs after the alert popped up
+  r.gate.open = true;
+  r.gate.release.splice(0).forEach(f => f());
+  await r.idle();
+  assert.ok(r.log.some(l => l.startsWith('input.stale select from remote on approval')), r.log.join('\n'));
+  const ok = rig();
+  ok.gate.open = false;
+  ok.press('down');
+  ok.press('select');
+  ok.queue.pushExternal('poll', () => ok.model.update(data));
+  ok.gate.open = true;
+  ok.gate.release.splice(0).forEach(f => f());
+  await ok.idle();
+  assert.ok(!ok.log.some(l => l.startsWith('input.stale')));
+  assert.equal(ok.model.screenKind, 'messages'); // down then select: the second item
+});
+
+test('(d) a promise from apply/menu is awaited before the next press, but only up to the cap', async () => {
+  const r = rig();
+  let done!: () => void;
+  r.flags.menuJob = new Promise<void>(res => { done = res; });
+  r.queue.pushMenu(4);
+  r.press('select');
+  await r.idle();
+  assert.equal(r.log.filter(l => l.startsWith('input ')).length, 0); // Pause-style menu still waiting for the hub
+  done();
+  await r.idle();
+  assert.equal(r.log.filter(l => l.startsWith('input ')).length, 1);
+  const log: string[] = [];
+  const q = new InputQueue({ apply: () => {}, menu: () => new Promise<void>(() => {}), generation: () => 0, foreground: () => true, screen: () => 's', settled: async () => 'rendered' as const, log: (n, d) => log.push(`${n} ${d}`) }, 5, 10, 30);
+  q.pushMenu(1);
+  q.push('down', 'remote');
+  await new Promise(r2 => setTimeout(r2, 100));
+  assert.ok(log.includes('input down from remote on s')); // the never-ending menu job was given up on after the cap
+});
+
+test('(e)(f) only the newest request counts: a late answer for an older one is ignored', () => {
+  const l = new Latest();
+  const first = l.next();
+  const second = l.next();
+  assert.equal(l.isLatest(first), false);
+  assert.equal(l.isLatest(second), true);
+  l.invalidate(); // a cancel
+  assert.equal(l.isLatest(second), false);
+  const third = l.next();
+  assert.equal(l.isLatest(third), true);
 });
 
 test('(6) microphone jobs run one after another, in order, even when a start is slow', async () => {
@@ -256,9 +360,10 @@ test('(8) a press queued before an alert changed the screen is dropped as input.
   r.press('select'); // waits, meant for the home list
   r.model.update({ ...data, pending: [{ id: 'p9', agent: 'Claude', page: 'p', tool: 'Bash', summary: 'rm -rf x', at: NOW, machine: 'm1' }] }); // an approval pops up
   assert.equal(r.model.screenKind, 'approval');
+  await r.idle();
   r.gate.release.splice(0).forEach(f => f());
   await r.idle();
-  assert.ok(r.log.some(l => l.startsWith('input.stale select from remote on approval')), r.log.join('\n'));
+  assert.ok(r.log.some(l => l.startsWith('input.stale select from remote on approval')), JSON.stringify(r.log));
   assert.equal(r.model.screenKind, 'approval'); // the select did not answer the approval
   r.gate.open = true;
   r.press('back');

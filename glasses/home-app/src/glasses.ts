@@ -202,6 +202,8 @@ export class Glasses {
     return this.micChain.run(() => this.setMicrophone(on));
   }
 
+  // Known limit: the SDK's audioControl call cannot be cancelled. If one times out (bounded() below), the SDK may still
+  // finish it later, after a newer on/off we have already sent. Serial keeps OUR calls in order; it cannot order the SDK's.
   private async setMicrophone(on: boolean): Promise<boolean> {
     if (!this.sdk) return false;
     try {

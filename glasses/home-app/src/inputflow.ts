@@ -19,14 +19,15 @@ export interface FlowHost {
   backToTiles(): void;
   paint(): void;
   runTileEffect(effect: TileEffect): void;
-  runModelAction(action: NonNullable<ReturnType<HomeModel['input']>>): void;
+  /** May return a promise; the microphone actions' promises are awaited by the queue. */
+  runModelAction(action: NonNullable<ReturnType<HomeModel['input']>>): void | Promise<void>;
   saveLayout(layout: Layout): void;
   refreshTiles(): void;
   refreshTerminal(): void;
   now(): number;
 }
 
-export function makeHandle(host: FlowHost): (input: Input) => void {
+export function makeHandle(host: FlowHost): (input: Input) => void | Promise<void> {
   return input => {
     if (host.showingTiles()) {
       const result = host.tiles.input(input, host.tileCtx());
@@ -44,7 +45,10 @@ export function makeHandle(host: FlowHost): (input: Input) => void {
     }
     const action = host.model.input(input, host.now());
     host.paint();
-    if (action) { host.runModelAction(action); host.paint(); }
+    const job = action ? host.runModelAction(action) : undefined;
+    if (action) host.paint();
     host.refreshTerminal();
+    // Microphone on/off must finish before the next press (a stop must not overtake its start); other actions go on in the background.
+    return action && (action.kind === 'startMic' || action.kind === 'stopMic' || action.kind === 'cancelMic') ? job : undefined;
   };
 }

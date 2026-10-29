@@ -1,33 +1,41 @@
-// One entry point for every press, touchpad or phone remote, and for menu choices: they wait in a single queue and
-// are applied one at a time. After each one the next waits until the glasses show the result (or a cap passes), so a
-// quick series never moves the model ahead of what the owner can see. Free of the SDK and the DOM.
+// One entry point for every press, touchpad or phone remote, for menu choices, and for the updates that change what
+// is shown (polls, refreshes): they wait in a single queue and are applied one at a time. After each one the next
+// waits until the glasses show the result (or a cap passes), so a quick series never moves the model ahead of what
+// the owner can see, and a press acts on the screen it was made on. Free of the SDK and the DOM.
 import type { Input } from './model';
 import type { SettleResult } from './settle';
 
 export type InputSource = 'touch' | 'remote';
-/** At most this many remote presses wait; touch and menu choices may queue up to MAX_TOUCH_QUEUED. */
+/** At most this many remote presses wait; touch and menu choices may queue up to MAX_TOUCH_QUEUED. When full, the new press is dropped. */
 export const MAX_QUEUED = 5;
 export const MAX_TOUCH_QUEUED = 10;
+/** An apply that returns a promise (a menu choice waiting for the hub, the microphone) is awaited at most this long. */
+export const APPLY_WAIT_MS = 3000;
 
 export interface QueueHost {
-  /** Apply one press (the app's handle flow). */
-  apply(input: Input): void;
-  /** Apply one long-press menu choice. */
-  menu(id: number): void;
+  /** Apply one press (the app's handle flow). May return a promise to be awaited (microphone changes). */
+  apply(input: Input): void | Promise<void>;
+  /** Apply one long-press menu choice. May return a promise (Pause waits for the hub). */
+  menu(id: number): void | Promise<void>;
   /** The screen the model is on, for the log. */
   screen(): string;
   /**
    * A number that changes whenever the screen changes (the model's screen, Tiles on/off, a screen opened from a tile).
-   * A press queued on one screen is dropped if an alert or a poll changed the screen before it ran.
+   * A press queued on one screen is dropped if an alert changed the screen before it ran.
    */
   generation(): number;
+  /** Is the app in front? Presses are ignored when it is not. */
+  foreground(): boolean;
   /** Resolves when the glasses show what the model says (capped by the caller). */
   settled(): Promise<SettleResult>;
   log(name: string, detail: string): void;
 }
 
-type Entry = { kind: 'input'; input: Input; source: InputSource; stamp: number } | { kind: 'menu'; id: number; source: InputSource };
-const label = (e: Entry) => (e.kind === 'input' ? `${e.input} from ${e.source}` : `menu ${e.id} from ${e.source}`);
+type Entry =
+  | { kind: 'input'; input: Input; source: InputSource; stamp: number }
+  | { kind: 'menu'; id: number; source: InputSource }
+  | { kind: 'external'; name: string; run: () => void };
+const label = (e: Entry) => (e.kind === 'input' ? `${e.input} from ${e.source}` : e.kind === 'menu' ? `menu ${e.id} from ${e.source}` : `update ${e.name}`);
 
 export class InputQueue {
   private pending: Entry[] = [];
@@ -35,40 +43,58 @@ export class InputQueue {
   /** Screen changes made by our own presses; everything else counted by generation() is unsolicited. */
   private own = 0;
 
-  constructor(private readonly host: QueueHost, private readonly max = MAX_QUEUED, private readonly maxTouch = MAX_TOUCH_QUEUED) {}
+  constructor(private readonly host: QueueHost, private readonly max = MAX_QUEUED, private readonly maxTouch = MAX_TOUCH_QUEUED, private readonly applyWaitMs = APPLY_WAIT_MS) {}
 
   get length(): number { return this.pending.length; }
 
   private unsolicited(): number { return this.host.generation() - this.own; }
 
   push(input: Input, source: InputSource): void {
+    if (!this.host.foreground()) { this.host.log('input.ignored', `${input} from ${source} (not in front)`); return; }
     this.add({ kind: 'input', input, source, stamp: this.unsolicited() });
   }
 
   pushMenu(id: number): void {
+    if (!this.host.foreground()) { this.host.log('input.ignored', `menu ${id} (not in front)`); return; }
     this.add({ kind: 'menu', id, source: 'touch' });
   }
 
-  /** Forget everything waiting (the app left the front, or the glasses disconnected). */
+  /**
+   * A change to what is shown that did not come from a press (a poll, a refresh): it takes its turn, so presses made
+   * before it act on what the owner saw, and presses after it wait for its frame. One waiting update per name; a
+   * newer one runs after the older one in the same turn.
+   */
+  pushExternal(name: string, run: () => void): void {
+    const waiting = this.pending.find((e): e is Extract<Entry, { kind: 'external' }> => e.kind === 'external' && e.name === name);
+    if (waiting) { const older = waiting.run; waiting.run = () => { older(); run(); }; return; }
+    this.pending.push({ kind: 'external', name, run });
+    if (!this.running) void this.drain();
+  }
+
+  /** Forget everything waiting (the app left the front, the glasses disconnected, nothing is visible). Updates still run. */
   clear(reason: string): void {
-    for (const e of this.pending.splice(0)) this.host.log('input.cancelled', `${label(e)} (${reason})`);
+    const keep: Entry[] = [];
+    for (const e of this.pending.splice(0)) {
+      if (e.kind === 'external') keep.push(e); else this.host.log('input.cancelled', `${label(e)} (${reason})`);
+    }
+    this.pending = keep;
   }
 
   private add(entry: Entry): void {
-    if (entry.source === 'remote') {
-      if (this.pending.length >= this.max) {
-        // Too many: the oldest remote up/down goes. If there is none, the new press is the one dropped.
-        const old = this.pending.findIndex(p => p.kind === 'input' && p.source === 'remote' && (p.input === 'up' || p.input === 'down'));
-        if (old < 0) { this.host.log('input.dropped', `${label(entry)} (new)`); return; }
-        this.host.log('input.dropped', label(this.pending.splice(old, 1)[0]));
-      }
-    } else if (this.pending.length >= this.maxTouch) {
-      const old = this.pending.findIndex(p => p.kind === 'input' && p.source === 'remote' && (p.input === 'up' || p.input === 'down'));
-      if (old < 0) { this.host.log('input.dropped', `${label(entry)} (new)`); return; }
-      this.host.log('input.dropped', label(this.pending.splice(old, 1)[0]));
-    }
+    const waiting = this.pending.filter(p => p.kind !== 'external').length;
+    const cap = entry.kind === 'input' && entry.source === 'remote' ? this.max : this.maxTouch;
+    if (waiting >= cap) { this.host.log('input.dropped', `${label(entry)} (queue full)`); return; }
     this.pending.push(entry);
     if (!this.running) void this.drain();
+  }
+
+  /** Await a job's promise, but not longer than APPLY_WAIT_MS. */
+  private async bounded(job: void | Promise<void>): Promise<void> {
+    if (!job) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([job.catch(error => this.host.log('input.error', error instanceof Error ? error.message : String(error))), new Promise<void>(r => { timer = setTimeout(r, this.applyWaitMs); })]);
+    } finally { clearTimeout(timer); }
   }
 
   private async drain(): Promise<void> {
@@ -76,18 +102,27 @@ export class InputQueue {
     try {
       for (let next = this.pending.shift(); next; next = this.pending.shift()) {
         if (next.kind === 'input' && next.stamp !== this.unsolicited()) {
-          // An alert, a poll or something else changed the screen after this press was queued: it was meant for another screen.
+          // An alert (or anything else) changed the screen after this press was queued: it was meant for another screen.
           this.host.log('input.stale', `${label(next)} on ${this.host.screen()}`);
           continue;
         }
-        this.host.log(next.kind === 'input' ? 'input' : 'menu', next.kind === 'input' ? `${label(next)} on ${this.host.screen()}` : `${next.id} from ${next.source} on ${this.host.screen()}`);
+        if (next.kind !== 'external') this.host.log(next.kind, next.kind === 'input' ? `${label(next)} on ${this.host.screen()}` : `${next.id} from ${next.source} on ${this.host.screen()}`);
         const before = this.host.generation();
-        try { if (next.kind === 'input') this.host.apply(next.input); else this.host.menu(next.id); } catch (error) { this.host.log('input.error', error instanceof Error ? error.message : String(error)); }
-        this.own += this.host.generation() - before;
+        let job: void | Promise<void> = undefined;
+        try {
+          if (next.kind === 'input') job = this.host.apply(next.input);
+          else if (next.kind === 'menu') job = this.host.menu(next.id);
+          else next.run();
+        } catch (error) { this.host.log('input.error', error instanceof Error ? error.message : String(error)); }
+        // Screen changes from our own presses are not "unsolicited"; an update's are (an alert popping up).
+        if (next.kind !== 'external') this.own += this.host.generation() - before;
+        await this.bounded(job);
         // Always wait, even with nothing queued yet: the next press (a remote sends them ~20 ms apart) must not
         // run until the glasses show this one's result.
         const result = await this.host.settled();
-        this.host.log(result === 'rendered' ? 'shown' : result === 'capped' ? 'settle-capped' : 'not-visible', this.host.screen());
+        if (next.kind !== 'external') this.host.log(result === 'rendered' ? 'shown' : result === 'capped' ? 'settle-capped' : 'not-visible', this.host.screen());
+        // Nothing can be seen: the rest of the presses would be blind. Forget them.
+        if (result === 'not-visible') this.clear('not visible');
       }
     } finally {
       this.running = false;
