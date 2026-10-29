@@ -20,7 +20,7 @@ summary. This is our own design; it is not based on any other product. Contract 
 
     POST /api/conversation/start  {backend: "local"|"claude"|"codex"}
                                   → 200 {id, startedAt}  | 409 {error:"already listening"}
-    POST /api/conversation/chunk?id=<id>&seq=<n>     body: raw PCM, 16 kHz s16le mono, about 9 s (~288 KB),
+    POST /api/conversation/chunk?id=<id>&seq=<n>     seq counts from 0 in send order; body: raw PCM, 16 kHz s16le mono, about 9 s (~288 KB),
                                                      max 1 MB, application/octet-stream
                                   → 200 {ok:true} at once; transcription and hints run in the background
                                   → 404 unknown/finished id · 410 over 31 min · 413 too large
@@ -35,7 +35,8 @@ summary. This is our own design; it is not based on any other product. Contract 
       actions?: string[],       action items, once done (may be empty)
       fallback?: string,        set when the last hint/summary came from the local model because Claude failed
       error?: string,           one plain line ("The local model is not running", "Transcription failed")
-      chunks: number, words: number
+      chunks: number, words: number,
+      skipped: number           chunks that could not be transcribed (the tile says "N pieces missed")
     }
 
 The app polls GET /api/conversation about every 2 s while a session is listening or summarizing.
@@ -45,9 +46,13 @@ The app polls GET /api/conversation about every 2 s while a session is listening
 - Each chunk: transcribe it with the existing Groq path (`transcribe(pcm)`), append it to the session's transcript,
   then ask the backend for hints with the rolling transcript (last ~2 minutes). There is never more than one
   hint request in flight; a chunk that arrives while one is running just waits for the next one.
-  Chunks are transcribed in seq order. A failed chunk is logged and skipped, and the session goes on.
+  Chunks are transcribed in seq order; a seq below the next expected one (a late chunk after a gap was given up)
+  is dropped. A failed chunk is logged, counted in `skipped`, and the session goes on. If nothing at all could be
+  transcribed, the session ends in `error` ("Nothing could be transcribed") instead of an empty summary.
 - Hint prompt: return 2–3 lines, each under 40 characters, chosen from: a key point, a question worth asking,
   a useful fact. Nothing else.
+- The app stops at 30 minutes and sends its last chunk; the hub only enforces a 31-minute guard (its own timer
+  and the 410), so the final chunk still counts.
 - Stop (or the 31-minute guard): summarize the whole transcript into ≤ 5 lines plus action items, then write
   `~/.config/agent-glasses/conversations/YYYY-MM-DD-HHMM.md` (directory 0700, file 0600) with the summary,
   the action items and the transcript. Only the newest session stays in memory.
