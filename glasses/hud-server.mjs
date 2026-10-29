@@ -1273,7 +1273,8 @@ async function thinkAt(args) {
   if (where === 'self' || where === MACHINE) return think(args)
   const node = NODES.find(n => n.name === where)
   if (!node) throw new Error(`no node named ${where} in hub.json`)
-  // The node's own error line (say, "Claude isn't set up on this hub") is passed on as it is.
+  // The node's own error line (say, "Claude isn't set up on this hub") is passed on as it is. Anything else that is
+  // not an answer (no reply, a cut-off or bad body, no text) is "did not answer", so the chain goes on.
   let res
   try {
     res = await fetch(`${node.url}/api/think`, {
@@ -1285,9 +1286,10 @@ async function thinkAt(args) {
   } catch {
     throw new Error(`${where} did not answer`)
   }
-  const body = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(body.error || `${where} did not answer`)
-  return body
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(body?.error || `${where} did not answer`)
+  if (typeof body?.text !== 'string' || !body.text.trim()) throw new Error(`${where} did not answer`)
+  return { text: body.text, ms: Number(body.ms) || 0 }
 }
 // Diagnostics for the conversation: names and counts or timings only, never transcript text.
 const conversationDiag = (name, detail) => {

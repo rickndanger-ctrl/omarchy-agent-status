@@ -52,10 +52,11 @@ HUB_PORT, HUB_B, HUB_C, HUB_D, NODE_PORT, FAKE_PORT, DEAD_PORT = (
     int(os.environ.get(k, v)) for k, v in [
         ("CONV_HUB_PORT", 5401), ("CONV_HUB_B_PORT", 5402), ("CONV_HUB_C_PORT", 5403),
         ("CONV_HUB_D_PORT", 5404), ("CONV_NODE_PORT", 5405), ("CONV_FAKE_PORT", 5406), ("CONV_DEAD_PORT", 5407)])
-HUB_B2, HUB_E, HUB_F1, HUB_F2, HUB_F3, HUB_F4 = (
+HUB_B2, HUB_E, HUB_F1, HUB_F2, HUB_F3, HUB_F4, BAD_NODE_PORT, HUB_F5, HUB_F6, HUB_F7 = (
     int(os.environ.get(k, v)) for k, v in [
         ("CONV_HUB_B2_PORT", 5409), ("CONV_HUB_E_PORT", 5408), ("CONV_HUB_F1_PORT", 5410),
-        ("CONV_HUB_F2_PORT", 5411), ("CONV_HUB_F3_PORT", 5412), ("CONV_HUB_F4_PORT", 5413)])
+        ("CONV_HUB_F2_PORT", 5411), ("CONV_HUB_F3_PORT", 5412), ("CONV_HUB_F4_PORT", 5413),
+        ("CONV_BAD_NODE_PORT", 5414), ("CONV_HUB_F5_PORT", 5415), ("CONV_HUB_F6_PORT", 5416), ("CONV_HUB_F7_PORT", 5417)])
 TOKEN, NODE_TOKEN = "conversation-test-token", "conversation-node-token"
 HUB_TOKEN_FILE, NODE_TOKEN_FILE = os.path.join(WORK, "hub.token"), os.path.join(WORK, "node.token")
 open(HUB_TOKEN_FILE, "w").write(TOKEN + "\n")
@@ -117,6 +118,27 @@ class Fake(http.server.BaseHTTPRequestHandler):
 
 fake = http.server.ThreadingHTTPServer(("127.0.0.1", FAKE_PORT), Fake)
 threading.Thread(target=fake.serve_forever, daemon=True).start()
+
+# ---- a node that answers /api/think with 200 but no answer: the bad answer is set per test -----------------------
+BAD_NODE = {"body": b"not json", "short": False}
+class BadNode(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if BAD_NODE["short"]:  # the header promises 50 bytes; only 5 arrive, then the connection closes
+            self.send_response(200)
+            self.send_header("Content-Length", "50")
+            self.end_headers()
+            self.wfile.write(b'{"te')
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(BAD_NODE["body"])))
+        self.end_headers()
+        self.wfile.write(BAD_NODE["body"])
+bad_node = http.server.ThreadingHTTPServer(("127.0.0.1", BAD_NODE_PORT), BadNode)
+threading.Thread(target=bad_node.serve_forever, daemon=True).start()
 WHISPER = f"http://127.0.0.1:{FAKE_PORT}/whisper/audio/transcriptions"
 LOCAL = f"http://127.0.0.1:{FAKE_PORT}/local/v1"
 FLAKY_LOCAL = f"http://127.0.0.1:{FAKE_PORT}/flaky/v1"
@@ -439,6 +461,55 @@ cid = body.get("id")
 chunk(HUB_F4, cid, 0, 2000)
 check("a Codex session with no Codex also falls back to the local model", wait_for(lambda: view(HUB_F4).get("fallback") == "(local model answered: Codex isn't set up on this hub)") is not None)
 call(HUB_F4, "POST", "/api/conversation/stop", {"id": cid})
+stop_all()
+
+# F5: a relative override is made absolute at startup, so the runner (which spawns from a temp folder) still finds it.
+rel_claude = os.path.relpath(os.path.join(LOCAL_BIN, "claude"), os.getcwd())
+f5 = start(HUB_F5, "hub", {"PATH": BARE_PATH, "HUD_CLAUDE_BIN": rel_claude, "HUD_CODEX_BIN": "/nonexistent/codex", "HUD_LOCAL_LLM_URL": DEAD_LOCAL}, NODE_CONF)
+code, body = call(HUB_F5, "GET", "/api/diag")
+check("a relative HUD_CLAUDE_BIN is reported as an absolute path", body.get("helpers", {}).get("claude", {}).get("path") == os.path.join(LOCAL_BIN, "claude"))
+code, body = call(HUB_F5, "POST", "/api/conversation/start", {"backend": "claude"})
+cid = body.get("id")
+chunk(HUB_F5, cid, 0, 2000)
+check("the relative override runs and answers the hints", wait_for(lambda: "HOME hint one" in view(HUB_F5).get("hints", [])) is not None)
+check("with no fallback line", "fallback" not in view(HUB_F5))
+call(HUB_F5, "POST", "/api/conversation/stop", {"id": cid})
+stop_all()
+
+# F6: a relative PATH entry is skipped: a claude in it is not found, and this temp HOME has no ~/.local/bin claude.
+REL_BIN = os.path.join(WORK, "relbin")
+os.makedirs(REL_BIN, exist_ok=True)
+with open(os.path.join(REL_BIN, "claude"), "w") as f:
+    f.write("#!/usr/bin/env bash\ninput=$(cat)\nprintf 'REL hint one\\n'\n")
+os.chmod(os.path.join(REL_BIN, "claude"), 0o755)
+HOME2 = os.path.join(WORK, "home2")
+os.makedirs(HOME2, exist_ok=True)
+rel_dir = os.path.relpath(REL_BIN, os.getcwd())
+f6 = start(HUB_F6, "hub", {"HOME": HOME2, "PATH": rel_dir + ":" + BARE_PATH, "HUD_CODEX_BIN": "/nonexistent/codex", "HUD_LOCAL_LLM_URL": DEAD_LOCAL}, NODE_CONF)
+code, body = call(HUB_F6, "GET", "/api/diag")
+check("a relative PATH entry is skipped: no claude is found", body.get("helpers", {}).get("claude", {}).get("path") is None)
+code, body = call(HUB_F6, "POST", "/api/conversation/start", {"backend": "claude"})
+cid = body.get("id")
+chunk(HUB_F6, cid, 0, 2000)
+check("so Claude is reported as not set up", wait_for(lambda: view(HUB_F6).get("error")) is not None and view(HUB_F6).get("error") == "Claude isn't set up on this hub")
+call(HUB_F6, "POST", "/api/conversation/stop", {"id": cid})
+stop_all()
+
+# F7: a node that answers 200 with no usable answer is "did not answer", so the chain goes on to Codex.
+f7 = start(HUB_F7, "hub", {"HUD_CODEX_BIN": os.path.join(WORK, "bin", "codex"), "HUD_LOCAL_LLM_URL": DEAD_LOCAL},
+           {"nodes": [{"name": "lap", "url": f"http://127.0.0.1:{BAD_NODE_PORT}", "tokenFile": NODE_TOKEN_FILE}],
+            "conversation": {"local": "self", "claude": "lap", "codex": "self"}})
+for label, setting in [("bad JSON", {"body": b"not json", "short": False}),
+                       ("no text", {"body": b"{}", "short": False}),
+                       ("a cut-off body", {"body": b"", "short": True})]:
+    BAD_NODE.update(setting)
+    code, body = call(HUB_F7, "POST", "/api/conversation/start", {"backend": "claude"})
+    cid = body.get("id")
+    chunk(HUB_F7, cid, 0, 2000)
+    check(f"a node with {label} gives the hints from Codex", wait_for(lambda: "CODEX hint one" in view(HUB_F7).get("hints", [])) is not None)
+    check(f"and the fallback line says the node did not answer ({label})", view(HUB_F7).get("fallback") == "(Codex answered: lap did not answer)")
+    call(HUB_F7, "POST", "/api/conversation/stop", {"id": cid})
+    wait_for(lambda: view(HUB_F7).get("state") == "done")
 stop_all()
 
 print()

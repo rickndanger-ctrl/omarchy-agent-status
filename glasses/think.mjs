@@ -41,10 +41,15 @@ function isRunnable(file) {
 }
 
 // The override wins when it is set, even if it is wrong: a missing override means "not set up", not a fallback search.
+// Paths are made absolute here, once: the runners spawn from a temp folder, so a relative path would point nowhere.
+// A relative PATH entry is skipped, for the same reason.
 function findBinary(name, envVar) {
   const override = process.env[envVar]
-  if (override) return isRunnable(override) ? override : null
-  const dirs = [...(process.env.PATH || '').split(path.delimiter).filter(Boolean), ...EXTRA_DIRS()]
+  if (override) {
+    const file = path.resolve(override)
+    return isRunnable(file) ? file : null
+  }
+  const dirs = [...(process.env.PATH || '').split(path.delimiter).filter(dir => path.isAbsolute(dir)), ...EXTRA_DIRS()]
   for (const dir of dirs) {
     const file = path.join(dir, name)
     if (isRunnable(file)) return file
