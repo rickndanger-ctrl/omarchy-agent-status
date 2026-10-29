@@ -1,0 +1,98 @@
+# Conversation tile: app ↔ hub ↔ node contract
+
+A conversation assistant in a tile: the owner starts it, the glasses listen, and the tile shows two or three
+short hints as the talk goes on. On stop the tile shows a summary with action items, and the hub keeps that
+summary. This is our own design; it is not based on any other product. Contract fixed 2026-10-29.
+
+## Rules
+
+- It listens only after a Start: a tap in the tile, or "Listen" in the long-press menu. It is never always-on.
+- While listening, the tile header shows `● Listening mm:ss`. It stops after 30 minutes, when the owner stops it,
+  or when the app leaves the foreground. Each of these makes a summary.
+- Only one session runs at a time, and the microphone is shared: while listening, the voice-reply microphone
+  says "Stop listening first", and the other way round.
+- Audio and text go only to Groq (transcription) and to the one AI backend the owner chose. Muse gets
+  nothing, except through the single "Send summary to Muse" action described below.
+- The transcript and summaries stay on the owner's hub and are never committed. Tests use fake
+  microphone, transcriber, backends and Muse.
+
+## App → hub (Bearer token, like every other /api/ call)
+
+    POST /api/conversation/start  {backend: "local"|"claude"|"codex"}
+                                  → 200 {id, startedAt}  | 409 {error:"already listening"}
+    POST /api/conversation/chunk?id=<id>&seq=<n>     body: raw PCM, 16 kHz s16le mono, about 9 s (~288 KB),
+                                                     max 1 MB, application/octet-stream
+                                  → 200 {ok:true} at once; transcription and hints run in the background
+                                  → 404 unknown/finished id · 410 over 31 min · 413 too large
+    POST /api/conversation/stop   {id}  → 200 {ok:true}; the summary fills in on later GETs
+    GET  /api/conversation        → Conversation (the current session, or the last finished one, or {state:"idle"})
+
+    Conversation = {
+      id, state: "listening" | "summarizing" | "done" | "error" | "idle",
+      backend, startedAt, stoppedAt?,
+      hints: string[],          the latest 2–3 lines, each ≤ 40 characters
+      summary?: string[],       up to 5 lines, once done
+      actions?: string[],       action items, once done (may be empty)
+      fallback?: string,        set when the last hint/summary came from the local model because Claude failed
+      error?: string,           one plain line ("The local model is not running", "Transcription failed")
+      chunks: number, words: number
+    }
+
+The app polls GET /api/conversation about every 2 s while a session is listening or summarizing.
+
+## Hub behaviour
+
+- Each chunk: transcribe it with the existing Groq path (`transcribe(pcm)`), append it to the session's transcript,
+  then ask the backend for hints with the rolling transcript (last ~2 minutes). There is never more than one
+  hint request in flight; a chunk that arrives while one is running just waits for the next one.
+  Chunks are transcribed in seq order. A failed chunk is logged and skipped, and the session goes on.
+- Hint prompt: return 2–3 lines, each under 40 characters, chosen from: a key point, a question worth asking,
+  a useful fact. Nothing else.
+- Stop (or the 31-minute guard): summarize the whole transcript into ≤ 5 lines plus action items, then write
+  `~/.config/agent-glasses/conversations/YYYY-MM-DD-HHMM.md` (directory 0700, file 0600) with the summary,
+  the action items and the transcript. Only the newest session stays in memory.
+- Diagnostics (/api/diag): `conv.start`, `conv.chunk` (seq, ms, words), `conv.hint` (ms), `conv.stop`,
+  `conv.error`. Counts and timings only; no transcript text.
+
+## Backends (the owner's choice in Settings; default "claude")
+
+Fallback: when the claude backend fails or times out (hints: 20 s, summary: 60 s), the hub retries that one request
+on "local" and marks it, so the tile shows `(local model: Claude didn't answer)` under the hints or summary.
+The session keeps trying Claude on the next request. Conversation gets `fallback?: string` for that line.
+Local and codex have no fallback; their errors show as `error`.
+
+The hub sends each think request to the node named for that backend in hub.json, and that node runs it on its
+own machine:
+
+    hub.json  "conversation": {"local": "lap", "claude": "lap", "codex": "Mini 1"}     node names; "self" = this hub
+
+    POST /api/think  {backend, system, prompt, timeoutSec}     (on a node, Bearer that node's token)
+                                  → 200 {text, ms} | 4xx/5xx {error}
+
+- local: OpenAI-compatible chat on `http://127.0.0.1:18081/v1` on that node (Ornith 35B on the laptop).
+  It is reached only on loopback by the node itself and is never exposed.
+- claude: `claude -p --tools "" --strict-mcp-config --no-session-persistence` in a fresh temp folder.
+- codex: `codex exec --skip-git-repo-check --sandbox read-only --ephemeral -C <temp>` with the prompt on stdin.
+
+The runners are the public Ask tile's backend code (public/g2-tiles/hub/ask.mjs, now g2-omac), moved into
+`glasses/think.mjs` so hud-server.mjs only imports it. Test hooks are environment variables:
+`HUD_THINK_FAKE=1` (canned replies), `HUD_TRANSCRIBE_URL` (a fake Whisper server), `HUD_LOCAL_LLM_URL`.
+
+## Tile (app)
+
+Layout id: `conversation`. Header: `Conversation` when idle, `● Listening 12:04` while listening,
+`Summarizing…`, `Summary · 14:32` when done.
+- Idle: tap → Start (with the backend from Settings). Long-press menu item "Listen" does the same from anywhere.
+- Listening: shows the hints; tap → Stop. The app sends ~9 s of PCM per chunk, in order, one at a time.
+- Done: shows the summary and action items (scrollable). Tap → actions: Start new · Send summary to Muse.
+
+Settings (phone page): "Conversation AI": Claude (default) · Local model (free) · ChatGPT (Codex).
+
+## Send summary to Muse (the owner asked for this explicitly)
+
+On a finished summary only. One tap dispatches Home's existing `{kind: 'askMuse', text}` action, unchanged
+(POST /api/muse/ask, then the same /api/muse/reply polling), so Muse's answer shows in the Muse tile like any
+other ask. The text is `Summary of a conversation (<YYYY-MM-DD HH:MM>):` + the summary + the action items,
+capped at 1500 characters. It is never automatic, never available while listening, and only once per summary:
+after the tap the item greys out ("Sent to Muse"), remembered per summary id. No Muse endpoint, relay, timer
+or polling changes. Tests use a fake Muse. The Muse-related diff goes to the owner before merging.
