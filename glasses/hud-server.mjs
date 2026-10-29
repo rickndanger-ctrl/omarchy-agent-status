@@ -1561,7 +1561,6 @@ async function handle(req, res) {
       if (pcm.length < 3200) return send(res, 200, { text: '' })
       return send(res, 200, { text: await transcribe(pcm) })
     }
-    // Step-by-step app diagnostics (names and sizes only, never audio or words), last 1000 in memory.
     // One AI answer on this machine: the node side of the conversation tile (any node serves it).
     if (req.method === 'POST' && p === '/api/think') {
       // A summary request carries the whole talk, so this body may be much larger than the usual 16 KB.
@@ -1594,6 +1593,7 @@ async function handle(req, res) {
       return send(res, r.status, r.body)
     }
     if (req.method === 'GET' && p === '/api/conversation') return send(res, 200, CONVERSATION.state())
+    // Step-by-step app diagnostics (names and sizes only, never audio or words), last 1000 in memory.
     if (req.method === 'POST' && p === '/api/diag') {
       const b = await readBody(req)
       diagnostics.push({ at: new Date().toISOString(), name: clip(b.name, 40), detail: clip(b.detail, 160) })
