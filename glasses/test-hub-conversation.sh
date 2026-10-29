@@ -70,6 +70,7 @@ def check(label, cond):
         print(f"  FAIL  {label}", flush=True)
 
 # ---- fake Whisper and fake local model, on one port -----------------------------------------------------------
+FLAKY = {"hints_to_fail": 1}  # shared by the Fake handler and Scenario E
 class Fake(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -89,9 +90,20 @@ class Fake(http.server.BaseHTTPRequestHandler):
             pcm = int.from_bytes(body[i + 40:i + 44], "little")
             if pcm == 1500:  # the chunk the test makes fail
                 return self.reply(500, {"error": "speech service said 500"})
+            if pcm == 1234:  # a chunk the test makes silent: the service hears nothing
+                return self.reply(200, {"text": ""})
             return self.reply(200, {"text": f"part {pcm}"})
         if self.path.startswith("/local/v1/chat/completions"):
             system = json.loads(body)["messages"][0]["content"]
+            content = ("SUMMARY:\nLOCAL talk summary.\nACTIONS:\n- Local action" if "Summarize" in system
+                       else "LOCAL hint one\nLOCAL hint two")
+            return self.reply(200, {"choices": [{"message": {"content": content}}]})
+        if self.path.startswith("/flaky/v1/chat/completions"):
+            # The first hint request fails (the model is busy); the rest answer as the local model does.
+            system = json.loads(body)["messages"][0]["content"]
+            if "Summarize" not in system and FLAKY["hints_to_fail"] > 0:
+                FLAKY["hints_to_fail"] -= 1
+                return self.reply(500, {"error": "busy"})
             content = ("SUMMARY:\nLOCAL talk summary.\nACTIONS:\n- Local action" if "Summarize" in system
                        else "LOCAL hint one\nLOCAL hint two")
             return self.reply(200, {"choices": [{"message": {"content": content}}]})
@@ -101,6 +113,7 @@ fake = http.server.ThreadingHTTPServer(("127.0.0.1", FAKE_PORT), Fake)
 threading.Thread(target=fake.serve_forever, daemon=True).start()
 WHISPER = f"http://127.0.0.1:{FAKE_PORT}/whisper/audio/transcriptions"
 LOCAL = f"http://127.0.0.1:{FAKE_PORT}/local/v1"
+FLAKY_LOCAL = f"http://127.0.0.1:{FAKE_PORT}/flaky/v1"
 
 # ---- starting hubs and nodes (the real server, with the test's environment) -------------------------------------
 procs = []
@@ -242,8 +255,14 @@ if files:
 code, body = call(HUB_PORT, "POST", "/api/conversation/start", {"backend": "local"})
 empty = body.get("id")
 call(HUB_PORT, "POST", "/api/conversation/stop", {"id": empty})
-check("an empty talk ends in error: nothing could be transcribed", wait_for(lambda: view(HUB_PORT).get("state") == "error") is not None and view(HUB_PORT).get("error") == "Nothing could be transcribed")
+check("a talk with no chunks ends in error: nothing was heard", wait_for(lambda: view(HUB_PORT).get("state") == "error") is not None and view(HUB_PORT).get("error") == "Nothing was heard")
 check("the newest session replaces the last one in memory", view(HUB_PORT).get("id") == empty)
+
+code, body = call(HUB_PORT, "POST", "/api/conversation/start", {"backend": "local"})
+silent = body.get("id")
+chunk(HUB_PORT, silent, 0, 1234)  # heard, but silence: the service returns no words
+call(HUB_PORT, "POST", "/api/conversation/stop", {"id": silent})
+check("silence (no words, no failed chunks) ends in error: nothing was heard", wait_for(lambda: view(HUB_PORT).get("state") == "error") is not None and view(HUB_PORT).get("error") == "Nothing was heard" and view(HUB_PORT).get("skipped") == 0)
 
 code, body = call(HUB_PORT, "POST", "/api/conversation/start", {"backend": "local"})
 first = body.get("id")
@@ -317,6 +336,20 @@ call(HUB_C, "POST", "/api/conversation/stop", {"id": cid})
 check("the node's answer is what the hub uses for the summary", wait_for(lambda: view(HUB_C).get("state") == "done") is not None and view(HUB_C).get("summary") == ["LOCAL talk summary."])
 code, body = call(NODE_PORT, "POST", "/api/think", {"backend": "local", "prompt": "x"}, token=None)
 check("the node refuses a think request without its token", code == 401)
+stop_all()
+
+# ================================================================================================================
+print("Scenario E: a failed hint shows as an error; the next good hint and the summary clear it")
+HUB_E = int(os.environ.get("CONV_HUB_E_PORT", 5408))
+f = start(HUB_E, "hub", {"HUD_LOCAL_LLM_URL": FLAKY_LOCAL}, {"conversation": {"local": "self"}})
+code, body = call(HUB_E, "POST", "/api/conversation/start", {"backend": "local"})
+cid = body.get("id")
+chunk(HUB_E, cid, 0, 2000)  # its hint request fails
+check("a failed hint shows as the error while listening", wait_for(lambda: view(HUB_E).get("error")) is not None and view(HUB_E).get("state") == "listening")
+chunk(HUB_E, cid, 1, 2000)  # the next hint succeeds
+check("a good hint clears the error", wait_for(lambda: view(HUB_E).get("hints") and not view(HUB_E).get("error")) is not None)
+call(HUB_E, "POST", "/api/conversation/stop", {"id": cid})
+check("a good summary also leaves no error", wait_for(lambda: view(HUB_E).get("state") == "done") is not None and "error" not in view(HUB_E))
 stop_all()
 
 print()

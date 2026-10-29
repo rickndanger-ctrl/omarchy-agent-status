@@ -98,6 +98,7 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
       const context = s.transcript.filter(t => t.at >= since).map(t => t.text).join('\n')
       const r = await ask(s, HINT_SYSTEM, context, HINT_MS)
       s.hints = hintsFrom(r.text)
+      s.error = undefined // a good answer clears an earlier failure
       diag('conv.hint', `${r.ms} ms`)
     } catch (err) {
       s.error = clip(err.message, 120)
@@ -198,9 +199,10 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
     await drain(s)
     try {
       if (s.words === 0) {
-        // Nothing at all could be transcribed: an error, not an empty summary.
+        // Nothing came out of the talk: an error, not an empty summary. A failed chunk means it could not be
+        // transcribed; otherwise it was silence.
         s.state = 'error'
-        s.error = 'Nothing could be transcribed'
+        s.error = s.skipped ? 'Nothing could be transcribed' : 'Nothing was heard'
         diag('conv.error', `no words, ${s.chunks} chunks, ${s.skipped} skipped, ${reason}`)
         writeRecord(s)
         return
@@ -209,6 +211,7 @@ export function createConversations({ transcribe, think, diag, dir, limitMs = LI
       const { summary, actions } = summaryFrom(r.text)
       s.summary = summary
       s.actions = actions
+      s.error = undefined // a good summary clears an earlier failure
       s.state = 'done'
       diag('conv.stop', `${s.chunks} chunks, ${s.words} words, ${reason}`)
     } catch (err) {

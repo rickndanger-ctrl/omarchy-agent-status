@@ -47,8 +47,8 @@ The app polls GET /api/conversation about every 2 s while a session is listening
   then ask the backend for hints with the rolling transcript (last ~2 minutes). There is never more than one
   hint request in flight; a chunk that arrives while one is running just waits for the next one.
   Chunks are transcribed in seq order; a seq below the next expected one (a late chunk after a gap was given up)
-  is dropped. A failed chunk is logged, counted in `skipped`, and the session goes on. If nothing at all could be
-  transcribed, the session ends in `error` ("Nothing could be transcribed") instead of an empty summary.
+  is dropped. A failed chunk is logged, counted in `skipped`, and the session goes on. If nothing at all came out of
+  the talk, the session ends in `error` instead of an empty summary: "Nothing could be transcribed" when a chunk failed, or "Nothing was heard" when there were no failed chunks (silence, or no chunks at all). A good hint or summary clears an earlier `error`.
 - Hint prompt: return 2–3 lines, each under 40 characters, chosen from: a key point, a question worth asking,
   a useful fact. Nothing else.
 - The app stops at 30 minutes and sends its last chunk; the hub only enforces a 31-minute guard (its own timer
@@ -77,7 +77,7 @@ own machine:
 - local: OpenAI-compatible chat on `http://127.0.0.1:18081/v1` on that node (Ornith 35B on the laptop).
   It is reached only on loopback by the node itself and is never exposed.
 - claude: `claude -p --tools "" --strict-mcp-config --no-session-persistence` in a fresh temp folder.
-- codex: `codex exec --skip-git-repo-check --sandbox read-only --ephemeral -C <temp>` with the prompt on stdin.
+- codex: `codex exec --skip-git-repo-check --sandbox read-only --ephemeral --ignore-user-config -C <temp> -` with the prompt on stdin. `--ignore-user-config` is in `codex exec --help` for codex-cli 0.162.0: "Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`".
 
 The runners are the public Ask tile's backend code (public/g2-tiles/hub/ask.mjs, now g2-omac), moved into
 `glasses/think.mjs` so hud-server.mjs only imports it. Test hooks are environment variables:
