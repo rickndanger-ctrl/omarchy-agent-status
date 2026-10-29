@@ -5,6 +5,8 @@ import { HubPicker } from './hubpick';
 import { LayoutLoader } from './layoutcache';
 import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
+import { InputQueue, type InputSource } from './inputqueue';
+import { makeHandle, TOP_SCREENS } from './inputflow';
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
@@ -46,7 +48,7 @@ let foreground = true;
 // The phone remote: while Home is in front, one long-poll to the current hub brings the phone's buttons; each one goes through handle() like a gesture.
 const remote = new RemoteInput({
   hub: () => base, token: () => token, active: () => foreground,
-  apply: input => { handle(input); diag('remote.applied', `${input} on ${showingTiles() ? 'tiles' : model.screenKind}`); },
+  apply: input => handle(input, 'remote'),
 });
 
 const model = new HomeModel();
@@ -59,7 +61,7 @@ let status = 'Starting…';
 const MENU = { pause: 2, hideDone: 3, home: 4, agents: 5, messages: 6, muse: 7, tiles: 8, tilesOn: 9, editPage: 10, hideOldTexts: 1 };
 let lastDevice = '';
 const glasses = new Glasses({
-  onInput: input => handle(input),
+  onInput: input => handle(input, 'touch'),
   onMenu: id => void menu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
   onForeground: on => { foreground = on; remote.sync(); if (on) void poll(); },
@@ -265,7 +267,6 @@ const tileCtx = (): TileContext => ({
 });
 const showingTiles = () => tilesActive && !fromTiles;
 // Screens a tile opens: one double-tap there goes straight back to Tiles.
-const TOP_SCREENS = ['agent', 'chat', 'muse', 'messages', 'needs', 'studio', 'home'];
 
 /** Set once the first /api/home poll worked: nothing else (Muse) is read before that. */
 let homeLoaded = false;
@@ -603,30 +604,27 @@ async function run(action: Action): Promise<void> {
   paint();
 }
 
-function handle(input: Input): void {
-  diag('input', `${input} on ${showingTiles() ? 'tiles' : model.screenKind}`);
-  if (showingTiles()) {
-    const result = tiles.input(input, tileCtx());
-    if (result?.kind === 'exit') { tilesActive = false; model.goHome(); paint(); return; }
-    paint();
-    if (result) runTileEffect(result as TileEffect);
-    const edited = tiles.takeEdited();
-    if (edited) void saveLayout(edited);
-    void refreshTiles();
-    return;
-  }
-  // Back from a screen a tile opened: straight to Tiles.
-  if (tilesActive && fromTiles && input === 'back' && TOP_SCREENS.includes(model.screenKind)) {
-    fromTiles = false;
-    paint();
-    void refreshTiles();
-    return;
-  }
-  const action = model.input(input, Date.now());
-  paint();
-  if (action) void run(action);
-  void refreshTerminal();
-}
+/** What a press does (src/inputflow.ts), given the pieces of this file. */
+const applyInput = makeHandle({
+  model, tiles, tileCtx, showingTiles,
+  inOpenedScreen: () => tilesActive && fromTiles,
+  leaveTiles: () => { tilesActive = false; model.goHome(); paint(); },
+  backToTiles: () => { fromTiles = false; paint(); void refreshTiles(); },
+  paint, runTileEffect,
+  runModelAction: action => void run(action),
+  saveLayout: layout => void saveLayout(layout),
+  refreshTiles: () => void refreshTiles(),
+  refreshTerminal: () => void refreshTerminal(),
+  now: () => Date.now(),
+});
+/** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
+const inputQueue = new InputQueue({
+  apply: applyInput,
+  screen: () => (showingTiles() ? 'tiles' : model.screenKind),
+  settled: () => glasses.settled(),
+  log: (name, detail) => diag(name, detail),
+});
+function handle(input: Input, source: InputSource = 'touch'): void { inputQueue.push(input, source); }
 
 async function menu(id: number): Promise<void> {
   diag('menu', id);

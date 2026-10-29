@@ -18,6 +18,7 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import type { TilesFrame } from './tiles';
 import type { Input } from './model';
+import { SettleWaiters } from './settle';
 
 export interface MenuItem { id: number; name: string }
 export interface GlassesOptions {
@@ -80,10 +81,21 @@ export class Glasses {
   /** Taps before this time are dropped: the tap that brings Home back to the front isn't meant for Home. */
   private quietUntil = 0;
   private deviceTimer: ReturnType<typeof setInterval> | undefined;
+  private settleWaiters = new SettleWaiters();
 
   constructor(private readonly options: GlassesOptions, private readonly menu: MenuItem[]) {}
 
   get isConnected(): boolean { return this.connected; }
+
+  /** True when nothing more will reach the glasses soon: nothing pending, no render running, or no way to render. */
+  private isSettled(): boolean {
+    return !this.connected || !this.foreground || this.renderBlocked || (!this.renderBusy && this.renderTimer === undefined && this.pending() === null);
+  }
+
+  /** Resolves when the glasses show what was last set (capped, so a stuck render cannot hold input back for long). */
+  settled(capMs = 1500): Promise<void> {
+    return this.settleWaiters.wait(() => this.isSettled(), capMs);
+  }
 
   connect(): Promise<boolean> {
     if (this.connected) return Promise.resolve(true);
@@ -327,6 +339,7 @@ export class Glasses {
     } finally {
       this.renderBusy = false;
       this.scheduleRender();
+      this.settleWaiters.notify(() => this.isSettled());
     }
   }
 }
