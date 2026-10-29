@@ -6,7 +6,7 @@ summary. This is our own design; it is not based on any other product. Contract 
 
 ## Rules
 
-- It listens only after a Start: a tap in the tile, or "Listen" in the long-press menu. It is never always-on.
+- It listens only after a Start: a tap in the tile. It is never always-on. (There is no "Listen" item in the glasses long-press menu: the Even SDK allows 10 items, and an 11th makes the whole app fail to start.)
 - While listening, the tile header shows `● Listening mm:ss`. It stops after 30 minutes, when the owner stops it,
   or when the app leaves the foreground. Each of these makes a summary.
 - Only one session runs at a time, and the microphone is shared: while listening, the voice-reply microphone
@@ -96,7 +96,7 @@ The runners are the public Ask tile's backend code (public/g2-tiles/hub/ask.mjs,
 
 Layout id: `conversation`. Header: `Conversation` when idle, `● Listening 12:04` while listening,
 `Summarizing…`, `Summary · 14:32` when done.
-- Idle: tap → Start (with the backend from Settings). Long-press menu item "Listen" does the same from anywhere.
+- Idle: tap → Start (with the backend from Settings).
 - Listening: shows the hints; tap → Stop. The app sends ~9 s of PCM per chunk, in order, one at a time.
 - Done: shows the summary and action items (scrollable). Tap → actions: Start new · Send summary to Muse.
 

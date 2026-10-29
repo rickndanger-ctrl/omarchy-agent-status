@@ -31,6 +31,8 @@ export interface GlassesOptions {
   onAudio: (pcm: Uint8Array) => void;
   onSlowRender?: (ms: number) => void;
   onLifecycle?: (event: string) => void;
+  /** Where the Even app bridge comes from (tests pass a fake). Default: the SDK's waitForEvenAppBridge. */
+  bridge?: () => Promise<EvenAppBridge>;
 }
 
 const CONTAINER_ID = 1;
@@ -89,6 +91,9 @@ export class Glasses {
 
   get isConnected(): boolean { return this.connected; }
 
+  /** Stops the battery timer (tests; the app never calls it). */
+  dispose(): void { if (this.deviceTimer) clearInterval(this.deviceTimer); this.deviceTimer = undefined; this.epoch++; }
+
   /** rendered: nothing pending, no render running. not-visible: nothing can reach the glasses now. null: still on its way. */
   private settleState(): SettleResult | null {
     if (!this.connected || !this.foreground || this.renderBlocked) return 'not-visible';
@@ -139,7 +144,7 @@ export class Glasses {
     let stage = 'Even app bridge';
     this.options.onStatus('Connecting to the Even app…');
     try {
-      this.sdk = await bounded(waitForEvenAppBridge(), stage);
+      this.sdk = await bounded((this.options.bridge ?? waitForEvenAppBridge)(), stage);
       if (epoch !== this.epoch) return false;
       this.sdk.onEvenHubEvent(event => this.onEvent(event));
       this.sdk.onDeviceStatusChanged(status => this.options.onDevice({ battery: status.batteryLevel, wearing: status.isWearing, raw: JSON.stringify(status) }));

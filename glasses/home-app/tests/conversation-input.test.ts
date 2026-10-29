@@ -5,12 +5,11 @@ import assert from 'node:assert/strict';
 import { HomeModel } from '../src/model';
 import type { Action, Input } from '../src/model';
 import { Tiles, normalizeLayout, type TileContext, type TileEffect } from '../src/tiles';
-import { makeHandle, runConversationEffect, startConversation } from '../src/inputflow';
+import { makeHandle, runConversationEffect } from '../src/inputflow';
 import { InputQueue, type InputSource } from '../src/inputqueue';
 import { ConversationSession, CHUNK_BYTES, type Conversation, type ConvHub, type ConvBackend } from '../src/conversation';
 
 const NOW = Date.UTC(2026, 9, 29, 14, 32);
-const MENU_LISTEN = 11;
 
 function rig(opts: { micOk?: boolean; hubGate?: Promise<void>; capMs?: number } = {}) {
   const model = new HomeModel();
@@ -51,7 +50,7 @@ function rig(opts: { micOk?: boolean; hubGate?: Promise<void>; capMs?: number } 
   const log: string[] = [];
   const flags = { foreground: true };
   const queue = new InputQueue({
-    apply, menu: id => (id === MENU_LISTEN ? startConversation(host) : undefined),
+    apply, menu: () => undefined,
     generation: () => model.generation + (tilesActive ? 0 : 1000), foreground: () => flags.foreground,
     screen: () => (tilesActive ? 'tiles' : model.screenKind), settled: () => Promise.resolve('rendered' as const),
     log: (n, d) => log.push(`${n} ${d}`),
@@ -127,22 +126,18 @@ test('start, then stop from the touchpad: mic off, summarizing', async () => {
   assert.equal(r.conv.view().phase, 'summarizing');
 });
 
-test('Listen in the long-press menu starts the same way, through the queue', async () => {
-  const r = rig();
-  r.setBackend('local');
-  r.queue.pushMenu(MENU_LISTEN);
-  await r.idle();
-  assert.deepEqual(r.hubCalls, ['start:local']);
-  assert.equal(r.conv.view().phase, 'listening');
-  assert.ok(r.log.some(l => l.startsWith('menu 11 from touch')));
-  assert.ok(r.flashes.includes('Listening'));
+test('there is no Listen item in the glasses menu (the SDK allows 10 and 0.4.9 had 11); the tile tap starts listening', async () => {
+  const { GLASSES_MENU } = await import('../src/menu');
+  assert.ok(!GLASSES_MENU.some(m => /listen/i.test(m.name)));
+  assert.ok(GLASSES_MENU.length <= 10);
 });
 
-test('the menu is ignored while the app is not in front (no listening in the background)', async () => {
+test('a tap does nothing while the app is not in front (no listening in the background)', async () => {
   const r = rig();
+  await openTile(r);
   r.flags.foreground = false;
-  r.queue.pushMenu(MENU_LISTEN);
   r.press('remote', 'select');
+  r.press('touch', 'select');
   await r.idle();
   assert.deepEqual(r.hubCalls, []);
   assert.equal(r.conv.view().phase, 'idle');
@@ -151,11 +146,12 @@ test('the menu is ignored while the app is not in front (no listening in the bac
 test('Start is refused while the voice-reply microphone is recording', async () => {
   const r = rig();
   r.setRecording(true);
-  r.queue.pushMenu(MENU_LISTEN);
+  await openTile(r);
+  r.press('touch', 'select');
   await r.idle();
   assert.deepEqual(r.hubCalls, []);
   assert.deepEqual(r.micLog, []);
-  assert.ok(r.flashes.some(f => /voice reply/.test(f)));
+  assert.ok(r.flashes.some(f => /voice reply/.test(f)) || r.conv.view().notice.includes('voice reply'));
 });
 
 test('done: Start new and Send summary to Muse come from the tap menu, via remote presses', async () => {
