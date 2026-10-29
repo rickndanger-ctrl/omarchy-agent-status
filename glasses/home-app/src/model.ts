@@ -346,6 +346,8 @@ export class HomeModel {
     if (this.screen.kind === 'agent' && this.screen.key === key) this.terminal = { key, lines: lines ?? ['(Could not read this agent.)'] };
   }
 
+  hasTerminal(key: string): boolean { return this.terminal?.key === key; }
+
   private terminalLines(): string[] | null {
     const s = this.screen;
     if (s.kind !== 'agent' || this.terminal?.key !== s.key) return null;

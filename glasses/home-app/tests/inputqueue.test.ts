@@ -279,11 +279,15 @@ test('(c) an update that brings an alert makes the earlier queued press stale; o
   r.gate.open = false;
   r.press('down');
   r.queue.pushExternal('poll', () => r.model.update({ ...data, pending: [{ id: 'p9', agent: 'Claude', page: 'p', tool: 'Bash', summary: 'x', at: NOW, machine: 'm1' }] }));
-  r.press('select'); // pressed while the home list was still shown, runs after the alert popped up
+  r.press('select'); // pressed while the home list was still shown
   r.gate.open = true;
   r.gate.release.splice(0).forEach(f => f());
   await r.idle();
-  assert.ok(r.log.some(l => l.startsWith('input.stale select from remote on approval')), r.log.join('\n'));
+  // Presses go before waiting updates: the select acts on the home list the owner saw, then the alert pops up (stale presses
+  // for a screen an alert replaced are covered by (8)).
+  assert.ok(r.log.some(l => l.startsWith('input select from remote on home')), r.log.join('\n'));
+  assert.ok(!r.log.some(l => l.startsWith('input.stale')), r.log.join('\n'));
+  assert.equal(r.model.screenKind, 'approval');
   const ok = rig();
   ok.gate.open = false;
   ok.press('down');

@@ -540,6 +540,7 @@ async function poll(): Promise<void> {
 
 /** The open agent page shows its conversation, refreshed while it is open. */
 let terminalBusy = false;
+const lastTerminal = new Map<string, string>();
 async function refreshTerminal(): Promise<void> {
   const target = model.terminalTarget();
   if (!target || terminalBusy) return;
@@ -550,7 +551,10 @@ async function refreshTerminal(): Promise<void> {
     lines = (await api<{ lines: string[] }>(`terminal?${query}`)).lines;
   } catch { /* shown as "could not load" */ } finally {
     terminalBusy = false;
-    inputQueue.pushExternal('terminal', () => { model.setTerminal(target.key, lines); paint(); });
+    // The same text as last time changes nothing on the glasses: no update, no repaint.
+    const same = lines !== null && lastTerminal.get(target.key) === JSON.stringify(lines);
+    if (lines !== null) lastTerminal.set(target.key, JSON.stringify(lines));
+    if (!same || !model.hasTerminal(target.key)) inputQueue.pushExternal('terminal', () => { model.setTerminal(target.key, lines); paint(); });
   }
 }
 
@@ -720,7 +724,7 @@ const inputQueue = new InputQueue({
   foreground: () => foreground,
   generation: screenGeneration,
   screen: () => (showingTiles() ? 'tiles' : model.screenKind),
-  settled: () => glasses.settled(),
+  settled: capMs => glasses.settled(capMs),
   log: (name, detail) => diag(name, detail),
 });
 function handle(input: Input, source: InputSource = 'touch'): void { inputQueue.push(input, source); }

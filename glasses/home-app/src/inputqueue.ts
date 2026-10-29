@@ -11,6 +11,8 @@ export const MAX_QUEUED = 5;
 export const MAX_TOUCH_QUEUED = 10;
 /** An apply that returns a promise (a menu choice waiting for the hub, the microphone) is awaited at most this long. */
 export const APPLY_WAIT_MS = 3000;
+/** An update (poll, terminal, tiles) waits for its frame at most this long, and not at all while a press is waiting. */
+export const EXTERNAL_WAIT_MS = 300;
 
 export interface QueueHost {
   /** Apply one press (the app's handle flow). May return a promise to be awaited (microphone changes). */
@@ -27,7 +29,7 @@ export interface QueueHost {
   /** Is the app in front? Presses are ignored when it is not. */
   foreground(): boolean;
   /** Resolves when the glasses show what the model says (capped by the caller). */
-  settled(): Promise<SettleResult>;
+  settled(capMs?: number): Promise<SettleResult>;
   log(name: string, detail: string): void;
 }
 
@@ -97,10 +99,16 @@ export class InputQueue {
     } finally { clearTimeout(timer); }
   }
 
+  /** Presses and menu choices go before waiting updates: a press must never queue behind a poll's or a terminal's repaint. */
+  private takeNext(): Entry | undefined {
+    const i = this.pending.findIndex(e => e.kind !== 'external');
+    return this.pending.splice(i < 0 ? 0 : i, 1)[0];
+  }
+
   private async drain(): Promise<void> {
     this.running = true;
     try {
-      for (let next = this.pending.shift(); next; next = this.pending.shift()) {
+      for (let next = this.takeNext(); next; next = this.takeNext()) {
         if (next.kind === 'input' && next.stamp !== this.unsolicited()) {
           // An alert (or anything else) changed the screen after this press was queued: it was meant for another screen.
           this.host.log('input.stale', `${label(next)} on ${this.host.screen()}`);
@@ -119,7 +127,9 @@ export class InputQueue {
         await this.bounded(job);
         // Always wait, even with nothing queued yet: the next press (a remote sends them ~20 ms apart) must not
         // run until the glasses show this one's result.
-        const result = await this.host.settled();
+        // An update only waits briefly, and not at all with something queued behind it: its frame is not worth a press's time.
+        if (next.kind === 'external' && this.pending.length) continue;
+        const result = await this.host.settled(next.kind === 'external' ? EXTERNAL_WAIT_MS : undefined);
         if (next.kind !== 'external') this.host.log(result === 'rendered' ? 'shown' : result === 'capped' ? 'settle-capped' : 'not-visible', this.host.screen());
         // Nothing can be seen: the rest of the presses would be blind. Forget them.
         if (result === 'not-visible') this.clear('not visible');
