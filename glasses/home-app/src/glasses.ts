@@ -33,6 +33,8 @@ export interface GlassesOptions {
   onAudio: (pcm: Uint8Array) => void;
   onSlowRender?: (ms: number) => void;
   onLifecycle?: (event: string) => void;
+  /** How long one write to the Even app may take before it counts as failed (default 5000; tests shorten it). */
+  renderTimeoutMs?: number;
   /** A render reached the glasses (what: rebuild, text, left or right). */
   onFrame?: (what: string) => void;
   /** Where the Even app bridge comes from (tests pass a fake). Default: the SDK's waitForEvenAppBridge. */
@@ -85,6 +87,8 @@ export class Glasses {
   private renderBusy = false;
   private renderBlocked = false;
   private heldWhy = '';
+  private failedWant: Frame | null = null;
+  private inFlight = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private lastRenderAt = -Infinity;
   private pressing = false;
@@ -246,15 +250,36 @@ export class Glasses {
 
   setText(content: string): void {
     this.want = { kind: 'single', text: glassesSafe(content).slice(0, 950) || ' ' };
-    this.renderBlocked = false;
+    this.unblockFor(this.want);
     this.scheduleRender();
   }
 
   /** Tiles mode. `layoutKey` names the page; changing it or the focus rebuilds the page, a text change only updates that tile. */
   setTiles(layoutKey: string, focus: TilesFrame['focus'], left: string, right: string): void {
     this.want = { kind: 'tiles', key: `${layoutKey}/${focus}`, focus, left: glassesSafe(left).slice(0, 400) || ' ', right: glassesSafe(right).slice(0, 400) || ' ' };
-    this.renderBlocked = false;
+    this.unblockFor(this.want);
     this.scheduleRender();
+  }
+
+  /** A new frame may try at once after a failure; the same one that just failed waits for the retry timer (no 450 ms hammering). */
+  private unblockFor(want: Frame): void {
+    if (this.renderBlocked && this.failedWant && JSON.stringify(this.failedWant) === JSON.stringify(want)) return;
+    this.renderBlocked = false;
+  }
+
+  /**
+   * One write to the Even app. A write that outlives its timeout is not cancelled by the SDK and can still land later, so
+   * nothing else is sent while it is in flight; when it settles the glasses may show anything, so the newest wanted frame is sent again.
+   */
+  private write<T>(promise: Promise<T>, stage: string): Promise<T> {
+    this.inFlight++;
+    const started = this.epoch;
+    let timedOut = false;
+    void promise.then(() => undefined, () => undefined).then(() => {
+      this.inFlight--;
+      if (timedOut && started === this.epoch) { this.shown = null; this.scheduleRender(); }
+    });
+    return bounded(promise, stage, this.options.renderTimeoutMs ?? 5000).catch(error => { timedOut = true; throw error; });
   }
 
   /** What still has to reach the glasses: a rebuild, one tile's text, or nothing. */
@@ -346,7 +371,7 @@ export class Glasses {
     const why = !this.connected ? 'not connected' : !this.foreground ? 'not in front' : this.renderBlocked ? 'last update failed' : '';
     if (why && this.pending() !== null && why !== this.heldWhy) this.options.onLifecycle?.(`frame held: ${why}`);
     this.heldWhy = why;
-    if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.renderTimer !== undefined || this.pending() === null) return;
+    if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.inFlight > 0 || this.renderTimer !== undefined || this.pending() === null) return;
     const wait = Math.max(0, MIN_RENDER_INTERVAL_MS - (performance.now() - this.lastRenderAt));
     this.renderTimer = setTimeout(() => { this.renderTimer = undefined; void this.flushRender(); }, wait);
   }
@@ -367,16 +392,16 @@ export class Glasses {
     try {
       let accepted: boolean;
       if (todo === 'rebuild') {
-        accepted = await bounded(this.sdk.rebuildPageContainer(new RebuildPageContainer(this.page(want))), 'Glasses page update', 5000);
+        accepted = await this.write(this.sdk.rebuildPageContainer(new RebuildPageContainer(this.page(want))), 'Glasses page update');
       } else if (want.kind === 'single') {
-        accepted = await bounded(this.sdk.textContainerUpgrade(new TextContainerUpgrade({
+        accepted = await this.write(this.sdk.textContainerUpgrade(new TextContainerUpgrade({
           containerID: CONTAINER_ID, containerName: CONTAINER_NAME, content: want.text,
-        })), 'Glasses text update', 5000);
+        })), 'Glasses text update');
       } else {
         const side = todo as 'left' | 'right';
-        accepted = await bounded(this.sdk.textContainerUpgrade(new TextContainerUpgrade({
+        accepted = await this.write(this.sdk.textContainerUpgrade(new TextContainerUpgrade({
           containerID: TILE_IDS[side], containerName: TILE_NAMES[side], content: want[side],
-        })), 'Glasses text update', 5000);
+        })), 'Glasses text update');
       }
       if (epoch !== this.epoch) return;
       const took = performance.now() - this.lastRenderAt;
@@ -388,10 +413,11 @@ export class Glasses {
     } catch (error) {
       if (epoch === this.epoch) {
         this.renderBlocked = true;
+        this.failedWant = want;
         this.options.onStatus(`Glasses text update failed: ${reason(error)}`);
         // Nothing may be left waiting for a touch: try again by itself (a newer setText also unblocks it at once).
         clearTimeout(this.retryTimer);
-        this.retryTimer = setTimeout(() => { this.retryTimer = undefined; if (epoch === this.epoch) { this.renderBlocked = false; this.scheduleRender(); } }, RENDER_RETRY_MS);
+        this.retryTimer = setTimeout(() => { this.retryTimer = undefined; if (epoch === this.epoch) { this.renderBlocked = false; this.failedWant = null; this.scheduleRender(); } }, RENDER_RETRY_MS);
       }
     } finally {
       this.renderBusy = false;

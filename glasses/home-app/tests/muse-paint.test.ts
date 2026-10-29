@@ -94,3 +94,82 @@ test('a failed update at the moment of the reply is retried by itself: the reply
   assert.ok(shown!.at - paintedAt <= 2500, `shown ${shown!.at - paintedAt} ms later`);
   g.dispose();
 });
+
+/** A bridge whose text writes the test controls: each call is recorded, and `reply` decides how it ends. */
+function controlled(calls: { text: string; at: number }[], t0: number, reply: (text: string) => Promise<boolean>) {
+  return {
+    onEvenHubEvent: () => () => {}, onDeviceStatusChanged: () => () => {},
+    getDeviceInfo: async () => ({ status: { batteryLevel: 80, isWearing: true } }),
+    createStartUpPageContainer: async () => StartUpPageCreateResult.success,
+    // a rebuild carries the whole page: its text container's content is what the glasses show
+    rebuildPageContainer: async (c: { textObject?: { content?: string }[] }) => { const text = c.textObject?.[0]?.content; if (text !== undefined) calls.push({ text, at: Date.now() - t0 }); return true; },
+    textContainerUpgrade: (u: { content?: string }) => { calls.push({ text: u.content ?? '', at: Date.now() - t0 }); return reply(u.content ?? ''); },
+    audioControl: async () => true, shutDownPageContainer: async () => true,
+  } as unknown as EvenAppBridge;
+}
+
+test('a failed update is not hammered: repainting the same text (the status callback does) waits for the 1.5 s retry', async () => {
+  const calls: { text: string; at: number }[] = [];
+  const t0 = Date.now();
+  const ref: { g?: Glasses } = {};
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {},
+    onStatus: s => { if (/failed/.test(s)) ref.g?.setText('the reply'); }, // main.ts: onStatus paints
+    bridge: async () => controlled(calls, t0, async () => false),
+  }, GLASSES_MENU);
+  ref.g = g;
+  await g.connect();
+  g.setText('the reply');
+  await sleep(1300);
+  assert.equal(calls.filter(c => c.text === 'the reply').length, 1, JSON.stringify(calls));
+  await sleep(1000); // past the retry
+  assert.equal(calls.filter(c => c.text === 'the reply').length, 2, JSON.stringify(calls));
+  g.setText('another text'); // a different frame may try at once
+  await sleep(700);
+  assert.ok(calls.some(c => c.text === 'another text'));
+  g.dispose();
+});
+
+test('a timed-out write that lands late cannot leave stale text: nothing is sent while it is in flight, then the newest goes out', async () => {
+  const calls: { text: string; at: number }[] = [];
+  const t0 = Date.now();
+  let releaseOld: (ok: boolean) => void = () => {};
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {}, onStatus: () => {},
+    renderTimeoutMs: 100,
+    bridge: async () => controlled(calls, t0, text => (text === 'old text' ? new Promise<boolean>(r => { releaseOld = r; }) : Promise.resolve(true))),
+  }, GLASSES_MENU);
+  await g.connect();
+  g.setText('old text');
+  await sleep(250); // the write timed out
+  g.setText('newest text');
+  await sleep(2000); // longer than the retry: still nothing sent over the old write
+  assert.deepEqual(calls.map(c => c.text), ['old text'], 'nothing is sent while the old write is in flight');
+  releaseOld(true); // the old write lands late
+  await sleep(1200);
+  assert.deepEqual(calls.map(c => c.text), ['old text', 'newest text'], 'the newest text is sent after it, so it is the last word');
+  g.dispose();
+});
+
+test('a timed-out write that lands late after the wanted text went back to the shown one: the glasses are sent it again', async () => {
+  const calls: { text: string; at: number }[] = [];
+  const t0 = Date.now();
+  let releaseOld: (ok: boolean) => void = () => {};
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {}, onStatus: () => {},
+    renderTimeoutMs: 100,
+    bridge: async () => controlled(calls, t0, text => (text === 'B' ? new Promise<boolean>(r => { releaseOld = r; }) : Promise.resolve(true))),
+  }, GLASSES_MENU);
+  await g.connect();
+  g.setText('A');
+  await sleep(700);
+  g.setText('B');
+  await sleep(250); // timed out
+  g.setText('A'); // back to what is shown as far as the app knows
+  releaseOld(true);
+  await sleep(1500);
+  const texts = calls.map(c => c.text);
+  assert.equal(texts.at(-1), 'A', texts.join(','));
+  assert.equal(texts.filter(t => t === 'A').length, 2, 'A is sent again after the late B: ' + texts.join(','));
+  g.dispose();
+});
