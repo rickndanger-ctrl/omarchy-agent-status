@@ -365,6 +365,7 @@ export class Glasses {
       this.imuStopped();
       this.options.onLifecycle?.('foreground-exit');
       this.foreground = false;
+      this.pressing = false;
       this.options.onForeground(false);
       this.notifySettled();
       return;
@@ -372,6 +373,7 @@ export class Glasses {
     if (system?.eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
       this.options.onLifecycle?.('foreground-enter');
       this.foreground = true;
+      this.pressing = false;
       this.quietUntil = Date.now() + 1000;
       this.renderBlocked = false;
       this.options.onForeground(true);
@@ -380,6 +382,7 @@ export class Glasses {
     }
     if (system?.eventType === OsEventTypeList.SYSTEM_EXIT_EVENT || system?.eventType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
       this.options.onLifecycle?.(`exit ${system.eventType}`);
+      this.pressing = false;
       this.imuStopped();
       ++this.epoch;
       this.forgetWrites();
@@ -409,6 +412,7 @@ export class Glasses {
       this.foreground = true;
       this.renderBlocked = false;
       this.options.onLifecycle?.('foreground-assumed');
+      this.pressing = false;
       this.options.onForeground(true);
       this.scheduleRender();
       // That tap is what brought Home back (closing the glasses menu, waking the display): don't act on it.
@@ -418,16 +422,19 @@ export class Glasses {
       this.options.onMenu(event.menuItemClickEvent.itemID);
       return;
     }
-    if (!this.connected || !this.foreground || system?.imuData) return;
-    if (Date.now() < this.quietUntil) { this.options.onLifecycle?.('input-ignored (just came to front)'); return; }
+    if (system?.imuData) return;
     // Official minimal template: taps normally arrive as sysEvent, scrolling as textEvent.
     // Only default to a click inside an actual envelope; empty or audio events aren't taps.
     const types = [event.sysEvent, event.textEvent, event.listEvent]
       .filter(envelope => envelope !== undefined && envelope !== null)
       .map(envelope => envelope!.eventType ?? OsEventTypeList.CLICK_EVENT);
+    // Press and release are tracked before any other check: a release swallowed by the quiet window or
+    // while Home was behind the glasses menu left `pressing` stuck and every later tap was dropped.
     if (types.includes(OsEventTypeList.LONG_PRESS_EVENT)) { this.pressing = true; return; }
     if (types.includes(OsEventTypeList.LONG_PRESS_RELEASE_EVENT)) { this.pressing = false; return; }
-    if (this.pressing) return;
+    if (!this.connected || !this.foreground) return;
+    if (Date.now() < this.quietUntil) { this.options.onLifecycle?.('input-ignored (just came to front)'); return; }
+    if (this.pressing) { this.options.onLifecycle?.('input-ignored (long press held)'); return; }
     if (types.includes(OsEventTypeList.DOUBLE_CLICK_EVENT)) this.options.onInput('back');
     else if (types.includes(OsEventTypeList.CLICK_EVENT)) this.options.onInput('select');
     else if (types.includes(OsEventTypeList.SCROLL_TOP_EVENT)) this.options.onInput('up');
