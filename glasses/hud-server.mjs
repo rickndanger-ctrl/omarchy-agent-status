@@ -178,7 +178,7 @@ async function agentPanes() {
   let panes, processes
   try {
     // Spaces, session name before the path (path last, it may hold spaces): newer tmux prints a tab in -F output as "_".
-    panes = (await run('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{session_name} #{pane_current_path}'], { timeout: 2000 })).stdout
+    panes = (await run('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{session_name}|#{pane_current_path}'], { timeout: 2000 })).stdout
     processes = (await run('ps', ['-eo', 'pid=,ppid=,args='], { timeout: 2000 })).stdout
   } catch {
     return []
@@ -197,7 +197,7 @@ async function agentPanes() {
   }
   const result = []
   for (const line of panes.split('\n')) {
-    const [, pane, pid, tmux, cwd] = line.match(/^(\S+) (\S+) (\S+) ?(.*)$/) ?? []
+    const [, pane, pid, tmux, cwd] = line.match(/^(\S+) (\S+) (.*?)\|(.*)$/) ?? []
     if (!/^%\d+$/.test(pane || '')) continue
     const queue = [pid]
     for (let i = 0; i < queue.length && i < 200; i++) {

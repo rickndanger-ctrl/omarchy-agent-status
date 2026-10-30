@@ -197,7 +197,7 @@ test('agent page is a terminal view: its conversation, newest at the bottom, swi
   assert.doesNotMatch(text, /line 11\n/);
   m.input('up', NOW);
   text = m.render(NOW);
-  assert.match(text, /line 17\nswipe up: scroll · down: newer$/);
+  assert.match(text, /line 17\n▼ 3 newer$/);
   m.input('down', NOW);
   assert.match(m.render(NOW), /line 20$/);
   assert.equal(m.screenKind, 'agent', 'swipe down from scrolled-back returns to newest, not replies');
@@ -216,7 +216,7 @@ test('messages get a bar with who and the time (seconds); scrolled back, the foo
   text = m.render(NOW);
   assert.match(text, /^--- YOU · 6:41:58 PM -+$/m);
   assert.match(text, /^=== CLAUDE · 6:42:15 PM =+$/m);
-  assert.match(text, /\n6:41:58 PM · newest 6:42:15 PM · ▼ newer$/);
+  assert.match(text, /\n▼ 8 newer$/);
   for (const line of text.split('\n')) assert.ok(line.length <= 56, line);
 });
 

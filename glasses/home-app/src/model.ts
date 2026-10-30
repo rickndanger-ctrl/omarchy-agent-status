@@ -188,8 +188,6 @@ export function age(seconds: number, nowMs: number): string {
 }
 
 export const STATE_WORD: Record<string, string> = { working: 'busy', done: 'done', attention: 'needs you', error: 'error', stopped: 'stopped', idle: 'ready' };
-/** The status bar's symbols (status.py SYMBOLS); a pin with no session shows '·'. */
-export const SYMBOL: Record<string, string> = { working: '●', done: '✓', attention: '●', error: '●', stopped: '●', idle: '○' };
 const STATE_RANK: Record<string, number> = { attention: 5, error: 4, working: 3, done: 2, idle: 1, stopped: 0 };
 const MARK: Record<string, string> = { attention: '!', error: '!', working: '•', done: '-', stopped: '-', idle: '·' };
 const NOTICE_MS = 10 * 60_000;
@@ -514,11 +512,11 @@ export class HomeModel {
     if (pins.length) {
       for (const pin of pins) {
         const x = this.pinSession(pin);
-        const machineUp = d.machines.find(m => m.name === pin.machine)?.online !== false;
+        const machineUp = d.machines.find(m => m.name === pin.machine)?.online === true; // unknown or down = offline
         const live = x && machineUp ? x : undefined;
         // A computer that is down is offline; a computer that is up with no such session says the agent is not running.
         const word = live ? STATE_WORD[live.state] ?? live.state : machineUp ? 'not running' : 'offline';
-        rows.push({ text: clip(`${live ? SYMBOL[live.state] ?? '●' : '·'} ${pin.label} · ${word}`, WIDTH - 2), ...(live ? { open: { kind: 'agent' as const, key: sessionKey(live) } } : {}) });
+        rows.push({ text: clip(`${live ? MARK[live.state] ?? '-' : '·'} ${pin.label} · ${word}`, WIDTH - 2), ...(live ? { open: { kind: 'agent' as const, key: sessionKey(live) } } : {}) });
       }
     } else rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
     if (d.messages) {
@@ -921,12 +919,8 @@ export class HomeModel {
             const start = Math.max(0, end - rowsShown);
             const view = all.slice(start, end);
             lines.push(...view, ...Array(rowsShown - view.length).fill(''));
-            // Scrolled back: the time of the message on screen and of the newest one, so you can tell how far back you are.
-            const timeAt = (i: number) => { for (; i >= 0; i--) { const t = all[i].match(BAR_TIME); if (t) return t[1]; } return ''; };
-            const firstBar = view.findIndex(l => BAR_TIME.test(l));
-            const reading = timeAt(firstBar >= 0 ? start + firstBar : start);
-            const newest = timeAt(all.length - 1);
-            if (this.termScroll) lines.push(reading && newest ? `${reading} · newest ${newest} · ▼ newer` : 'swipe up: scroll · down: newer');
+            // Scrolled back: one short position line (no hints).
+            if (this.termScroll) lines.push(`▼ ${this.termScroll} newer`);
           }
         }
       }

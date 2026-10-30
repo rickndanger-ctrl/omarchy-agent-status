@@ -33,9 +33,9 @@ test('Home: one row per pin with the bar symbol and the bar words, then the norm
   m.update(data());
   const text = m.render(NOW);
   const rows = text.split('\n');
-  assert.match(text, /> ● Claude · Mini 1 · busy/);
-  assert.match(text, /○ Codex · Mini 1 · ready/);
-  assert.match(text, /● Claude · Mini 2 · needs you/);
+  assert.match(text, /> • Claude · Mini 1 · busy/);
+  assert.match(text, / · Codex · Mini 1 · ready/);
+  assert.match(text, /! Claude · Mini 2 · needs you/);
   assert.doesNotMatch(text, /Agents · \d+ on/, 'the old Agents row is gone');
   assert.ok(rows.length <= 10, `${rows.length} lines`);
   for (const l of rows) assert.ok(l.length <= WIDTH, l);
@@ -63,7 +63,7 @@ test('two Claude sessions on Mini 1 (claude and g2-claude): the pin opens g2-cla
   const m = new HomeModel();
   m.update(data({ sessions: [sess('Mini 1', 'claude', 'attention', { tmux: 'claude', pane: '%9', session: 'tmux%9' }), sess('Mini 1', 'claude', 'idle', { tmux: 'g2-claude', pane: '%2', session: 'tmux%2' })] }));
   assert.equal(m.pinSession(PINS[0])?.session, 'tmux%2');
-  assert.match(m.render(NOW), /> ○ Claude · Mini 1 · ready/, 'the row shows the pinned session\'s state, not the busier one\'s');
+  assert.match(m.render(NOW), /> · Claude · Mini 1 · ready/, 'the row shows the pinned session\'s state, not the busier one\'s');
   m.input('select', NOW);
   assert.equal(m.screenKind, 'agent');
   assert.match(m.render(NOW), /^CLAUDE · Mini 1/);
@@ -150,4 +150,15 @@ test('Quiet mode off: everything pops as today', () => {
   t.update(data({ messages: [{ id: 1, name: 'Ann', unread: false, when: NOW - 1000, snippet: 'hi', fromMe: false }] }));
   t.update(data({ messages: [{ id: 1, name: 'Ann', unread: true, when: NOW, snippet: 'new', fromMe: false }] }));
   assert.equal(t.screenKind, 'alert');
+});
+
+test('a pin whose computer is not in the machine list at all shows offline; the row glyphs are the ones the glasses font has', () => {
+  const m = new HomeModel();
+  m.update(data({ machines: [{ name: 'Mini 1', online: true }] }));
+  const t = reveal(m, /Claude · Dell/);
+  assert.match(t, /· Claude · Dell · offline/);
+  assert.match(t, /· Claude · Neo · offline/);
+  for (const ch of '●○✓') assert.ok(!m.render(NOW).includes(ch), `${ch} is not drawn by the glasses font`);
+  m.update(data());
+  assert.ok(!reveal(m, /Dell/).includes('○'));
 });
