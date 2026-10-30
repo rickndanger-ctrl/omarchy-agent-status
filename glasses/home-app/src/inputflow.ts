@@ -30,11 +30,19 @@ export interface FlowHost {
   refreshTiles(): void;
   refreshTerminal(): void;
   now(): number;
+  /** The Desk (src/desk.ts, loaded on demand) is in front: it takes every press. */
+  showingDesk?(): boolean;
+  deskInput?(input: Input): void;
+  /** A screen opened from the Desk is showing. */
+  inDeskApp?(): boolean;
+  /** An app opened from the Desk went back to Home: return to the Desk instead. */
+  backToDesk?(): void;
 }
 
 export function makeHandle(host: FlowHost): (input: Input) => void | Promise<void> {
   return input => {
     if (host.isBlank()) { host.wake(); return; }
+    if (host.showingDesk?.()) { host.deskInput?.(input); return; }
     if (host.showingTiles()) {
       const result = host.tiles.input(input, host.tileCtx());
       if (result?.kind === 'exit') { host.leaveTiles(); return; }
@@ -52,6 +60,7 @@ export function makeHandle(host: FlowHost): (input: Input) => void | Promise<voi
       return;
     }
     const action = host.model.input(input, host.now());
+    if (host.inDeskApp?.() && host.model.screenKind === 'home') { host.backToDesk?.(); return; }
     host.paint();
     const job = action ? host.runModelAction(action) : undefined;
     if (action) host.paint();

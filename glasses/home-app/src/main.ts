@@ -11,6 +11,7 @@ import { makeHandle, TOP_SCREENS, runConversationEffect, startConversation, open
 import { MENU, GLASSES_MENU, INTERNAL_MENU, setHideDone } from './menu';
 import { Latest } from './latest';
 import { ConversationSession, ConvHttpError, CONV_BACKENDS, asBackend, type Conversation, type ConvHub } from './conversation';
+import type { Desk, DeskAppId } from './desk'; // type only: desk.ts itself is loaded by import() when the Desk is opened
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
@@ -110,7 +111,7 @@ const glasses = new Glasses({
   onInput: input => handle(input, 'touch'),
   onMenu: id => inputQueue.pushMenu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
-  onForeground: on => { foreground = on; if (!on) { inputQueue.clear('left the front'); void getConv()?.stop('background'); } remote.sync(); if (on) void poll(); },
+  onForeground: on => { foreground = on; if (!on) { inputQueue.clear('left the front'); void getConv()?.stop('background'); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(); } },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
     if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
@@ -118,6 +119,8 @@ const glasses = new Glasses({
     paint();
   },
   onLifecycle: event => diag('lifecycle', event),
+  onImu: sample => desk?.imuSample(sample),
+  onImuOff: () => desk?.imuLost(),
   onFrame: what => diag('frame', `${model.screenKind} ${what}`),
   onSlowRender: ms => diag('render.slow', `${ms} ms on ${model.screenKind}`),
   onAudio: pcm => {
@@ -464,6 +467,78 @@ function runTileEffect(effect: TileEffect): void | Promise<void> {
   }
 }
 
+
+// --- Desk (test): src/desk.ts is loaded only when it is opened ---
+let desk: Desk | null = null;
+/** off: not used; desk: the grid is showing; app: a screen opened from it is showing (Back returns to the grid). */
+let deskMode: 'off' | 'desk' | 'app' = 'off';
+let deskApp: DeskAppId | null = null;
+/** When each press arrived, so two downs are judged by arrival, not by when the queue got to them. */
+let deskArrivals: number[] = [];
+const showingDesk = () => deskMode === 'desk' && desk !== null;
+async function openDesk(): Promise<void> {
+  try {
+    if (!desk) {
+      const mod = await import('./desk');
+      desk = new mod.Desk({ imu: open => glasses.imu(open), paint: () => paint(), settled: () => glasses.settled(), diag: (n, d) => diag(n, d), now: () => Date.now() });
+    }
+  } catch (error) {
+    diag('desk.load-failed', error instanceof Error ? error.message : String(error));
+    model.showFlash('Desk is not available', Date.now());
+    paint();
+    return;
+  }
+  tilesActive = false; fromTiles = false;
+  model.goHome();
+  deskMode = 'desk'; deskApp = null; deskArrivals = [];
+  paint();
+  await desk.enter();
+}
+function leaveDesk(): void {
+  if (deskMode === 'off') return;
+  deskMode = 'off'; deskApp = null; deskArrivals = [];
+  desk?.leave();
+}
+function backToDesk(): void {
+  if (deskMode !== 'app' || !desk) return;
+  if (deskApp) desk.appBack(deskApp);
+  deskApp = null; tilesActive = false; fromTiles = false;
+  model.goHome();
+  deskMode = 'desk'; deskArrivals = [];
+  paint();
+  void desk.enter();
+}
+function openDeskApp(app: DeskAppId): void {
+  if (!desk) return;
+  if (app === 'reminders' || app === 'clock') { desk.note(`${app === 'clock' ? 'Clock' : 'Reminders'}: not yet`); paint(); return; }
+  if (app === 'listen') {
+    const host = convHost();
+    if (!host) { desk.note('Listen: not available'); paint(); return; }
+    void startConversation(host).then(() => { desk?.note('Listen: started'); paint(); });
+    return;
+  }
+  deskMode = 'app'; deskApp = app;
+  desk.leave();
+  if (app === 'tiles') enterTiles();
+  else {
+    if (app === 'muse') { model.goTo('muse'); void run({ kind: 'loadMuse' }); }
+    else if (app === 'messages') model.goTo('messages');
+    else if (app === 'agents') model.goTo('agents');
+    else if (app === 'studio') model.openTarget({ kind: 'studio' });
+    else if (app === 'settings') model.openSettings();
+    void refreshTerminal();
+  }
+  paint();
+}
+function deskInput(input: Input): void {
+  if (!desk) return;
+  const at = deskArrivals.shift() ?? Date.now();
+  const result = desk.input(input, at);
+  if (result?.kind === 'home') { leaveDesk(); model.goHome(); paint(); return; }
+  if (result?.kind === 'open') { openDeskApp(result.app); return; }
+  paint();
+}
+
 let prevKind = model.screenKind;
 /** Display off (Quick settings): a blank page until any press or remote action. */
 let blank = false;
@@ -484,6 +559,9 @@ function paint(): void {
   if (blank) {
     preview = '(display off: any press wakes it)';
     glasses.setText(' ');
+  } else if (showingDesk()) {
+    preview = desk!.render();
+    glasses.setText(preview);
   } else if (showingTiles()) {
     const frame = tiles.render(tileCtx());
     glasses.setTiles(`p${frame.page}`, frame.focus, frame.left, frame.right);
@@ -684,6 +762,8 @@ async function run(action: Action): Promise<void> {
       if (!host) model.showFlash('Conversation is not available', Date.now()); else await startConversation(host);
     } else if (action.kind === 'openTiles') {
       enterTiles();
+    } else if (action.kind === 'openDesk') {
+      await openDesk();
     } else if (action.kind === 'loadMuse') {
       const stamp = museTile.fetchStart();
       const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
@@ -700,7 +780,8 @@ async function run(action: Action): Promise<void> {
 const applyInput = makeHandle({
   model, tiles, tileCtx, showingTiles,
   inOpenedScreen: () => tilesActive && fromTiles,
-  leaveTiles: () => { tilesActive = false; model.goHome(); paint(); },
+  leaveTiles: () => { if (deskMode === 'app') { backToDesk(); return; } tilesActive = false; model.goHome(); paint(); },
+  showingDesk, deskInput, inDeskApp: () => deskMode === 'app' && !tilesActive, backToDesk,
   backToTiles: () => { fromTiles = false; paint(); void refreshTiles(); },
   paint, isBlank: () => blank, wake, runTileEffect,
   runModelAction: action => run(action),
@@ -712,9 +793,12 @@ const applyInput = makeHandle({
 /** Changes whenever the screen does: the model's screen plus Tiles shown/hidden (seen at each call). */
 let tilesFlips = 0;
 let wasShowingTiles = false;
+let wasShowingDesk = false;
 function screenGeneration(): number {
   const now = showingTiles();
   if (now !== wasShowingTiles) { tilesFlips++; wasShowingTiles = now; }
+  const deskNow = showingDesk();
+  if (deskNow !== wasShowingDesk) { tilesFlips++; wasShowingDesk = deskNow; }
   return model.generation + tilesFlips;
 }
 /** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
@@ -723,16 +807,24 @@ const inputQueue = new InputQueue({
   menu: id => menu(id),
   foreground: () => foreground,
   generation: screenGeneration,
-  screen: () => (showingTiles() ? 'tiles' : model.screenKind),
+  screen: () => (showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind),
   settled: capMs => glasses.settled(capMs),
   log: (name, detail) => diag(name, detail),
 });
-function handle(input: Input, source: InputSource = 'touch'): void { inputQueue.push(input, source); }
+function handle(input: Input, source: InputSource = 'touch'): void {
+  if (showingDesk()) deskArrivals.push(Date.now());
+  inputQueue.push(input, source);
+}
 
 async function menu(id: number): Promise<void> {
   diag('menu', id);
   if (blank) { wake(); return; } // the wake press is not passed on
-  if (id === INTERNAL_MENU.settings) { openSettings(settingsHost); return; }
+  if (id === INTERNAL_MENU.settings) {
+    if (showingDesk()) { deskMode = 'app'; deskApp = 'settings'; desk!.leave(); }
+    openSettings(settingsHost);
+    return;
+  }
+  if ([MENU.home, MENU.agents, MENU.messages, MENU.muse, MENU.tiles, MENU.editPage].includes(id)) leaveDesk();
   if (id === MENU.home) model.goTo('home');
   if (id === MENU.agents) model.goTo('agents');
   if (id === MENU.messages) model.goTo('messages');
@@ -787,6 +879,7 @@ remote.sync();
 void poll();
 setInterval(() => { if (foreground) void poll(); }, POLL_MS);
 // The open agent's conversation refreshes faster than the rest, so replies show up quickly.
+setInterval(() => { if (foreground && showingDesk() && !desk!.imuOn) void desk!.resume(); }, 3000); // reconnect: tracking is back on while the Desk is in front
 setInterval(() => { void getConv()?.tick(apply => inputQueue.pushExternal('conversation', apply)); if (foreground) { void refreshTerminal(); void refreshTiles(); } }, 1200);
 setInterval(() => void loadLayout(), 60_000);
 setInterval(paint, 15_000); // keep the clock current between polls

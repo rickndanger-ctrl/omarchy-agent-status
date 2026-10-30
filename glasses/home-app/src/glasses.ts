@@ -10,6 +10,7 @@ import {
   MenuContainerProperty,
   MenuItemProperty,
   OsEventTypeList,
+  ImuReportPace,
   RebuildPageContainer,
   StartUpPageCreateResult,
   TextContainerProperty,
@@ -39,6 +40,10 @@ export interface GlassesOptions {
   hungWriteMs?: number;
   /** A render reached the glasses (what: rebuild, text, left or right). */
   onFrame?: (what: string) => void;
+  /** A head-motion sample (only while imu(true) is on). */
+  onImu?: (sample: { x: number; y: number; z: number }) => void;
+  /** Head tracking was switched off by the transport (left the front, app exit, reconnect): the owner of the pointer must stop too. */
+  onImuOff?: () => void;
   /** Where the Even app bridge comes from (tests pass a fake). Default: the SDK's waitForEvenAppBridge. */
   bridge?: () => Promise<EvenAppBridge>;
 }
@@ -142,11 +147,27 @@ export class Glasses {
     return this.settleWaiters.wait(() => this.settleState(), capMs);
   }
 
+  /** Head tracking on/off (100 ms reports). Returns whether the Even app took it. */
+  async imu(open: boolean): Promise<boolean> {
+    if (!open && !this.imuOn) return true;
+    this.imuOn = open;
+    try { return Boolean(await this.sdk?.imuControl(open, ImuReportPace.P100)); } catch (error) { this.options.onLifecycle?.(`imu ${open ? 'on' : 'off'} failed: ${reason(error)}`); return false; }
+  }
+  private imuOn = false;
+  /** The transport lost the front or the app: tracking is off on the glasses side, whatever the owner thinks. */
+  private imuStopped(): void {
+    if (!this.imuOn) return;
+    this.imuOn = false;
+    void this.sdk?.imuControl(false, ImuReportPace.P100)?.catch?.(() => {});
+    this.options.onImuOff?.();
+  }
+
   connect(): Promise<boolean> {
     if (this.connected) return Promise.resolve(true);
     if (this.connecting) return this.connecting;
     const epoch = ++this.epoch;
     this.forgetWrites();
+    this.imuStopped();
     this.connecting = this.open(epoch).finally(() => { this.connecting = null; });
     return this.connecting;
   }
@@ -322,7 +343,13 @@ export class Glasses {
 
   private onEvent(event: EvenHubEvent): void {
     const system = event.sysEvent;
+    if (system?.eventType === OsEventTypeList.IMU_DATA_REPORT) {
+      const d = system.imuData;
+      if (d && this.imuOn) this.options.onImu?.({ x: d.x ?? 0, y: d.y ?? 0, z: d.z ?? 0 });
+      return;
+    }
     if (system?.eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
+      this.imuStopped();
       this.options.onLifecycle?.('foreground-exit');
       this.foreground = false;
       this.options.onForeground(false);
@@ -340,6 +367,7 @@ export class Glasses {
     }
     if (system?.eventType === OsEventTypeList.SYSTEM_EXIT_EVENT || system?.eventType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
       this.options.onLifecycle?.(`exit ${system.eventType}`);
+      this.imuStopped();
       ++this.epoch;
       this.forgetWrites();
       this.connected = false;
