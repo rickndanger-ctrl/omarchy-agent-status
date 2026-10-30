@@ -592,7 +592,7 @@ export class HomeModel {
         const machineUp = d.machines.find(m => m.name === pin.machine)?.online === true; // unknown or down = offline
         const live = x && machineUp ? x : undefined;
         // A computer that is down is offline; a computer that is up with no such session says the agent is not running.
-        const word = live ? STATE_WORD[live.state] ?? live.state : machineUp ? 'not running' : 'offline';
+        const word = live ? STATE_WORD[live.state] ?? live.state : machineUp ? 'not running' : pin.session === 'orchestrator' ? 'laptop offline' : 'offline';
         rows.push({ text: clip(`${live ? MARK[live.state] ?? '-' : '·'} ${pin.label} · ${word}`, WIDTH - 2), ...(live ? { open: { kind: 'agent' as const, key: sessionKey(live) } } : {}) });
       }
     } else rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });

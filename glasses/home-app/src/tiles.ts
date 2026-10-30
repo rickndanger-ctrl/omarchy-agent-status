@@ -188,9 +188,12 @@ export function findSession(data: HomeData | null, ref: string, now: number): { 
   return { session, moved: Boolean(session) };
 }
 
+/** The orchestrator tile: the Claude session the laptop node reports with pane 'orchestrator'. Same read view and replies as its Home row. */
+const isOrch = (s: Session) => s.pane === 'orchestrator';
 function agentWidget(id: WidgetId): Widget {
-  const ref = id.slice('agent:'.length);
-  const resolve = (ctx: TileContext) => findSession(ctx.data, ref, ctx.now);
+  const orch = id === 'orchestrator';
+  const ref = orch ? 'orchestrator' : id.slice('agent:'.length);
+  const resolve = (ctx: TileContext): { session?: Session; moved: boolean } => (orch ? { session: ctx.data?.sessions.find(isOrch), moved: false } : findSession(ctx.data, ref, ctx.now));
   const find = (ctx: TileContext) => resolve(ctx).session;
   const talkable = (s: Session) => Boolean(s.pane || s.window || s.appThread);
   const target = (s: Session) => ({ machine: s.machine, pane: s.pane ?? '', ...(s.window ? { window: s.window } : {}), ...(s.appThread ? { appThread: s.appThread } : {}) });
@@ -198,12 +201,13 @@ function agentWidget(id: WidgetId): Widget {
     id, kind: 'agent',
     title: ctx => {
       const { session: s, moved } = resolve(ctx);
-      if (!s) return ref.slice(ref.indexOf('/') + 1);
+      if (!s) return orch ? 'Orchestrator' : ref.slice(ref.indexOf('/') + 1);
       const note = moved && ctx.now - (movedAt.get(ref) ?? ctx.now) < MOVED_NOTE_MS ? ` (moved to ${s.page})` : '';
       return `${s.name || s.agent} · ${STATE_WORD[s.state] ?? s.state}${note}`;
     },
     body: (ctx, width) => {
       const s = find(ctx);
+      if (!s && orch) return ctx.data ? [ctx.data.machines.find(m => m.name === 'Dell')?.online === true ? 'Orchestrator is not running.' : 'laptop offline'] : ['Loading…'];
       if (!s) return ctx.data ? ['No such agent right now.', ref] : ['Loading…'];
       const raw = ctx.terminal(sessionKey(s));
       return raw === null ? ['Loading…'] : conversationLines(raw, width);
@@ -211,7 +215,7 @@ function agentWidget(id: WidgetId): Widget {
     actions: ctx => {
       const s = find(ctx);
       if (!s || !talkable(s)) return [];
-      return [{ id: 'listen', label: 'Reply by voice' }, { id: 'reply', label: 'Quick reply' }, { id: 'continue', label: 'Continue' }, { id: 'esc', label: 'Stop (Esc)' }];
+      return [{ id: 'listen', label: 'Reply by voice' }, { id: 'reply', label: 'Quick reply' }, { id: 'continue', label: 'Continue' }, ...(isOrch(s) ? [] : [{ id: 'esc', label: 'Stop (Esc)' }])];
     },
     act: (actionId, ctx) => {
       const s = find(ctx);
@@ -222,7 +226,7 @@ function agentWidget(id: WidgetId): Widget {
       if (actionId === 'listen') return { kind: 'open', target: { kind: 'agent', key, then: 'listen' } };
       if (actionId === 'reply') return { kind: 'open', target: { kind: 'agent', key, then: 'reply' } };
       if (actionId === 'continue') return { kind: 'action', action: { kind: 'prompt', ...target(s), text: 'Continue' } };
-      if (actionId === 'esc') return { kind: 'action', action: { kind: 'prompt', ...target(s), key: 'Escape' } };
+      if (actionId === 'esc' && !isOrch(s)) return { kind: 'action', action: { kind: 'prompt', ...target(s), key: 'Escape' } };
       return null;
     },
     needs: ctx => {
@@ -493,7 +497,7 @@ function urlWidget(id: WidgetId): Widget {
 }
 
 export function widgetFor(id: WidgetId): Widget {
-  if (id.startsWith('agent:') && id.includes('/')) return agentWidget(id);
+  if ((id.startsWith('agent:') && id.includes('/')) || id === 'orchestrator') return agentWidget(id);
   if (id.startsWith('chat:') && id.length > 5) return chatWidget(id);
   if (id.startsWith('url:') && id.length > 4) return urlWidget(id);
   switch (id) {
@@ -512,7 +516,7 @@ export function widgetFor(id: WidgetId): Widget {
 export function availableWidgets(data: HomeData | null): { id: WidgetId; label: string }[] {
   const out: { id: WidgetId; label: string }[] = [
     { id: 'muse', label: 'Muse' }, { id: 'messages', label: 'Messages' }, { id: 'approvals', label: 'Needs you' },
-    { id: 'studio', label: 'Studio' }, { id: 'reminders', label: 'Reminders' }, { id: 'clock', label: 'Clock' }, { id: 'conversation', label: 'Conversation' }, { id: 'empty', label: 'Empty' },
+    { id: 'studio', label: 'Studio' }, { id: 'orchestrator', label: 'Orchestrator' }, { id: 'reminders', label: 'Reminders' }, { id: 'clock', label: 'Clock' }, { id: 'conversation', label: 'Conversation' }, { id: 'empty', label: 'Empty' },
   ];
   if (data) {
     const seen = new Set<string>();
@@ -531,7 +535,7 @@ export function availableWidgets(data: HomeData | null): { id: WidgetId; label: 
   return out;
 }
 
-const KNOWN = /^(agent:[^/]+\/.+|chat:(recent|\d+)|url:.+|muse|messages|approvals|studio|clock|reminders|conversation|empty)$/;
+const KNOWN = /^(agent:[^/]+\/.+|chat:(recent|\d+)|url:.+|muse|messages|approvals|studio|clock|reminders|conversation|orchestrator|empty)$/;
 
 /** A layout from the hub, repaired: always PAGE_COUNT pages, unknown ids become 'empty'. */
 export function normalizeLayout(raw: unknown): Layout {

@@ -223,3 +223,15 @@ test('orchestrator: select starts the mic, the heard text goes to the hub as a p
   assert.match(m.render(NOW), /> Speak\n  Back\n  Continue/);
   assert.doesNotMatch(m.render(NOW), /Stop \(Esc\)/);
 });
+
+test('orchestrator pin: laptop down says laptop offline; laptop up without the session says not running', () => {
+  const pins: Pin[] = [{ label: 'Claude · Orchestrator', machine: 'Dell', agent: 'claude', session: 'orchestrator' }];
+  const off = new HomeModel();
+  off.update(data({ pinned: pins, machines: [{ name: 'Dell', online: false }] }));
+  assert.match(off.render(NOW), /· Claude · Orchestrator · laptop offline/);
+  const none = new HomeModel();
+  none.update(data({ pinned: pins, machines: [{ name: 'Dell', online: true }] }));
+  assert.match(none.render(NOW), /· Claude · Orchestrator · not running/);
+  assert.equal(off.input('select', NOW), null);
+  assert.equal(off.screenKind, 'home');
+});

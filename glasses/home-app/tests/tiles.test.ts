@@ -410,3 +410,24 @@ test('3 levels: the tile action list has no Switch to other tile, and back close
   t.input('back', ctx()); // closes the list, stays on the tile
   assert.equal(t.render(ctx()).focus, 'left');
 });
+
+test('orchestrator tile: the read view of the laptop session, replies go to it, no Escape; laptop down says laptop offline', () => {
+  const orch = { agent: 'claude', name: 'Orchestrator', session: 'orchestrator', state: 'working', page: 'Orchestrator', at: 100, workspace: '', machine: 'Dell', pane: 'orchestrator', tmux: 'orchestrator' };
+  const up: HomeData = { ...data, sessions: [...data.sessions, orch] };
+  const w = widgetFor('orchestrator');
+  const c = ctx({ data: up, terminal: key => (key === 'Dell/orchestrator' ? ['Release is ready.'] : null) });
+  assert.match(w.title(c), /^Orchestrator · busy/);
+  assert.deepEqual(w.body(c, 27), ['Release is ready.']);
+  assert.deepEqual(w.actions(c).map(a => a.id), ['listen', 'reply', 'continue'], 'no Stop (Esc)');
+  assert.deepEqual(w.act('listen', c), { kind: 'open', target: { kind: 'agent', key: 'Dell/orchestrator', then: 'listen' } });
+  assert.deepEqual(w.act('continue', c), { kind: 'action', action: { kind: 'prompt', machine: 'Dell', pane: 'orchestrator', text: 'Continue' } });
+  assert.equal(w.act('esc', c), null);
+  assert.deepEqual(w.needs(c), [{ kind: 'terminal', machine: 'Dell', pane: 'orchestrator', key: 'Dell/orchestrator' }]);
+  assert.equal(normalizeLayout({ pages: Array.from({ length: PAGE_COUNT }, () => ({ left: 'orchestrator', right: 'empty' })) }).pages[0].left, 'orchestrator');
+  assert.ok(availableWidgets(up).some(x => x.id === 'orchestrator'));
+  // the laptop is down: no session, and the tile says why
+  const down = ctx({ data: { ...data, machines: [{ name: 'Dell', online: false }], sessions: [] } });
+  assert.deepEqual(w.body(down, 27), ['laptop offline']);
+  const up2 = ctx({ data: { ...data, sessions: [] } });
+  assert.deepEqual(w.body(up2, 27), ['Orchestrator is not running.']);
+});

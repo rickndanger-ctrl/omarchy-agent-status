@@ -308,7 +308,7 @@ rows.append({"type": "assistant", "message": {"content": [{"type": "text", "text
 open(sys.argv[1], "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
 PY
 printf '{"session":"%s","dir":"~/.claude/projects/-fixture"}\n' "$ORCH_SESSION" > "$ORCH_HOME/.config/agent-glasses/orchestrator.json"
-HOME="$ORCH_HOME" HUD_TOKEN_FILE="$work/hud.token" node "$here/hud-server.mjs" --mode node --port "$ORCH_PORT" --machine "Dell" >"$work/orch.log" 2>&1 & pids+=($!)
+HOME="$ORCH_HOME" HUD_ORCH_RESCAN_MS=200 HUD_TOKEN_FILE="$work/hud.token" node "$here/hud-server.mjs" --mode node --port "$ORCH_PORT" --machine "Dell" >"$work/orch.log" 2>&1 & pids+=($!)
 mkdir -p "$work/homeH/.config/agent-glasses"
 printf '{"nodes":[{"name":"Dell","url":"http://127.0.0.1:%s"}]}\n' "$ORCH_PORT" > "$work/hub-orch.json"
 HOME="$work/homeH" HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hub-orch.json" node "$here/hud-server.mjs" --mode hub --port "$ORCH_HUB_PORT" --machine "Mini 1" >"$work/orch-hub.log" 2>&1 & pids+=($!)
@@ -345,6 +345,61 @@ check "missing transcript = not running (no session listed)" 200 "not any(s.get(
 req GET "$OH" "/api/terminal?machine=Dell&pane=orchestrator"
 check "missing transcript: the hub passes the node's 404 on as an error" 502
 if [ ! -e "$HOME/.config/agent-glasses/orchestrator-inbox.jsonl" ]; then ok "the real inbox was not touched"; else bad "the real inbox was touched"; fi
+
+echo "Orchestrator follows its session (order file, then a newer ORCHESTRATOR transcript after 30 min)"
+ODIR="$ORCH_HOME/.claude/projects/-fixture"
+mk() { # id first-user-text assistant-text
+  python3 - "$ODIR/$1.jsonl" "$2" "$3" <<'PY'
+import json, sys
+rows = [{"type": "user", "message": {"role": "user", "content": sys.argv[2]}}, {"type": "assistant", "message": {"content": [{"type": "text", "text": sys.argv[3]}]}}]
+open(sys.argv[1], "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
+PY
+}
+mk "$ORCH_SESSION" "hello" "From base"
+req GET "$OH" "/api/terminal?machine=Dell&pane=orchestrator"; sleep 0.5; req GET "$OH" "/api/terminal?machine=Dell&pane=orchestrator"
+check "the configured session is read" 200 "'From base' in ' '.join(d['lines'])"
+mk fileone "hello" "From the order file"
+printf 'fileone\n' > "$ORCH_HOME/.config/agent-glasses/orchestrator-session"
+sleep 0.5; req GET "$OH" /api/home; req GET "$OH" "/api/terminal?machine=Dell&pane=orchestrator"
+check "orchestrator-session file wins over orchestrator.json" 200 "'From the order file' in ' '.join(d['lines'])"
+if grep -q 'orchestrator.session fileone (orchestrator-session file)' "$work/orch.log"; then ok "logged: orchestrator.session fileone (orchestrator-session file)"; else bad "session change not logged"; fi
+printf 'bad id with spaces\n' > "$ORCH_HOME/.config/agent-glasses/orchestrator-session"
+sleep 0.5; req GET "$OH" /api/home; req GET "$OH" "/api/terminal?machine=Dell&pane=orchestrator"
+check "an id that is not [\\w.-]+ is ignored (back to orchestrator.json)" 200 "'From base' in ' '.join(d['lines'])"
+rm "$ORCH_HOME/.config/agent-glasses/orchestrator-session"
+mk newmarked "You are the ORCHESTRATOR of the studio" "From the new orchestrator"
+mk newplain "just a chat" "From a plain chat"
+mk oldmarked "ORCHESTRATOR old" "From an old marked one"
+touch -d '3 hours ago' "$ODIR/oldmarked.jsonl"
+sleep 0.5; req GET "$OH" /api/home; req GET "$OH" "/api/terminal?machine=Dell&pane=orchestrator"
+check "while the transcript is fresh nothing else is followed" 200 "'From base' in ' '.join(d['lines'])"
+touch -d '40 minutes ago' "$ODIR/$ORCH_SESSION.jsonl"
+touch -d '5 minutes ago' "$ODIR/newplain.jsonl"
+touch -d '2 minutes ago' "$ODIR/newmarked.jsonl"
+sleep 0.5; req GET "$OH" /api/home; req GET "$OH" "/api/terminal?machine=Dell&pane=orchestrator"
+check "unchanged 30 min: the newer transcript whose first user message says ORCHESTRATOR (not a plain chat, not an older one)" 200 "'From the new orchestrator' in ' '.join(d['lines'])"
+if grep -q 'orchestrator.session newmarked (' "$work/orch.log"; then ok "logged: orchestrator.session newmarked (...)"; else bad "switch to newmarked not logged"; fi
+req GET "$OH" /api/home
+check "the session in /api/home follows it (working: just written)" 200 "any(s.get('pane')=='orchestrator' for s in d['sessions'])"
+
+echo "set-tile.sh changes one slot"
+ST="$here/set-tile.sh"
+req GET "$HUB" /api/layout; BEFORE_LAYOUT=$OUT
+out=$(DRY_RUN=1 HUD_TOKEN="$TOKEN" "$ST" "$HUB" 2 right orchestrator 2>&1)
+if printf '%s' "$out" | grep -q 'before: page 2 right = ' && printf '%s' "$out" | grep -q 'after:  page 2 right = orchestrator' && printf '%s' "$out" | grep -q 'dry run'; then ok "DRY_RUN prints before and after"; else bad "dry run output: $out"; fi
+req GET "$HUB" /api/layout
+if [ "$OUT" = "$BEFORE_LAYOUT" ]; then ok "DRY_RUN saves nothing"; else bad "DRY_RUN changed the layout"; fi
+HUD_TOKEN="$TOKEN" "$ST" "$HUB" 2 right orchestrator >/dev/null 2>&1
+req GET "$HUB" /api/layout
+check "page 2 right is the orchestrator and every other slot is unchanged" 200 "d['pages'][1]['right']=='orchestrator'"
+python3 - "$BEFORE_LAYOUT" "$OUT" <<'PY' && ok "only that one slot differs" || bad "other slots changed"
+import json, sys
+a, b = json.loads(sys.argv[1])['pages'], json.loads(sys.argv[2])['pages']
+diff = [(i, k) for i in range(len(a)) for k in ('left', 'right') if a[i][k] != b[i][k]]
+sys.exit(0 if diff == [(1, 'right')] or (diff == [] and a[1]['right'] == 'orchestrator') else 1)
+PY
+if "$ST" "$HUB" 9 right x >/dev/null 2>&1 </dev/null; then bad "page 9 should fail"; else ok "a page that does not exist is refused"; fi
+req PUT "$HUB" /api/layout "$BEFORE_LAYOUT"
 
 echo "Two hubs keeping one layout"
 PA="http://127.0.0.1:$PEER_A_PORT"

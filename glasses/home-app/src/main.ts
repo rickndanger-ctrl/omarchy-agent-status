@@ -690,7 +690,7 @@ async function run(action: Action): Promise<void> {
       if (chatLoads.isLatest(req)) model.setChat(r ? r.messages : null, Date.now(), action.id);
     } else if (action.kind === 'prompt') {
       const r = await api<{ ok: boolean }>('prompt', { method: 'POST', body: JSON.stringify(action) });
-      diag('prompt', `${action.machine} ${action.window ? 'window' : 'tmux'} ok=${r.ok}`);
+      diag('prompt', `${action.machine} ${action.pane === 'orchestrator' ? 'orchestrator' : action.window ? 'window' : 'tmux'} ok=${r.ok}`);
       model.promptDone(r.ok, Boolean(action.key), Date.now());
       for (const wait of [500, 1500, 3000]) setTimeout(() => void refreshTerminal(), wait);
     } else if (action.kind === 'startMic') {

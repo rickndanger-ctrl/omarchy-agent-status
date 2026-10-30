@@ -39,7 +39,7 @@
 import http from 'node:http'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, statSync, readdirSync, openSync, readSync, closeSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { homedir, hostname } from 'node:os'
@@ -135,7 +135,66 @@ const ORCH_CFG = readJson(process.env.HUD_ORCH_CONFIG || path.join(CONFIG_DIR, '
 const ORCH = ORCH_CFG && /^[\w.-]+$/.test(String(ORCH_CFG.session || '')) && ORCH_CFG.dir
   ? { session: String(ORCH_CFG.session), dir: expandHome(ORCH_CFG.dir) } : null
 const ORCH_PANE = 'orchestrator' // the pane name the glasses use for it; a tmux pane id (%3) can never collide
-const ORCH_FILE = () => path.join(ORCH.dir, `${ORCH.session}.jsonl`)
+const ORCH_SESSION_FILE = () => path.join(CONFIG_DIR, 'orchestrator-session')
+const ORCH_STALE_MS = 30 * 60_000
+const ORCH_SCAN_HEAD = 64 * 1024
+const ORCH_RESCAN_MS = Number(process.env.HUD_ORCH_RESCAN_MS) || 30_000
+let orchPick = { id: '', why: '', checkedAt: 0 }
+const orchMarked = new Map() // file name + size -> whether its first user message says ORCHESTRATOR (a read of the first 64 KB, once)
+function orchIsMarked(name) {
+  const file = path.join(ORCH.dir, name)
+  let size = 0
+  try { size = statSync(file).size } catch { return false }
+  const key = `${name}:${Math.min(size, ORCH_SCAN_HEAD)}`
+  if (orchMarked.has(key)) return orchMarked.get(key)
+  let marked = false
+  try {
+    const fd = openSync(file, 'r')
+    try {
+      const buf = Buffer.alloc(Math.min(size, ORCH_SCAN_HEAD))
+      readSync(fd, buf, 0, buf.length, 0)
+      for (const row of buf.toString('utf8').split('\n')) {
+        let e
+        try { e = JSON.parse(row) } catch { continue }
+        if (e?.type !== 'user') continue
+        const c = e.message?.content
+        const text = typeof c === 'string' ? c : Array.isArray(c) ? c.map(b => b?.text ?? '').join(' ') : ''
+        marked = text.includes('ORCHESTRATOR')
+        break // only the first user message counts
+      }
+    } finally { closeSync(fd) }
+  } catch { marked = false }
+  orchMarked.set(key, marked)
+  return marked
+}
+// Which transcript the orchestrator is: the id in CONFIG_DIR/orchestrator-session, else orchestrator.json; if that one has not changed for 30 minutes
+// (or is gone), a NEWER transcript in the same folder whose first user message says ORCHESTRATOR.
+function orchSessionId() {
+  const now = Date.now()
+  if (orchPick.id && now - orchPick.checkedAt < ORCH_RESCAN_MS) return orchPick.id
+  let base = ORCH.session
+  let why = 'orchestrator.json'
+  try {
+    const fromFile = readFileSync(ORCH_SESSION_FILE(), 'utf8').trim()
+    if (/^[\w.-]+$/.test(fromFile)) { base = fromFile; why = 'orchestrator-session file' }
+  } catch { /* no file: the configured session */ }
+  let mtime = 0
+  try { mtime = statSync(path.join(ORCH.dir, `${base}.jsonl`)).mtimeMs } catch { /* missing */ }
+  let id = base
+  if (!mtime || now - mtime > ORCH_STALE_MS) {
+    try {
+      const newer = readdirSync(ORCH.dir).filter(n => n.endsWith('.jsonl') && n.slice(0, -6) !== base && /^[\w.-]+$/.test(n.slice(0, -6)))
+        .map(n => { try { return { n, m: statSync(path.join(ORCH.dir, n)).mtimeMs } } catch { return null } })
+        .filter(x => x && x.m > mtime).sort((a, b) => b.m - a.m)
+      const hit = newer.find(x => orchIsMarked(x.n))
+      if (hit) { id = hit.n.slice(0, -6); why = `${base} unchanged 30 min, newer ORCHESTRATOR session` }
+    } catch { /* no folder */ }
+  }
+  if (id !== orchPick.id) console.log(`orchestrator.session ${id} (${why})`)
+  orchPick = { id, why, checkedAt: now }
+  return id
+}
+const ORCH_FILE = () => path.join(ORCH.dir, `${orchSessionId()}.jsonl`)
 const ORCH_INBOX = () => path.join(CONFIG_DIR, 'orchestrator-inbox.jsonl')
 const ORCH_TAIL = 256 * 1024
 const ORCH_WORKING_MS = 20_000
