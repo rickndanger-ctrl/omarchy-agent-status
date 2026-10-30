@@ -607,6 +607,7 @@ test('promptDone for a tile: the orchestrator pane says sent to Claude for 3 s, 
   assert.equal(m.sentTo('%3', NOW + 1000), 'Sent');
   m.promptDone(false, false, NOW, 'orchestrator');
   assert.equal(m.sentTo('orchestrator', NOW + 1000), 'Could not send to that agent');
+});
 
 // ---- selection and back (review 2026-10-29) ----
 
