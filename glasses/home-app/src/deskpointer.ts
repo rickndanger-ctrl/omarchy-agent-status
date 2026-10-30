@@ -1,7 +1,8 @@
 // Head pointer for the Desk. The glasses' IMU samples are an accelerometer in g (z ~ 1 = gravity at rest), so head
 // movement is read as TILT: roll = atan2(x, z) (left/right) and pitch = atan2(y, z) (up/down), in degrees. Pure: no SDK,
 // no timers, time is passed in, so tests drive it with a fake IMU.
-//   * the centre is the pose when the Desk opens and after every press (recenter());
+//   * the centre is the MEDIAN pose of the first SETTLE_MS after the Desk opens and after every press (recenter()); no steps until then,
+//     so one noisy sample, or a head that is already moving, cannot set it;
 //   * a low-pass (~0.3 s) takes out the jitter;
 //   * a tilt past STEP degrees moves one cell; it re-arms only when the head is back under REARM degrees;
 //   * held past the step angle it repeats every REPEAT_MS;
@@ -28,6 +29,9 @@ export const DEFAULT_POINTER: PointerConfig = { stepDeg: 11, rearmDeg: 5, lowpas
 
 /** Moving less than this (degrees) counts as resting. */
 const REST_DEG = 1.5;
+/** After a press or at open, samples for this long (ms) are only collected to find the centre. */
+export const SETTLE_MS = 300;
+const median = (v: number[]): number => { const a = [...v].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
 const DEG = 180 / Math.PI;
 /** Tilt of a gravity reading, in degrees. */
 export function tilt(s: Sample): { roll: number; pitch: number } {
@@ -57,12 +61,18 @@ export class Pointer {
   setOptions(o: Partial<Pick<PointerConfig, 'swapAxes' | 'invertX' | 'invertY'>>): void { this.cfg = { ...this.cfg, ...o }; }
 
   /** The Desk opened, or a press was made: the next sample becomes the centre. */
-  recenter(): void { this.centre = null; this.smooth = null; this.armed = true; }
+  recenter(): void { this.centre = null; this.smooth = null; this.armed = true; this.collect = null; }
+  private collect: { start: number; roll: number[]; pitch: number[] } | null = null;
 
   /** One sample at time `t` (ms). Returns a one-cell move, or null. */
   sample(t: number, s: Sample): Move | null {
     const now = tilt(s);
-    if (!this.smooth || !this.centre) { this.smooth = now; this.centre = { ...now }; this.armed = true; this.lastT = t; this.restSince = t; this.restAt = { ...now }; return null; }
+    if (!this.smooth || !this.centre) {
+      const c = this.collect ??= { start: t, roll: [], pitch: [] };
+      if (t - c.start < SETTLE_MS) { c.roll.push(now.roll); c.pitch.push(now.pitch); return null; }
+      const centre = { roll: median(c.roll), pitch: median(c.pitch) };
+      this.collect = null; this.smooth = { ...centre }; this.centre = centre; this.armed = true; this.lastT = t - 1; this.restSince = t; this.restAt = { ...centre };
+    }
     const a = 1 - Math.exp(-Math.max(0, t - this.lastT) / this.cfg.lowpassMs);
     this.lastT = t;
     this.smooth = { roll: this.smooth.roll + a * (now.roll - this.smooth.roll), pitch: this.smooth.pitch + a * (now.pitch - this.smooth.pitch) };

@@ -19,10 +19,12 @@ export const IMU_PACE = 100;
 /** ?imu=fake (simulator runs): a scripted head tilting 14 degrees right, back, down, back, left, back, up, back; 1 s each (gravity in g). */
 export function fakePose(ms: number): Sample {
   const legs: [number, number][] = [[14, 0], [0, 0], [0, 14], [0, 0], [-14, 0], [0, 0], [0, -14], [0, 0]];
-  const leg = Math.floor(ms / 1000) % legs.length;
+  if (ms < 1000) return gravity(0, 0); // rests for the first second, so the pointer finds its centre
+  const at = ms - 1000;
+  const leg = Math.floor(at / 1000) % legs.length;
   const from = legs[(leg + legs.length - 1) % legs.length];
   const to = legs[leg];
-  const k = Math.min(1, (ms % 1000) / 300);
+  const k = Math.min(1, (at % 1000) / 300);
   return gravity(from[0] + (to[0] - from[0]) * k, from[1] + (to[1] - from[1]) * k);
 }
 const urlFlagFake = () => { try { return new URLSearchParams(globalThis.location?.search ?? '').get('imu') === 'fake'; } catch { return false; } };

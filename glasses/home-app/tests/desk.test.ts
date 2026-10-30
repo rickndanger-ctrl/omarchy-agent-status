@@ -78,7 +78,7 @@ test('the menu: Open, Minimize (taskbar), Close (off the taskbar), Back; Back fr
 test('12 degrees of roll is one step right; 4 degrees is none; coming back to the centre re-arms', async () => {
   const { r, desk } = rig();
   await desk.enter();
-  desk.imuSample(gravity(0, 0)); // the centre
+  hold(r, desk, 0, 0, 400); // the centre is found from the first 300 ms
   hold(r, desk, 4, 0, 2000);
   assert.equal(desk.highlighted, 'muse', '4 degrees does nothing');
   hold(r, desk, 12, 0, 1000);
@@ -93,7 +93,7 @@ test('12 degrees of roll is one step right; 4 degrees is none; coming back to th
 
 test('held past the step angle it repeats every 0.8 s, and only then', () => {
   const p = new Pointer({ ...DEFAULT_POINTER, lowpassMs: 1 });
-  assert.equal(p.sample(0, gravity(0, 0)), null);
+  for (const t0 of [-300, -200, -100, 0]) p.sample(t0, gravity(0, 0));
   const moves: number[] = [];
   for (let t = 100; t <= 3000; t += 100) if (p.sample(t, gravity(14, 0))) moves.push(t);
   assert.deepEqual(moves, [100, 900, 1700, 2500]);
@@ -105,7 +105,7 @@ test('held past the step angle it repeats every 0.8 s, and only then', () => {
 test('swap axes and invert X / Y flip the direction', () => {
   const run = (o: Partial<typeof DEFAULT_POINTER>, roll: number, pitch: number) => {
     const p = new Pointer({ ...DEFAULT_POINTER, lowpassMs: 1, ...o });
-    p.sample(0, gravity(0, 0));
+    for (const t0 of [-300, -200, -100, 0]) p.sample(t0, gravity(0, 0));
     return p.sample(100, gravity(roll, pitch));
   };
   assert.deepEqual(run({}, 14, 0), { dCol: 1, dRow: 0 });
@@ -121,7 +121,7 @@ test('the phone switches reach a Desk that is already open', async () => {
   const { r, desk } = rig();
   await desk.enter();
   desk.setPointerOptions({ invertX: true });
-  desk.imuSample(gravity(0, 0));
+  hold(r, desk, 0, 0, 400);
   hold(r, desk, -12, 0, 1000); // left, inverted = right
   await flush();
   assert.equal(desk.highlighted, 'messages');
@@ -140,6 +140,18 @@ test('the centre is re-taken on a press: a new resting tilt is the new zero', as
   assert.equal(desk.highlighted, 'messages');
 });
 
+test('one noisy first sample (+6 deg) does not become the centre: the median of the first 300 ms does', () => {
+  const p = new Pointer({ ...DEFAULT_POINTER, lowpassMs: 1 });
+  p.sample(0, gravity(6, 0));
+  for (const t of [100, 200, 300]) p.sample(t, gravity(0, 0));
+  assert.deepEqual(p.sample(400, gravity(12, 0)), { dCol: 1, dRow: 0 });
+});
+
+test('no steps while the centre is being found, even for a big tilt', () => {
+  const p = new Pointer({ ...DEFAULT_POINTER, lowpassMs: 1 });
+  for (const t of [0, 100, 200]) assert.equal(p.sample(t, gravity(30, 0)), null);
+});
+
 test('a fixed tilted rest pose (x=-0.3, z=0.95) taken as the centre gives no move; +12 degrees from it gives one', async () => {
   const { r, desk } = rig();
   await desk.enter();
@@ -154,12 +166,12 @@ test('a fixed tilted rest pose (x=-0.3, z=0.95) taken as the centre gives no mov
 
 test('a tilt under the step angle drifts into the centre only inside the re-arm zone', () => {
   const p = new Pointer({ ...DEFAULT_POINTER, lowpassMs: 1 });
-  p.sample(0, gravity(0, 0));
+  for (const t0 of [-300, -200, -100, 0]) p.sample(t0, gravity(0, 0));
   for (let t = 100; t <= 3000; t += 100) assert.equal(p.sample(t, gravity(4, 0)), null);
   // 4 degrees held for 3 s became the centre (inside the zone): now +12 from it is a step, +12 from the old centre would not be
   assert.deepEqual(p.sample(3100, gravity(16, 0)), { dCol: 1, dRow: 0 });
   const q = new Pointer({ ...DEFAULT_POINTER, lowpassMs: 1 });
-  q.sample(0, gravity(0, 0));
+  for (const t0 of [-300, -200, -100, 0]) q.sample(t0, gravity(0, 0));
   for (let t = 100; t <= 3000; t += 100) q.sample(t, gravity(8, 0)); // tilted between the angles: no centre drift
   assert.equal(q.sample(3100, gravity(-4, 0)), null, '8 degrees held for 3 s is not a new centre, so -4 is nowhere near a step');
 });
@@ -304,13 +316,13 @@ test('?imu=fake: the scripted head (gravity in g) walks the highlight right, dow
   };
   const g = fakePose(500);
   assert.ok(Math.abs(Math.hypot(g.x, g.y, g.z) - 1) < 1e-9, 'a unit gravity vector');
-  assert.ok(Math.abs(tilt(fakePose(300)).roll - 14) < 1e-6, 'the scripted tilt is 14 degrees');
+  assert.ok(Math.abs(tilt(fakePose(1300)).roll - 14) < 1e-6, 'the scripted tilt is 14 degrees');
   const { r, desk } = mk(true);
   await desk.enter();
   assert.ok(desk.imuOn);
   const path: string[] = [desk.highlighted];
   try {
-    for (let ms = 0; ms <= 8000; ms += 100) {
+    for (let ms = 0; ms <= 9000; ms += 100) {
       r.t = ms;
       desk.imuSample(fakePose(ms));
       if (path.at(-1) !== desk.highlighted) path.push(desk.highlighted);
@@ -322,4 +334,14 @@ test('?imu=fake: the scripted head (gravity in g) walks the highlight right, dow
   const off = mk(false);
   await off.desk.enter();
   assert.ok(!off.desk.imuOn, 'without the flag nothing is scripted');
+});
+
+test('real timers, slow settle (9 ms): the fake head still goes right and then down', async () => {
+  const log: string[] = [];
+  const host: DeskHost = { imu: async () => false, paint: () => {}, settled: () => sleep(9), diag: (n, d) => { if (n === 'desk.move') log.push(d.split(' ')[0]); }, now: () => Date.now() };
+  const desk = new Desk(host, DEFAULT_POINTER, { fake: true });
+  await desk.enter();
+  await sleep(3800);
+  desk.leave();
+  assert.deepEqual(log.slice(0, 2), ['0->1', '1->4'], log.join(' '));
 });
