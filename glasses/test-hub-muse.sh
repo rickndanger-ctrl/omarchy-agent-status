@@ -26,11 +26,14 @@ printf 'Approvals history\nNo approvals are pending.\n' > "$work/heading.txt"
 printf 'Muse is on it.\nThe word Muse and Connected here are just talk.\n' > "$work/midline.txt"
 cat > "$work/fake-muse.mjs" <<'JS'
 import http from 'node:http'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync, appendFileSync } from 'node:fs'
 const [port, dir] = process.argv.slice(2)
 const read = n => readFileSync(`${dir}/${n}.txt`, 'utf8')
 http.createServer((req, res) => {
   const send = body => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(body)) }
+  if (req.url === '/selftest') return send({ ok: true, composer: existsSync(`${dir}/ready`) })
+  if (req.url === '/ask' && req.method === 'POST') { let b = ''; req.on('data', c => { b += c }); req.on('end', () => { appendFileSync(`${dir}/asks.log`, b + '\n'); send({ id: 'job1' }) }); return }
+  if (req.url === '/reply/job1') return send({ status: 'done', question: 'asked once', reply: 'Answered once.' })
   if (req.url === '/latest') return send({ question: 'Can you hear me?', reply: read('polluted') })
   if (req.url === '/reply/polluted') return send({ status: 'done', question: 'Can you hear me?', reply: read('polluted') })
   if (req.url === '/reply/clean') return send({ status: 'done', question: 'q', reply: read('clean') })
@@ -71,5 +74,52 @@ get "/api/muse/reply?id=0-sending"
 check "a reply still being typed passes through" "d['status']=='sending' and d['reply']==''"
 if grep -qE '^muse\.trimmed [0-9]+ chars$' "$work/hub.log"; then ok "the trim is logged: $(grep -m1 '^muse.trimmed' "$work/hub.log")"; else bad "muse.trimmed not logged"; fi
 n=$(grep -c '^muse.trimmed' "$work/hub.log"); if [ "$n" -le 2 ]; then ok "logged once per reply, not per poll ($n lines)"; else bad "log spam: $n lines"; fi
+
+# ---- waiting for a Muse that is not ready: accepted at once, sent ONCE when it is, an error with a reason when it never is ----
+mkdir -p "$work/relayA" "$work/relayB"
+cp "$work/polluted.txt" "$work/clean.txt" "$work/relayA/"; cp "$work/polluted.txt" "$work/clean.txt" "$work/relayB/"
+node "$work/fake-muse.mjs" 5386 "$work/relayA" & pids+=($!)
+node "$work/fake-muse.mjs" 5385 "$work/relayB" & pids+=($!)
+printf '{"muse":[{"name":"fakeA","url":"http://127.0.0.1:5386","tokenFile":"%s"}]}\n' "$work/relay.token" > "$work/hubA.json"
+printf '{"muse":[{"name":"fakeB","url":"http://127.0.0.1:5385","tokenFile":"%s"}]}\n' "$work/relay.token" > "$work/hubB.json"
+HUD_MUSE_WAIT_MS=12000 HUD_MUSE_WAIT_STEP_MS=500 HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hubA.json" node "$here/hud-server.mjs" --mode hub --port 5384 --machine "Wait A" >"$work/hubA.log" 2>&1 & pids+=($!)
+HUD_MUSE_WAIT_MS=3000 HUD_MUSE_WAIT_STEP_MS=500 HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hubB.json" node "$here/hud-server.mjs" --mode hub --port 5383 --machine "Wait B" >"$work/hubB.log" 2>&1 & pids+=($!)
+for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:5384/api/health" && curl -s -o /dev/null "http://127.0.0.1:5383/api/health" && break; sleep 0.2; done
+post() { curl -s -m 5 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"text":"asked once"}' "$1/api/muse/ask" > "$work/out"; }
+getr() { curl -s -H "Authorization: Bearer $TOKEN" "$1/api/muse/reply?id=$2" > "$work/out"; }
+asks() { if [ -f "$1/asks.log" ]; then wc -l < "$1/asks.log" | tr -d ' '; else echo 0; fi; }
+
+t0=$(date +%s%N)
+post http://127.0.0.1:5384
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+WID=$(python3 -c "import json; print(json.load(open('$work/out'))['id'])")
+check "the ask returns at once with a waiting job id (took ${ms} ms)" "d['status']=='waiting' and d['id'].startswith('w-')"
+[ "$ms" -lt 1500 ] && ok "not held: answered in under 1.5 s" || bad "ask took $ms ms"
+getr http://127.0.0.1:5384 "$WID"
+check "while no relay is ready the job says waiting" "d['status']=='waiting' and d['question']=='asked once'"
+sleep 2; [ "$(asks "$work/relayA")" = 0 ] && ok "nothing reached the relay while it was not ready" || bad "an /ask reached a relay that was not ready"
+touch "$work/relayA/ready"   # (about 6 s after the ask in the real timeline; the hub checks every 0.5 s here)
+sleep 2
+[ "$(asks "$work/relayA")" = 1 ] && ok "exactly ONE /ask reached the relay once it was ready" || bad "asks: $(asks "$work/relayA")"
+getr http://127.0.0.1:5384 "$WID"
+check "the reply follows the sent question: done" "d['status']=='done' and d['reply']=='Answered once.'"
+sleep 1.5; [ "$(asks "$work/relayA")" = 1 ] && ok "and still only one /ask after more checks" || bad "extra asks: $(asks "$work/relayA")"
+grep -q '^muse.wait [0-9]* sent via fakeA' "$work/hubA.log" && ok "logged: $(grep -m1 '^muse.wait' "$work/hubA.log")" || bad "muse.wait sent not logged"
+
+post http://127.0.0.1:5383
+WID2=$(python3 -c "import json; print(json.load(open('$work/out'))['id'])")
+sleep 4
+getr http://127.0.0.1:5383 "$WID2"
+check "never ready: the job ends in an error with a plain reason" "d['status']=='error' and d['error']=='Muse is updating or busy' and 'server said' not in d['error']"
+[ "$(asks "$work/relayB")" = 0 ] && ok "and ZERO /ask calls reached the relay" || bad "asks reached a relay that was never ready"
+grep -q '^muse.wait [0-9]* Muse is updating or busy' "$work/hubB.log" && ok "logged: $(grep -m1 '^muse.wait' "$work/hubB.log")" || bad "muse.wait failure not logged"
+printf '{"muse":[{"name":"gone","url":"http://127.0.0.1:5379","tokenFile":"%s"}]}\n' "$work/relay.token" > "$work/hubC.json"
+HUD_MUSE_WAIT_MS=1200 HUD_MUSE_WAIT_STEP_MS=400 HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hubC.json" node "$here/hud-server.mjs" --mode hub --port 5382 --machine "Wait C" >"$work/hubC.log" 2>&1 & pids+=($!)
+for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:5382/api/health" && break; sleep 0.2; done
+post http://127.0.0.1:5382
+WID3=$(python3 -c "import json; print(json.load(open('$work/out'))['id'])")
+sleep 2.5
+getr http://127.0.0.1:5382 "$WID3"
+check "a relay that cannot be reached: 'no Muse reachable'" "d['status']=='error' and d['error']=='no Muse reachable'"
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

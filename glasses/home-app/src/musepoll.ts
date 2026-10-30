@@ -24,3 +24,8 @@ export async function pollMuseJob(
   }
   return false;
 }
+
+/** What the owner reads when the ask itself could not be sent: never "server said 502". */
+export function plainMuseError(message: string): string {
+  return /server said|status|fetch|network|abort|timeout|Failed|\b5\d\d\b/i.test(message) ? 'Muse is not reachable right now' : message;
+}

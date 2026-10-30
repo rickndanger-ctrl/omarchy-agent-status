@@ -2,7 +2,7 @@ import './style.css';
 import { Glasses, DEFAULT_OUTLINE } from './glasses';
 import { ShownWatch } from './shownwatch';
 import { applyMuseLatest } from './musesync';
-import { pollMuseJob, MUSE_POLLS, MUSE_DEADLINE_MS, type MuseJob } from './musepoll';
+import { plainMuseError, pollMuseJob, MUSE_POLLS, MUSE_DEADLINE_MS, type MuseJob } from './musepoll';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { HubPicker } from './hubpick';
 import { LayoutLoader } from './layoutcache';
@@ -321,6 +321,7 @@ const tileCtx = (): TileContext => ({
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,
   muse: () => museTile.get(),
+  museWaiting: () => museTile.isWaiting,
   // For ~5 s after a voice add the Reminders tile shows "Added: <title>" at the top, from the add result (no extra fetch).
   reminders: () => (tileData.reminders && justAdded && Date.now() - justAdded.at < 5000
     ? [{ id: 'just-added', title: justAdded.title, due: null, list: '', added: justAdded.at }, ...tileData.reminders]
@@ -765,6 +766,7 @@ async function run(action: Action): Promise<void> {
       const askedAt = Date.now();
       const ask = action.ask ?? model.beginMuseAsk(action.text); // the newest ask owns the Muse screen and tile (conversation asks too)
       const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text }) }).catch(e => ({ error: String(e.message ?? e) }));
+      if (asked.error) asked.error = plainMuseError(asked.error);
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
       if (!asked.id) { const newest = model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay', ask); if (newest) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); } paint(); return; }
       // Muse answers in a few seconds; long answers take longer. Check every 0.7 s for up to 2.5 minutes.
@@ -772,6 +774,8 @@ async function run(action: Action): Promise<void> {
         () => api<MuseJob>(`muse/reply?id=${encodeURIComponent(asked.id!)}`).catch(() => null),
         () => new Promise<void>(r => setTimeout(r, 700)),
         (job, finished) => {
+        const waiting = job.status === 'waiting';
+        if (model.museIsNewest(ask)) { museTile.setWaiting(waiting); if (!job.reply) model.setMuseWaiting(ask, waiting); }
         const newest = job.reply ? model.setMuseAnswer(job.question, job.reply, ask) : model.museIsNewest(ask);
         if (job.reply && newest) museTile.askReply(job.question, job.reply);
         // A partial reply is only drawn when the glasses are idle: a write in flight would hold the final one back behind it.

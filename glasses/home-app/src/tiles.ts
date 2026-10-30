@@ -61,6 +61,8 @@ export interface TileContext {
   terminal(key: string): string[] | null;
   chat(id: number): string[] | null;
   muse(): { question: string; reply: string } | null;
+  /** The Muse tile's ask is waiting for a busy Muse. Optional. */
+  museWaiting?(): boolean;
   reminders(): Reminder[] | null;
   url(endpoint: string): UrlTile | null;
   /** The Conversation tile's state. Optional: without it the tile says it is not available. */
@@ -254,7 +256,7 @@ function museWidget(): Widget {
       const m = museDisplay(raw.question, raw.reply);
       const q = wrap(`You: ${m.question}`, width);
       const question = q.length > 2 ? [q[0], `${q[1].slice(0, width - 1)}…`] : q;
-      return [...question, '', ...(m.reply ? wrap(m.reply, width) : ['Muse is thinking…'])];
+      return [...question, '', ...(m.reply ? wrap(m.reply, width) : [ctx.museWaiting?.() ? 'Muse is busy, waiting…' : 'Muse is thinking…'])];
     },
     actions: ctx => [...(ctx.muse() === MUSE_UNREACHABLE ? [{ id: 'retry', label: 'Retry' }] : []), { id: 'ask', label: 'Ask Muse' }],
     act: actionId => {

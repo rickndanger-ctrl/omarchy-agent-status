@@ -792,17 +792,51 @@ function museReply(raw, id) {
   return text
 }
 
-async function askMuse(text, start) {
+// `trace` (optional) reports what happened: `attempted` = the question was handed to a relay's /ask (it may have arrived even if the call then failed:
+// never send it again), `reason` = why nobody took it.
+async function askMuse(text, start, trace = {}) {
+  let busy = false, down = false, unreachable = false
   for (const [i, muse] of MUSES.entries()) {
     if (i < start) continue
+    let health
+    try { health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 }) } catch { unreachable = true; continue }
+    if (!health.ok) { down = true; continue }
+    if (!health.composer || health.busy) { busy = true; continue }
+    trace.attempted = true
     try {
-      const health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 })
-      if (!health.ok || !health.composer) continue
       const r = await call(`${muse.url}/ask`, muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
       return { id: `${i}-${r.id}`, muse: muse.name }
-    } catch { /* try the next Muse */ }
+    } catch { /* the call failed after the question may have been sent: not asked again, the next Muse is tried as before */ }
   }
+  trace.reason = busy ? 'Muse is updating or busy' : down ? 'Muse not running' : unreachable ? 'no Muse reachable' : 'no Muse is ready right now'
   return null
+}
+// A question is accepted at once ("waiting") and handed to the first Muse that is ready: the hub checks every 2 s for up to 20 s and sends it ONCE.
+// (The glasses give up on a request after 8 s and ask the next hub, so the request itself must never be held.)
+const MUSE_WAIT_MS = Number(process.env.HUD_MUSE_WAIT_MS) || 20_000
+const MUSE_WAIT_STEP_MS = Number(process.env.HUD_MUSE_WAIT_STEP_MS) || 2000
+const museWaits = new Map() // 'w-…' id → { text, state: 'waiting'|'sent'|'failed', reason }
+async function museWait(id, job) {
+  const started = Date.now()
+  for (;;) {
+    const trace = {}
+    const r = await askMuse(job.text, 0, trace)
+    const ms = Date.now() - started
+    if (r) {
+      museMoved.set(id, r.id)
+      setTimeout(() => museMoved.delete(id), 10 * 60_000).unref()
+      job.state = 'sent'
+      console.log(`muse.wait ${ms} sent via ${r.muse}`)
+      return
+    }
+    const reason = trace.attempted ? 'Muse did not confirm the question' : trace.reason
+    if (trace.attempted || ms + MUSE_WAIT_STEP_MS > MUSE_WAIT_MS) {
+      job.state = 'failed'; job.reason = reason
+      console.log(`muse.wait ${ms} ${reason}`)
+      return
+    }
+    await new Promise(res => setTimeout(res, MUSE_WAIT_STEP_MS))
+  }
 }
 // Glasses id → id of the same question re-asked on a later Muse.
 const museMoved = new Map()
@@ -1876,16 +1910,24 @@ async function handle(req, res) {
       const text = String((await readBody(req)).text ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 1000)
       if (DEMO) return send(res, 200, { id: 'demo' })
       if (MODE !== 'hub' || !MUSES.length || !text) return send(res, 400, { error: 'cannot ask Muse' })
-      // First Muse that is up and whose text box is ready gets the question; the id remembers which.
-      const r = await askMuse(text, 0)
-      if (r) return send(res, 200, r)
-      return send(res, 502, { error: 'no Muse is ready right now' })
+      // Accepted at once; the first Muse that is ready gets the question, once (see museWait).
+      const id = `w-${randomBytes(6).toString('hex')}`
+      const job = { text, state: 'waiting', reason: '' }
+      museWaits.set(id, job)
+      setTimeout(() => museWaits.delete(id), 30 * 60_000).unref()
+      void museWait(id, job)
+      return send(res, 200, { id, muse: 'waiting', status: 'waiting' })
     }
     if (req.method === 'GET' && p === '/api/muse/reply') {
       let id = String(url.searchParams.get('id') ?? '')
       // A question handed on to another Muse is followed there (see below).
       while (museMoved.has(id)) id = museMoved.get(id)
       if (DEMO) return send(res, 200, { status: 'done', question: 'demo question', reply: 'Here is what Muse would say.' })
+      if (id.startsWith('w-')) {
+        const wait = museWaits.get(id)
+        if (!wait) return send(res, 400, { error: 'bad id' })
+        return send(res, 200, wait.state === 'failed' ? { status: 'error', question: clip(wait.text, 300), reply: '', error: wait.reason } : { status: 'waiting', question: clip(wait.text, 300), reply: '', error: '' })
+      }
       const [, index, job] = id.match(/^(\d+)-(\w{1,40})$/) ?? []
       const muse = MUSES[Number(index)]
       if (MODE !== 'hub' || !muse || !job) return send(res, 400, { error: 'bad id' })

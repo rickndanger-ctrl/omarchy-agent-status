@@ -580,6 +580,12 @@ export class HomeModel {
   }
   /** Muse's screen already holds an answer (or an ask's failure note): an unreachable relay must not replace it. */
   museHasAnswer(): boolean { return this.museHead !== null && this.museHeadReply; }
+  /** The hub holds the question until a busy / updating Muse is ready: say so instead of "thinking" (and back to thinking once it was sent). */
+  setMuseWaiting(ask: number, waiting: boolean): void {
+    if (!this.museIsNewest(ask) || !this.museHead || this.museHeadReply) return;
+    this.museHead = [...this.museHead.slice(0, -1), waiting ? 'Muse is busy, waiting…' : 'Muse is thinking…'];
+    this.composeMuse();
+  }
   /** The relay's latest is a question with no reply yet (asked from another client): it is the newest, "thinking"; the answer shown so far moves below. */
   showMusePending(question: string): void {
     const head = [...wrap(`You: ${question}`), '', 'Muse is thinking…'];

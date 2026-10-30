@@ -627,3 +627,37 @@ test('relay answers A, B, then a pending C: the earlier list shows B then A (ded
   const all = Array.from({ length: 6 }, () => { m2.input('down', NOW); return m2.render(NOW); }).join('\n');
   assert.ok(all.includes('ANSWER B'));
 });
+
+import { plainMuseError } from '../src/musepoll';
+import { widgetFor } from '../src/tiles';
+
+test('status waiting: the Muse screen and the tile say "Muse is busy, waiting…"; once sent it is thinking again; a final failure shows the plain reason', () => {
+  const m = new HomeModel(); m.update({ ...data, voice: true }); m.goTo('muse');
+  const ask = m.beginMuseAsk('will you answer?');
+  assert.match(m.render(NOW), /Muse is thinking…/);
+  m.setMuseWaiting(ask, true);
+  assert.match(m.render(NOW), /Muse is busy, waiting…/);
+  assert.doesNotMatch(m.render(NOW), /Muse is thinking/);
+  m.setMuseWaiting(ask, false);
+  assert.match(m.render(NOW), /Muse is thinking…/);
+  // an older ask cannot change the newest ask's line
+  m.setMuseWaiting(ask - 1, true);
+  assert.doesNotMatch(m.render(NOW), /busy, waiting/);
+  // the tile
+  const tile = new MuseCache();
+  tile.askStart('will you answer?');
+  const w = widgetFor('muse');
+  const ctx = (waiting: boolean) => ({ data, now: NOW, terminal: () => null, chat: () => null, muse: () => tile.get(), museWaiting: () => waiting, reminders: () => [], url: () => null }) as never;
+  assert.ok(w.body(ctx(false), 27).join(' ').includes('Muse is thinking…'));
+  assert.ok(w.body(ctx(true), 27).join(' ').includes('Muse is busy, waiting…'));
+  tile.setWaiting(true);
+  assert.equal(tile.isWaiting, true);
+  tile.askEnd();
+  assert.equal(tile.isWaiting, false);
+  // the end of the wait: the hub's plain reason is the problem line, and a transport error never says "server said 502"
+  assert.equal(m.setMuseProblem('will you answer?', 'Muse is updating or busy', ask), true);
+  assert.match(m.render(NOW), /Muse didn't get it: Muse is updating or busy\./);
+  assert.equal(plainMuseError('server said 502'), 'Muse is not reachable right now');
+  assert.equal(plainMuseError('no Muse is ready right now'), 'no Muse is ready right now');
+  assert.equal(plainMuseError('HTTP 502'), 'Muse is not reachable right now');
+});
