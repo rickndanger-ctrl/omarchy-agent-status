@@ -609,3 +609,21 @@ test('a question-only /latest (asked from another client): newest question + "th
   applyMuseLatest(fm, fresh, fresh.fetchStart(), { question: 'only q', reply: '' }, fresh.startRead());
   assert.deepEqual(fresh.get(), { question: 'only q', reply: '' });
 });
+
+test('relay answers A, B, then a pending C: the earlier list shows B then A (deduped by text, newest first, max 3)', () => {
+  const m2 = new HomeModel(); m2.update(data); m2.goTo('muse');
+  const t2 = new MuseCache();
+  const go = (q: string, r: string) => applyMuseLatest(m2, t2, t2.fetchStart(), { question: q, reply: r }, t2.startRead());
+  go('qA', 'ANSWER A');
+  go('qB', ''); // pending B: A moves below
+  go('qB', 'ANSWER B'); // B answered (head replaced: A stays below)
+  go('qC', ''); // pending C: B moves below
+  for (let i = 0; i < 3; i++) m2.input('down', NOW);
+  const text = Array.from({ length: 4 }, () => { m2.input('down', NOW); return m2.render(NOW); }).join('\n');
+  assert.ok(text.indexOf('ANSWER B') !== -1 && text.indexOf('ANSWER A') !== -1, text);
+  assert.ok(text.indexOf('ANSWER B') < text.indexOf('ANSWER A'), 'B before A');
+  // the same answer is never listed twice
+  go('qB', 'ANSWER B'); go('qD', '');
+  const all = Array.from({ length: 6 }, () => { m2.input('down', NOW); return m2.render(NOW); }).join('\n');
+  assert.ok(all.includes('ANSWER B'));
+});

@@ -532,6 +532,8 @@ export class HomeModel {
   private museHeadFinal = false;
   private museEarlier: { ask: number; lines: string[] }[] = [];
   private museAskSeq = 0;
+  /** Answers that came from the relay (not from an ask of this session) get their own negative key, so two of them never replace each other. */
+  private museExtKey = 0;
   private composeMuse(): void { this.museLines = this.museHead ? [...this.museHead, ...this.museEarlier.flatMap(e => ['', RULE.slice(0, 24) + ' earlier', ...e.lines])] : this.museLines; }
   private museAnswerView(question: string, reply: string): string[] {
     const m = museDisplay(question, reply);
@@ -581,7 +583,10 @@ export class HomeModel {
   showMusePending(question: string): void {
     const head = [...wrap(`You: ${question}`), '', 'Muse is thinking…'];
     if (this.museHead && this.museHead.join('\n') === head.join('\n')) { this.composeMuse(); return; }
-    if (this.museHead && this.museHeadReply) this.museEarlier = [{ ask: -2, lines: this.museHead }, ...this.museEarlier.filter(e => e.ask !== -2 && e.lines.join('\n') !== this.museHead!.join('\n'))].slice(0, 3);
+    if (this.museHead && this.museHeadReply) {
+      const text = this.museHead.join('\n');
+      this.museEarlier = [{ ask: --this.museExtKey, lines: this.museHead }, ...this.museEarlier.filter(e => e.lines.join('\n') !== text)].slice(0, 3);
+    }
     this.museHead = head; this.museHeadReply = false; this.museHeadFinal = false;
     this.composeMuse();
     if (this.screen.kind === 'muse') this.scroll = 0;
@@ -594,7 +599,7 @@ export class HomeModel {
       if (latest && (latest.question || latest.reply)) {
         const lines = this.museAnswerView(latest.question, latest.reply);
         const known = [this.museHead ?? [], ...this.museEarlier.map(e => e.lines)].some(l => l.join('\n') === lines.join('\n'));
-        if (!known) this.museAsEarlier(-1, lines);
+        if (!known) this.museAsEarlier(--this.museExtKey, lines);
       }
       this.composeMuse(); // the screen was cleared on opening: put the head back
       return false;
