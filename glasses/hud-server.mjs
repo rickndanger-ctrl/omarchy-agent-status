@@ -130,8 +130,10 @@ const NODES = (HUB.nodes || []).map(n => ({
 // ---- orchestrator pin: the Claude session on this computer that the glasses read and write to (hub.json "orchestrator": {session, dir}) ----
 // READ: the tail of its transcript (assistant text only, secrets redacted). WRITE: one JSON line in an inbox file the session picks up.
 const expandHome = p => (String(p).startsWith('~') ? path.join(HOME, String(p).slice(1)) : String(p))
-const ORCH = MODE === 'hub' && HUB.orchestrator && /^[\w.-]+$/.test(String(HUB.orchestrator.session || '')) && HUB.orchestrator.dir
-  ? { session: String(HUB.orchestrator.session), dir: expandHome(HUB.orchestrator.dir) } : null
+// Read in any mode: the computer that runs the session (a node, not necessarily the hub) answers for it. File: CONFIG_DIR/orchestrator.json, else hub.json.
+const ORCH_CFG = readJson(process.env.HUD_ORCH_CONFIG || path.join(CONFIG_DIR, 'orchestrator.json')) || HUB.orchestrator
+const ORCH = ORCH_CFG && /^[\w.-]+$/.test(String(ORCH_CFG.session || '')) && ORCH_CFG.dir
+  ? { session: String(ORCH_CFG.session), dir: expandHome(ORCH_CFG.dir) } : null
 const ORCH_PANE = 'orchestrator' // the pane name the glasses use for it; a tmux pane id (%3) can never collide
 const ORCH_FILE = () => path.join(ORCH.dir, `${ORCH.session}.jsonl`)
 const ORCH_INBOX = () => path.join(CONFIG_DIR, 'orchestrator-inbox.jsonl')
@@ -697,6 +699,8 @@ async function startAgentIn(agent, dir, task, resumeId = '') {
 async function nodeView() {
   expirePending()
   const [sessions, desk, starts, studio] = await Promise.all([sessionsWithPanes(), desktop(), canStart(), studioSummary()])
+  const orch = orchState()
+  if (orch) sessions.push({ agent: 'claude', name: 'Orchestrator', session: 'orchestrator', state: orch.state, page: 'Orchestrator', at: orch.at, workspace: '', machine: MACHINE, pane: ORCH_PANE, tmux: ORCH_PANE })
   return { machine: MACHINE, online: true, sessions, pending: publicPending(), desktop: desk, canStart: starts, studio }
 }
 
@@ -824,9 +828,7 @@ async function remindersSummary() {
 async function home() {
   const views = [await nodeView(), ...(MODE === 'hub' ? await remoteViews() : [])]
   const priority = { attention: 5, error: 4, working: 3, done: 2, idle: 1.5, stopped: 1 }
-  const orch = orchState()
-  const orchSession = orch ? [{ agent: 'claude', name: 'Orchestrator', session: 'orchestrator', state: orch.state, page: 'Orchestrator', at: orch.at, workspace: '', machine: MACHINE, pane: ORCH_PANE, tmux: ORCH_PANE }] : []
-  const sessions = [...views.flatMap(v => v.sessions), ...orchSession].sort((a, b) => (priority[b.state] || 0) - (priority[a.state] || 0) || b.at - a.at)
+  const sessions = views.flatMap(v => v.sessions).sort((a, b) => (priority[b.state] || 0) - (priority[a.state] || 0) || b.at - a.at)
   return {
     now: Date.now(),
     mode: MODE,
@@ -836,6 +838,7 @@ async function home() {
     pending: views.flatMap(v => v.pending).sort((a, b) => a.at - b.at),
     desktops: views.filter(v => v.desktop).map(v => ({ machine: v.machine, ...v.desktop })),
     voice: Boolean(GROQ_KEY) || DEMO,
+    hub: MACHINE,
     weather: DEMO ? { temp: 62, desc: 'Cloudy', hi: 68, lo: 51, rainAt: '4 PM', rainChance: 70 } : weather,
     messages: MODE === 'hub' || DEMO ? await messagesSummary() : null,
     reminders: await remindersSummary(),
@@ -1430,7 +1433,7 @@ const pin = (label, machine, agent, session) => ({ label, machine, agent, sessio
 // The sessions are the ones com.rick.home-agents already keeps: tmux 'claude'/'codex' on the Minis, screen 'claude'/'codex' on Neo.
 // Dell has no tmux: its Claude is the laptop window the Tiles 'agent:Dell/claude' tile follows (session 'tile', resolved by the app like that tile).
 const DEFAULT_PINS = [
-  ...(ORCH ? [pin('Claude · Orchestrator', MACHINE, 'claude', ORCH_PANE)] : []),
+  pin('Claude · Orchestrator', 'Dell', 'claude', ORCH_PANE),
   pin('Claude · Mini 1', 'Mini 1', 'claude', 'claude'), pin('Codex · Mini 1', 'Mini 1', 'codex', 'codex'),
   pin('Claude · Mini 2', 'Mini 2', 'claude', 'claude'), pin('Codex · Mini 2', 'Mini 2', 'codex', 'codex'),
   pin('Claude · Neo', 'Neo', 'claude', 'claude'), pin('Codex · Neo', 'Neo', 'codex', 'codex'),

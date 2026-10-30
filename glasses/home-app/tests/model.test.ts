@@ -308,8 +308,38 @@ test('select on a tmux, screen or window pin always starts the mic; voice off fl
     openAgent(off);
     assert.equal(off.input('select', NOW), null);
     assert.equal(off.screenKind, 'agent', 'no reply list');
-    assert.match(off.render(NOW), /^Voice not set up on Mini 1/);
+    assert.match(off.render(NOW), /^Voice not set up on this hub/);
   }
+});
+
+test('leaving the terminal page while listening: the mic is no longer wanted (the app closes it)', () => {
+  const m = new HomeModel();
+  m.update(tmuxed());
+  openAgent(m);
+  assert.equal(m.micWanted(), false);
+  m.input('select', NOW);
+  assert.equal(m.micWanted(), true);
+  m.goTo('home');
+  assert.equal(m.screenKind, 'home');
+  assert.equal(m.micWanted(), false, 'Home from the menu');
+  openAgent(m);
+  m.input('select', NOW);
+  m.abandonTalk();
+  assert.equal(m.micWanted(), false, 'left the front');
+  assert.match(m.render(NOW), /^[A-Z]/);
+  openAgent(m);
+  m.input('select', NOW);
+  m.input('select', NOW);
+  m.setTranscript('hello', NOW);
+  assert.equal(m.micWanted(), false, 'heard text is waiting: the mic is already closed');
+});
+
+test('the voice-off message names the hub', () => {
+  const m = new HomeModel();
+  m.update(tmuxed({ voice: false, hub: 'Mini 1' }));
+  openAgent(m);
+  m.input('select', NOW);
+  assert.match(m.render(NOW), /^Voice not set up on this hub \(Mini 1\)/);
 });
 
 test('the reply list starts with Speak: it starts the mic (or says voice is off); Back is second and does nothing', () => {
@@ -329,7 +359,7 @@ test('the reply list starts with Speak: it starts the mic (or says voice is off)
   openAgent(off);
   off.input('down', NOW);
   assert.equal(off.input('select', NOW), null);
-  assert.match(off.render(NOW), /^Voice not set up on Mini 1/);
+  assert.match(off.render(NOW), /^Voice not set up on this hub/);
 });
 
 test('swipe down opens replies: quick replies send text, Stop sends Escape, Show on screen focuses', () => {

@@ -113,7 +113,7 @@ const glasses = new Glasses({
   onInput: input => handle(input, 'touch'),
   onMenu: id => inputQueue.pushMenu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
-  onForeground: on => { foreground = on; if (!on) { inputQueue.clear('left the front'); void getConv()?.stop('background'); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); } },
+  onForeground: on => { foreground = on; if (!on) { model.abandonTalk(); if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); void getConv()?.stop('background'); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); } },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
     if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
@@ -585,6 +585,8 @@ const settingsHost = {
   paint: () => paint(),
 };
 function paint(): void {
+  // The microphone is open only while a voice reply is on screen and in front: leaving the page (menu, Home, Desk) closes it.
+  if (recording !== null && !(model.micWanted() && foreground && !showingDesk())) void run({ kind: 'cancelMic' });
   // A reminder that was added or cancelled (or whose voice failed) ends on Home: that is back in Tiles.
   if (fromTiles && model.screenKind === 'home' && (prevKind === 'listen' || prevKind === 'confirm')) fromTiles = false;
   prevKind = model.screenKind;

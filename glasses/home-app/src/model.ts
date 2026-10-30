@@ -23,6 +23,8 @@ export interface HomeData {
   muse: boolean;
   desktops?: Desktop[];
   voice?: boolean;
+  /** The name of the hub that answered (its Groq key decides `voice`). */
+  hub?: string;
   weather?: { temp: number; desc: string; hi: number; lo: number; rainAt: string | null; rainChance: number } | null;
   /** Studio Routing on the laptop: what each computer's workers are doing, and what they said to each other. */
   studio?: Studio | null;
@@ -393,10 +395,15 @@ export class HomeModel {
 
   /** Start a voice reply on the open terminal page. Always starts the mic; without voice on this hub it says why instead. */
   private startTalk(x: Session, key: string, nowMs: number): Action | null {
-    if (!this.data?.voice) { this.showFlash(`Voice not set up on ${x.machine}`, nowMs); return null; }
+    if (!this.data?.voice) { this.showFlash(`Voice not set up on this hub${this.data?.hub ? ` (${this.data.hub})` : ''}`, nowMs); return null; }
     this.talk = { key, phase: 'listening', text: '' };
     return { kind: 'startMic' };
   }
+
+  /** True while the microphone should be open: a voice reply on the terminal page or the listen screen. */
+  micWanted(): boolean { return Boolean(this.talk && this.talk.phase !== 'ready') || this.screen.kind === 'listen'; }
+  /** Drop an unfinished voice reply (left the front); the caller closes the mic. */
+  abandonTalk(): void { this.talk = null; }
 
   /** The prompt went out (or not): the header says Sent. */
   promptDone(ok: boolean, stopped: boolean, nowMs: number): void {
@@ -424,7 +431,7 @@ export class HomeModel {
   goHome(): void { this.goTo('home'); }
   /** Jump straight to a main page from the long-press menu (not while you're mid-recording). */
   goTo(kind: 'home' | 'agents' | 'messages' | 'muse'): void {
-    if (this.screen.kind === 'listen' || this.talk) return;
+    if (this.screen.kind === 'listen') return;
     this.returnTo = null;
     this.go({ kind });
     if (kind === 'muse') this.museLines = null;
