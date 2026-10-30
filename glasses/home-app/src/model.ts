@@ -817,7 +817,6 @@ export class HomeModel {
       const total = this.terminalLines()?.length ?? 0;
       const t = this.talk && this.talk.key === s.key ? this.talk : null;
       if (t) {
-        if (input === 'back') { this.talk = null; return t.phase === 'ready' ? null : { kind: 'cancelMic' }; }
         if (t.phase === 'listening' && input === 'select') { this.talk = { ...t, phase: 'thinking' }; return { kind: 'stopMic' }; }
         if (t.phase === 'ready' && input === 'select') {
           this.talk = null;
