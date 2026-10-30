@@ -1,6 +1,7 @@
 import './style.css';
 import { Glasses, DEFAULT_OUTLINE } from './glasses';
 import { ShownWatch } from './shownwatch';
+import { pollMuseJob, type MuseJob } from './musepoll';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { HubPicker } from './hubpick';
 import { LayoutLoader } from './layoutcache';
@@ -757,16 +758,15 @@ async function run(action: Action): Promise<void> {
       museTile.askStart(action.text);
       paint();
       const askedAt = Date.now();
-      const ask = action.ask ?? model.nextMuseAsk(); // the newest ask owns the Muse screen and tile
+      const ask = action.ask ?? model.beginMuseAsk(action.text); // the newest ask owns the Muse screen and tile (conversation asks too)
       const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text }) }).catch(e => ({ error: String(e.message ?? e) }));
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
       if (!asked.id) { const newest = model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay', ask); if (newest) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); } paint(); return; }
       // Muse answers in a few seconds; long answers take longer. Check every 0.7 s for up to 2.5 minutes.
-      for (let i = 0; i < 215; i++) {
-        await new Promise(r => setTimeout(r, 700));
-        const job = await api<{ status: string; question: string; reply: string; error?: string }>(`muse/reply?id=${encodeURIComponent(asked.id)}`).catch(() => null);
-        if (!job) continue;
-        const finished = ['done', 'error', 'timeout'].includes(job.status);
+      const ended = await pollMuseJob(
+        () => api<MuseJob>(`muse/reply?id=${encodeURIComponent(asked.id!)}`).catch(() => null),
+        () => new Promise<void>(r => setTimeout(r, 700)),
+        (job, finished) => {
         const newest = job.reply ? model.setMuseAnswer(job.question, job.reply, ask) : model.museIsNewest(ask);
         if (job.reply && newest) museTile.askReply(job.question, job.reply);
         // A partial reply is only drawn when the glasses are idle: a write in flight would hold the final one back behind it.
@@ -789,8 +789,13 @@ async function run(action: Action): Promise<void> {
             if (model.setMuseProblem(action.text, why, ask)) museTile.askReply(action.text, `Muse didn't get it: ${why}.`);
           }
           paint();
-          break;
         }
+        },
+      );
+      if (!ended) {
+        // Every poll failed or Muse never finished: do not stay on "Muse is thinking…".
+        diag('muse.reply', 'gave up: Muse took too long');
+        if (model.setMuseProblem(action.text, 'Muse took too long', ask)) museTile.askReply(action.text, "Muse didn't get it: Muse took too long.");
       }
       if (model.museIsNewest(ask)) museTile.askEnd();
       paint();
@@ -830,9 +835,13 @@ async function run(action: Action): Promise<void> {
       await openDesk();
     } else if (action.kind === 'loadMuse') {
       const stamp = museTile.fetchStart();
-      const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
-      model.setMuse(latest);
-      if (stamp !== null) { if (latest) museTile.fetchDone(stamp, latest); else museTile.fetchFailed(stamp); }
+      if (stamp === null) { model.restoreMuse(); } // an ask is in flight: nothing is read, the ask's own screen stays
+      else {
+        const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
+        // Like the tile: a read that began before an ask started or finished is out of date and changes nothing.
+        if (museTile.isCurrent(stamp)) { model.setMuse(latest); if (latest) museTile.fetchDone(stamp, latest); else museTile.fetchFailed(stamp); }
+        else model.restoreMuse();
+      }
     }
   } catch (error) {
     model.showFlash(error instanceof Error ? error.message : 'Failed', Date.now());

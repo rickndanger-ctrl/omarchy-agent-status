@@ -29,6 +29,8 @@ export class MuseCache {
 
   /** Before a fetch of /api/muse: null means skip it (an ask is in flight). Hand the result to fetchDone. */
   fetchStart(): number | null { return this.asking ? null : this.stamp; }
+  /** Is a fetch that started with this stamp still the newest word (no ask began or ended since)? */
+  isCurrent(stamp: number | null): boolean { return stamp !== null && !this.asking && stamp === this.stamp; }
   /** The fetch's result is used only if nothing newer (an ask) happened since it started. */
   fetchDone(stamp: number, value: MuseValue | null): void {
     if (value && !this.asking && stamp === this.stamp) this.value = value;

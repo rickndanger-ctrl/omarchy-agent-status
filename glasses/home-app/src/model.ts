@@ -535,8 +535,6 @@ export class HomeModel {
     const m = museDisplay(question, reply);
     return [clip(`You: ${m.question}`), ...wrap(`Muse: ${m.reply}`)];
   }
-  /** A new ask's id without touching the screen (asks that do not come from the Muse screen). */
-  nextMuseAsk(): number { return ++this.museAskSeq; }
   /** Is this ask the newest one? Only the newest ask's answer takes the screen. */
   museIsNewest(ask: number): boolean { return ask === this.museAskSeq; }
   /** The answer's first line is inside the 6-line window (the question is one line, so scroll 0 or 1). */
@@ -568,15 +566,17 @@ export class HomeModel {
     return true;
   }
   /** The ask is under way: its question (as today) and "thinking"; the answer shown so far moves below. */
-  private beginMuseAsk(text: string): number {
+  beginMuseAsk(text: string): number {
     if (this.museHead && this.museHeadReply) this.museEarlier = [{ ask: this.museAskSeq, lines: this.museHead }, ...this.museEarlier.filter(e => e.ask !== this.museAskSeq)].slice(0, 3);
     const ask = ++this.museAskSeq;
     this.museHead = [...wrap(`You: ${text}`), '', 'Muse is thinking…']; this.museHeadReply = false;
     this.composeMuse();
     return ask;
   }
+  /** Put the ask-in-progress back on screen (the Muse screen was opened or reloaded while an ask is under way: nothing is fetched then). */
+  restoreMuse(): void { if (this.museHead) this.composeMuse(); }
   setMuse(latest: { question: string; reply: string } | null): void {
-    this.museEarlier = [];
+    // The scrollback of earlier answers stays: reopening Muse must not lose it.
     this.museHeadReply = latest !== null && Boolean(latest.question || latest.reply);
     this.museHead = latest === null ? ["Couldn't reach Muse."] : this.museHeadReply ? this.museAnswerView(latest.question, latest.reply) : ['No Muse conversation yet.'];
     this.composeMuse();

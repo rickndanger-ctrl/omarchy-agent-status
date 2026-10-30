@@ -400,3 +400,58 @@ test('a long question + reply: the answer\'s first line is in the first drawn fr
     assert.equal(watch.expectOnScreen(model.museAnswerInView(), 'whatever', Date.now()), false);
   } finally { g.dispose(); }
 });
+
+// ---- muse-layout review: loadMuse out of date, scrollback kept, conversation asks, gave up ----
+import { MuseCache } from '../src/musecache';
+import { pollMuseJob } from '../src/musepoll';
+
+test('a /muse read that began before an ask started or ended is out of date (MuseCache.isCurrent), like the tile', () => {
+  const c = new MuseCache();
+  const stamp = c.fetchStart();
+  assert.equal(c.isCurrent(stamp), true);
+  c.askStart('q');
+  assert.equal(c.isCurrent(stamp), false, 'an ask began during the read');
+  assert.equal(c.fetchStart(), null, 'no read while an ask is in flight');
+  assert.equal(c.isCurrent(null), false);
+  c.askEnd();
+  assert.equal(c.isCurrent(stamp), false, 'and it ended since: still stale');
+  assert.equal(c.isCurrent(c.fetchStart()), true);
+});
+
+test('the Muse screen reopened mid-ask shows the ask in progress; reopening keeps the scrollback of earlier answers; a conversation-sourced ask archives the old head', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  m.setMuse({ question: 'old q', reply: 'old answer' });
+  const a = m.beginMuseAsk('conversation summary question'); // what main does for an ask that did not come from this screen
+  assert.equal(m.museIsNewest(a), true);
+  m.goTo('muse'); // reopened: museLines cleared, nothing is fetched while the ask is in flight
+  m.restoreMuse();
+  const thinking = m.render(NOW);
+  assert.match(thinking, /conversation summary question/);
+  assert.match(thinking, /Muse is thinking…/);
+  m.setMuseAnswer('conversation summary question', 'new answer', a);
+  for (let i = 0; i < 2; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /earlier|old answer/, 'the previous answer was archived below');
+  // reopen: the relay's latest replaces the head, the earlier answers stay
+  m.goTo('muse');
+  m.setMuse({ question: 'conversation summary question', reply: 'new answer' });
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /old answer/, 'scrollback survives a reload');
+});
+
+test('every poll failing (or never finishing) ends in "Muse took too long", not in "Muse is thinking…"', async () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const ask = m.beginMuseAsk('will you answer?');
+  let waits = 0;
+  const finished = await pollMuseJob(async () => null, async () => { waits++; }, () => assert.fail('no job ever arrived'), 215);
+  assert.equal(finished, false);
+  assert.equal(waits, 215);
+  // what main.ts does with `false`
+  assert.equal(m.setMuseProblem('will you answer?', 'Muse took too long', ask), true);
+  const text = m.render(NOW);
+  assert.match(text, /Muse didn't get it: Muse took too long/);
+  assert.doesNotMatch(text, /Muse is thinking/);
+  const done = await pollMuseJob(async () => ({ status: 'done', question: 'q', reply: 'r' }), async () => {}, () => {}, 5);
+  assert.equal(done, true);
+  const never = await pollMuseJob(async () => ({ status: 'sending', question: 'q', reply: '' }), async () => {}, () => {}, 4);
+  assert.equal(never, false);
+});
