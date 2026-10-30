@@ -21,6 +21,7 @@ bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
 printf '%s\n' "$TOKEN" > "$work/hud.token"
 cp "$here/fixtures/muse-polluted.txt" "$work/polluted.txt"
 printf 'Your calendar is clear today.\nMy plan: Muse is a good name for it.\nDone.\n' > "$work/clean.txt"
+printf 'Allow access to your calendar only after you review it.\nPlace this order? No, compare prices first.\n' > "$work/sentences.txt"
 printf 'Muse is on it.\nThe word Muse and Connected here are just talk.\n' > "$work/midline.txt"
 cat > "$work/fake-muse.mjs" <<'JS'
 import http from 'node:http'
@@ -32,6 +33,7 @@ http.createServer((req, res) => {
   if (req.url === '/latest') return send({ question: 'Can you hear me?', reply: read('polluted') })
   if (req.url === '/reply/polluted') return send({ status: 'done', question: 'Can you hear me?', reply: read('polluted') })
   if (req.url === '/reply/clean') return send({ status: 'done', question: 'q', reply: read('clean') })
+  if (req.url === '/reply/sentences') return send({ status: 'done', question: 'q', reply: read('sentences') })
   if (req.url === '/reply/midline') return send({ status: 'done', question: 'q', reply: read('midline') })
   if (req.url === '/reply/sending') return send({ status: 'sending', question: 'q', reply: '' })
   res.statusCode = 404; res.end('{}')
@@ -59,6 +61,8 @@ get "/api/muse/reply?id=0-clean"
 check "a clean reply is untouched (a mid-line 'Muse' stays)" "d['reply']=='Your calendar is clear today.\nMy plan: Muse is a good name for it.\nDone.\n'"
 get "/api/muse/reply?id=0-midline"
 check "a reply that mentions Muse and Connected mid-line is kept whole" "d['reply'].startswith('Muse is on it.') and 'Connected here' in d['reply']"
+get "/api/muse/reply?id=0-sentences"
+check "real sentences that start like chrome (Allow access to… / Place this order? No…) are kept" "d['reply']=='Allow access to your calendar only after you review it.\nPlace this order? No, compare prices first.\n'"
 get "/api/muse/reply?id=0-sending"
 check "a reply still being typed passes through" "d['status']=='sending' and d['reply']==''"
 if grep -qE '^muse\.trimmed [0-9]+ chars$' "$work/hub.log"; then ok "the trim is logged: $(grep -m1 '^muse.trimmed' "$work/hub.log")"; else bad "muse.trimmed not logged"; fi

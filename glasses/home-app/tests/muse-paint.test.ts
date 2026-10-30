@@ -8,6 +8,7 @@ import { Glasses } from '../src/glasses';
 import { GLASSES_MENU } from '../src/menu';
 import { HomeModel, type HomeData } from '../src/model';
 import { InputQueue } from '../src/inputqueue';
+import { ShownWatch } from '../src/shownwatch';
 
 const NOW = Date.UTC(2026, 9, 26, 18, 42);
 const data: HomeData = { now: NOW, paused: false, machines: [{ name: 'lap', online: true }], sessions: [], pending: [], messages: [], muse: true };
@@ -300,4 +301,67 @@ test('the final Muse reply is drawn within 0.5 s of done even with a 150 ms rend
   assert.ok(last!.at - doneAt <= 500, `drawn ${last!.at - doneAt} ms after done`);
   assert.equal(g.upToDate(), true);
   g.dispose();
+});
+
+function drawRig(renderMs = 150) {
+  const t0 = Date.now();
+  const drawn: { at: number; text: string }[] = [];
+  const watch = new ShownWatch();
+  const shown: number[] = [];
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onStatus: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {},
+    onDrawn: text => { drawn.push({ at: Date.now() - t0, text }); const ms = watch.drawn(text, Date.now()); if (ms !== null) shown.push(Date.now() - t0); },
+    bridge: async () => bridge([], t0, renderMs),
+  }, GLASSES_MENU);
+  return { g, drawn, watch, shown, t0 };
+}
+
+test('an urgent final frame preempts the 450 ms timer a partial paint scheduled: drawn without the pacing wait', async () => {
+  const { g, drawn, t0 } = drawRig(150);
+  try {
+    await g.connect();
+    g.setText('Yes, I can');
+    await g.settled(2000);
+    g.setText('Yes, I can hear'); // a partial right after a write: the 450 ms timer is scheduled
+    await sleep(20);
+    const askedAt = Date.now() - t0;
+    g.setText('Yes, I can hear you. All good.', true);
+    await g.settled(2000);
+    const final = drawn.find(d => d.text.includes('All good'));
+    assert.ok(final);
+    assert.ok(final!.at - askedAt < 350, `drawn ${final!.at - askedAt} ms after the urgent paint (the timer would have cost 450 ms)`);
+  } finally { g.dispose(); }
+});
+
+test('muse.shown only for the exact final frame: a partial with the same start does not count, and an older write in flight is not "up to date"', async () => {
+  const { g, drawn, watch, shown } = drawRig(150);
+  try {
+    await g.connect();
+    const partial = 'Muse: Yes, I can hear';
+    const final = 'Muse: Yes, I can hear you. The connection looks good.';
+    g.setText(partial);
+    await g.settled(2000);
+    assert.ok(drawn.some(d => d.text === partial));
+    assert.equal(shown.length, 0);
+    // a write for another partial is in flight when the final is asked for
+    g.setText('Muse: Yes, I can hear you.');
+    await sleep(350); // that write has started (pacing 450 ms from the last write, 150 ms render)
+    assert.equal(g.busy(), true, 'a write is in flight');
+    g.setText(final, true);
+    watch.expect(g.wantedText()!, Date.now());
+    assert.equal(g.upToDate(), false, 'not up to date while an older write is in flight');
+    await g.settled(2000);
+    assert.equal(shown.length, 1, 'reported once, after the final frame');
+    assert.equal(drawn.at(-1)!.text, final);
+    assert.equal(g.upToDate(), true);
+  } finally { g.dispose(); }
+});
+
+test('ShownWatch: only the exact expected text, once', () => {
+  const w = new ShownWatch();
+  assert.equal(w.drawn('x', 5), null);
+  w.expect('Muse: Yes, I can hear you', 100);
+  assert.equal(w.drawn('Muse: Yes, I can hear', 150), null);
+  assert.equal(w.drawn('Muse: Yes, I can hear you', 400), 300);
+  assert.equal(w.drawn('Muse: Yes, I can hear you', 500), null);
 });

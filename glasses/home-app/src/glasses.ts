@@ -136,7 +136,9 @@ export class Glasses {
   /** A write is in flight or waiting to go (a new frame would queue behind it). */
   busy(): boolean { return this.renderBusy || this.live.size > 0; }
   /** The glasses already show exactly what was last asked for. */
-  upToDate(): boolean { return this.pending() === null; }
+  upToDate(): boolean { return this.pending() === null && !this.renderBusy && this.live.size === 0; }
+  /** The full-screen text last asked for (as it will be sent), if any. */
+  wantedText(): string | null { return this.want.kind === 'single' ? this.want.text : null; }
 
   /** Tile outline brightness (phone slider); the page is rebuilt to draw it. */
   setOutline(level: number): void {
@@ -301,7 +303,10 @@ export class Glasses {
 
   setText(content: string, urgent = false): void {
     this.want = { kind: 'single', text: glassesSafe(content).slice(0, 950) || ' ' };
-    if (urgent) this.urgent = true; // the next write skips the 450 ms pacing (an answer the owner is waiting for)
+    if (urgent) {
+      this.urgent = true; // the next write skips the 450 ms pacing (an answer the owner is waiting for)
+      if (this.renderTimer !== undefined) { clearTimeout(this.renderTimer); this.renderTimer = undefined; } // and does not wait for one already scheduled
+    }
     this.unblockFor(this.want);
     this.scheduleRender();
   }

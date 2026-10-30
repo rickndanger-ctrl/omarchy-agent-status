@@ -1,5 +1,6 @@
 import './style.css';
 import { Glasses, DEFAULT_OUTLINE } from './glasses';
+import { ShownWatch } from './shownwatch';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { HubPicker } from './hubpick';
 import { LayoutLoader } from './layoutcache';
@@ -125,7 +126,7 @@ const glasses = new Glasses({
   onImu: sample => desk?.imuSample(sample),
   onImuOff: () => desk?.imuLost(),
   onFrame: what => diag('frame', `${model.screenKind} ${what}`),
-  onDrawn: text => { if (museShown && text.includes(museShown.needle)) { diag('muse.shown', Date.now() - museShown.since); museShown = null; } },
+  onDrawn: text => { const ms = museShown.drawn(text, Date.now()); if (ms !== null) diag('muse.shown', ms); },
   onSlowRender: ms => diag('render.slow', `${ms} ms on ${model.screenKind}`),
   onAudio: pcm => {
     const c = getConv();
@@ -583,8 +584,8 @@ function deskInput(input: Input): void {
 let prevKind = model.screenKind;
 /** Set around the paint of a Muse answer the owner is waiting for: that frame skips the write pacing. */
 let urgentPaint = false;
-/** The final Muse reply wanted on the glasses: when a frame containing `needle` is drawn, log how long after the ask. */
-let museShown: { needle: string; since: number } | null = null;
+/** The final Muse reply wanted on the glasses: when exactly that frame is drawn, log how long after the ask. */
+const museShown = new ShownWatch();
 /** Display off (Quick settings): a blank page until any press or remote action. */
 let blank = false;
 function wake(): void { blank = false; diag('display', 'on'); paint(); }
@@ -769,12 +770,14 @@ async function run(action: Action): Promise<void> {
         // A partial reply is only drawn when the glasses are idle: a write in flight would hold the final one back behind it.
         if (finished || !glasses.busy()) {
           if (finished && job.reply) {
-            const first = job.reply.trim().split('\n')[0].slice(0, 12);
-            museShown = { needle: first, since: askedAt };
             urgentPaint = true;
             try { paint(); } finally { urgentPaint = false; }
-            // Already on the glasses (the text did not change since the last frame)? Then it is shown now.
-            if (glasses.upToDate()) { diag('muse.shown', Date.now() - askedAt); museShown = null; }
+            const wanted = glasses.wantedText();
+            if (wanted !== null) {
+              museShown.expect(wanted, askedAt);
+              // Already on the glasses (nothing changed and no older write in flight)? Then it is shown now.
+              if (glasses.upToDate()) { const ms = museShown.drawn(wanted, Date.now()); if (ms !== null) diag('muse.shown', ms); }
+            }
           } else paint();
         }
         if (finished) {
