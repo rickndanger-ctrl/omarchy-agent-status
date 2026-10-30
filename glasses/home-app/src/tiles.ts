@@ -67,6 +67,8 @@ export interface TileContext {
   conversation?(): ConvView | null;
   /** Which hub Home talks to, for the clock tile ("via Mini 1"); down = no allowed hub answers. Optional. */
   hub?: { name: string | null; down: boolean };
+  /** What was just sent to the agent in this pane ("sent to Claude"), for a few seconds. Optional. */
+  sent?(pane: string): string | null;
 }
 
 /** Something the tile asks for in the background so it can render: main.ts polls these for the visible page. */
@@ -203,6 +205,8 @@ function agentWidget(id: WidgetId): Widget {
     title: ctx => {
       const { session: s, moved } = resolve(ctx);
       if (!s) return orch ? 'Orchestrator' : ref.slice(ref.indexOf('/') + 1);
+      const sent = orch && s.pane ? ctx.sent?.(s.pane) : null;
+      if (sent) return sent;
       const note = moved && ctx.now - (movedAt.get(ref) ?? ctx.now) < MOVED_NOTE_MS ? ` (moved to ${s.page})` : '';
       return `${s.name || s.agent} · ${STATE_WORD[s.state] ?? s.state}${note}`;
     },

@@ -431,3 +431,14 @@ test('orchestrator tile: the read view of the laptop session, replies go to it, 
   const up2 = ctx({ data: { ...data, sessions: [] } });
   assert.deepEqual(w.body(up2, 27), ['Orchestrator is not running.']);
 });
+
+test('orchestrator tile: after a reply the title says sent to Claude for a few seconds (Continue from the tile too)', () => {
+  const orch = { agent: 'claude', name: 'Orchestrator', session: 'orchestrator', state: 'idle', page: 'Orchestrator', at: 100, workspace: '', machine: 'Dell', pane: 'orchestrator', tmux: 'orchestrator' };
+  const up: HomeData = { ...data, sessions: [orch] };
+  const w = widgetFor('orchestrator');
+  assert.match(w.title(ctx({ data: up })), /^Orchestrator/);
+  let note: string | null = 'sent to Claude';
+  assert.equal(w.title(ctx({ data: up, sent: pane => (pane === 'orchestrator' ? note : null) })), 'sent to Claude');
+  note = null;
+  assert.match(w.title(ctx({ data: up, sent: () => note })), /^Orchestrator/);
+});
