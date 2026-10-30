@@ -160,7 +160,7 @@ const live = (s: Session) => Boolean(s.pane || s.window);
  *  - A pinned ref whose session is gone falls back to the same kind of agent on that machine: working or needing you,
  *    then idle, then the rest; a pane or window before an app thread; newest. `moved` says it is no longer the pinned one.
  */
-function findSession(data: HomeData | null, ref: string, now: number): { session?: Session; moved: boolean } {
+export function findSession(data: HomeData | null, ref: string, now: number): { session?: Session; moved: boolean } {
   if (!data) return { moved: false };
   const exact = data.sessions.find(s => sessionKey(s) === ref || (s.pane && `${s.machine}/${s.pane}` === ref) || (s.window && `${s.machine}/${s.window}` === ref));
   if (exact) {

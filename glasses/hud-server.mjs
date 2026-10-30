@@ -27,6 +27,7 @@
 //   GET  /api/messages?chat=<id>              hub: last messages of one chat (read-only)
 //   GET  /api/muse                            hub: Muse's latest exchange (read-only, on demand)
 //   GET  /api/layout, PUT /api/layout         the Tiles pages (layout.json); hub.json peers keep them in step
+//   GET  /api/pinned, PUT /api/pinned         the pinned agents on Home (pinned.json: label, machine, agent, session); peers keep them in step
 //   GET  /api/reminders                       hub: open Apple Reminders (Mini 1 relay)
 //   POST /api/reminders/done {id}, /api/reminders/add {title, list?}
 //   GET  /api/tile?url=<endpoint>             hub: a url: plug-in tile (only endpoints in layout.json)
@@ -176,8 +177,8 @@ const AGENT_NAMES = { claude: 'Claude', codex: 'Codex', hermes: 'Hermes' }
 async function agentPanes() {
   let panes, processes
   try {
-    // Spaces, path last: newer tmux prints a tab in -F output as "_".
-    panes = (await run('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{pane_current_path}'], { timeout: 2000 })).stdout
+    // Spaces, session name before the path (path last, it may hold spaces): newer tmux prints a tab in -F output as "_".
+    panes = (await run('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{session_name}|#{pane_current_path}'], { timeout: 2000 })).stdout
     processes = (await run('ps', ['-eo', 'pid=,ppid=,args='], { timeout: 2000 })).stdout
   } catch {
     return []
@@ -196,13 +197,13 @@ async function agentPanes() {
   }
   const result = []
   for (const line of panes.split('\n')) {
-    const [, pane, pid, cwd] = line.match(/^(\S+) (\S+) ?(.*)$/) ?? []
+    const [, pane, pid, tmux, cwd] = line.match(/^(\S+) (\S+) (.*?)\|(.*)$/) ?? []
     if (!/^%\d+$/.test(pane || '')) continue
     const queue = [pid]
     for (let i = 0; i < queue.length && i < 200; i++) {
       const agent = agentOf.get(queue[i])
       if (agent) {
-        result.push({ pane, agent, page: path.basename(cwd || ''), pid: queue[i], cwd })
+        result.push({ pane, agent, page: path.basename(cwd || ''), pid: queue[i], cwd, tmux })
         break
       }
       queue.push(...(children.get(queue[i]) ?? []))
@@ -283,7 +284,7 @@ async function agentScreens() {
         try {
           cwd = (await run('lsof', ['-a', '-p', queue[i], '-d', 'cwd', '-Fn'], { timeout: 2000 })).stdout.split('\n').find(l => l.startsWith('n'))?.slice(1) ?? ''
         } catch { /* unknown folder */ }
-        result.push({ pane: `screen:${pid}.${name}`, agent, page: path.basename(cwd), pid: queue[i], cwd })
+        result.push({ pane: `screen:${pid}.${name}`, agent, page: path.basename(cwd), pid: queue[i], cwd, tmux: name })
         break
       }
       queue.push(...(children.get(queue[i]) ?? []))
@@ -315,14 +316,14 @@ async function sessionsWithPanes() {
     const match = byRecency.find(s => !s.pane && !s.window && sameChat(s, term))
     if (!match) continue
     if (term.window) Object.assign(match, { window: term.window, workspace: term.workspace || match.workspace })
-    else match.pane = term.pane
+    else Object.assign(match, { pane: term.pane, tmux: term.tmux })
     term.matched = true
   }
   for (const pane of panes) {
     if (pane.matched) continue
     const match = byRecency.find(s => !s.pane && s.agent === pane.agent && s.page === pane.page)
-    if (match) match.pane = pane.pane
-    else sessions.push({ agent: pane.agent, name: AGENT_NAMES[pane.agent], session: `tmux${pane.pane}`, state: 'idle', page: pane.page, at: 0, workspace: '', machine: MACHINE, pane: pane.pane })
+    if (match) Object.assign(match, { pane: pane.pane, tmux: pane.tmux })
+    else sessions.push({ agent: pane.agent, name: AGENT_NAMES[pane.agent], session: `tmux${pane.pane}`, state: 'idle', page: pane.page, at: 0, workspace: '', machine: MACHINE, pane: pane.pane, tmux: pane.tmux })
   }
   // Agents in a plain terminal window (no tmux): prompt them by typing into that window.
   for (const win of windows) {
@@ -780,6 +781,7 @@ async function home() {
     reminders: await remindersSummary(),
     muse: MODE === 'hub' ? MUSES.length > 0 : DEMO,
     studio: views.find(v => v.studio)?.studio ?? null,
+    pinned: MODE === 'hub' ? loadPinned().pins : [],
   }
 }
 
@@ -1360,6 +1362,54 @@ async function pullLayouts() {
   }
 }
 
+// ---- pinned agents: the list Home shows first (pinned.json). Only the list is stored; their state comes from the sessions. ----
+const PINNED_FILE = path.join(CONFIG_DIR, 'pinned.json')
+const PIN_MAX = 12
+const pin = (label, machine, agent, session) => ({ label, machine, agent, session })
+// The sessions are the ones com.rick.home-agents already keeps: tmux 'claude'/'codex' on the Minis, screen 'claude'/'codex' on Neo.
+// Dell has no tmux: its Claude is the laptop window the Tiles 'agent:Dell/claude' tile follows (session 'tile', resolved by the app like that tile).
+const DEFAULT_PINS = [
+  pin('Claude · Mini 1', 'Mini 1', 'claude', 'claude'), pin('Codex · Mini 1', 'Mini 1', 'codex', 'codex'),
+  pin('Claude · Mini 2', 'Mini 2', 'claude', 'claude'), pin('Codex · Mini 2', 'Mini 2', 'codex', 'codex'),
+  pin('Claude · Neo', 'Neo', 'claude', 'claude'), pin('Codex · Neo', 'Neo', 'codex', 'codex'),
+  pin('Claude · Dell', 'Dell', 'claude', 'tile'),
+]
+// A pin list from a request or from disk: up to PIN_MAX pins of non-empty strings, or null.
+function checkPins(raw) {
+  const list = raw && Array.isArray(raw.pins) ? raw.pins : null
+  if (!list || list.length > PIN_MAX) return null
+  const ok = v => typeof v === 'string' && v.trim().length > 0 && v.length <= 60
+  const pins = list.map(x => (x && ok(x.label) && ok(x.machine) && ok(x.agent) && ok(x.session) ? pin(x.label.trim(), x.machine.trim(), x.agent.trim(), x.session.trim()) : null))
+  return pins.every(Boolean) ? { pins } : null
+}
+function loadPinned() {
+  const raw = readJson(PINNED_FILE)
+  const checked = checkPins(raw)
+  return checked ? { ...checked, updatedAt: Number(raw.updatedAt) || 0 } : { pins: DEFAULT_PINS, updatedAt: 0 }
+}
+function savePinned(pins, updatedAt) {
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
+  writeFileSync(PINNED_FILE, JSON.stringify({ pins, updatedAt }, null, 2) + '\n', { mode: 0o600 })
+}
+// Kept in step between hubs exactly like the layout: a saved change goes to each peer once (relayed), a relayed copy is kept only if newer.
+function pushPinned(value) {
+  for (const peer of HUB.peers ?? []) {
+    call(`${String(peer.url).replace(/\/$/, '')}/api/pinned`, peer.tokenFile ? tokenFrom(peer.tokenFile) : TOKEN, { method: 'PUT', body: JSON.stringify({ ...value, relayed: true }), timeout: 8000 }).catch(() => {})
+  }
+}
+async function pullPinned() {
+  for (const peer of HUB.peers ?? []) {
+    try {
+      const theirs = await call(`${String(peer.url).replace(/\/$/, '')}/api/pinned`, peer.tokenFile ? tokenFrom(peer.tokenFile) : TOKEN, { timeout: 8000 })
+      const checked = checkPins(theirs)
+      const updatedAt = Number(theirs.updatedAt) || 0
+      if (checked && updatedAt > loadPinned().updatedAt) savePinned(checked.pins, updatedAt)
+    } catch {
+      // The peer is down: keep what this hub has.
+    }
+  }
+}
+
 // The endpoints of the url: tiles in the saved layout. Nothing else is ever fetched for a tile.
 function layoutUrlEndpoints() {
   const out = new Set()
@@ -1746,6 +1796,21 @@ async function handle(req, res) {
       pushLayout({ ...layout, updatedAt })
       return send(res, 200, loadLayout())
     }
+    if (req.method === 'GET' && p === '/api/pinned') return send(res, 200, loadPinned())
+    if (req.method === 'PUT' && p === '/api/pinned') {
+      const body = await readBody(req)
+      const checked = checkPins(body)
+      if (!checked) return send(res, 400, { error: `pinned needs up to ${PIN_MAX} pins of {label, machine, agent, session}` })
+      if (body.relayed) {
+        const updatedAt = Number(body.updatedAt) || 0
+        if (updatedAt > loadPinned().updatedAt) savePinned(checked.pins, updatedAt)
+        return send(res, 200, { ok: true })
+      }
+      const updatedAt = Math.max(Date.now(), loadPinned().updatedAt + 1)
+      savePinned(checked.pins, updatedAt)
+      pushPinned({ pins: checked.pins, updatedAt })
+      return send(res, 200, loadPinned())
+    }
     if (req.method === 'GET' && p === '/api/reminders') {
       if (DEMO) return send(res, 200, { reminders: demoReminders() })
       if (!REMINDERS_URL) return send(res, 404, { error: 'reminders unavailable' })
@@ -1902,6 +1967,7 @@ export function start() {
     void refreshWeather()
     setInterval(() => void refreshWeather(), 15 * 60_000)
     void pullLayouts()
+    void pullPinned()
   }
   if (NTFY) {
     let busy = false

@@ -153,6 +153,20 @@ req GET "$HUB" /api/layout
 check "GET /api/layout reads back what was saved" 200 "d['pages'][4]['left']=='url:$PLUGIN'"
 if [ -f "$HOME/.config/agent-glasses/layout.json" ]; then ok "layout.json is written under the config folder"; else bad "layout.json is written under the config folder"; fi
 
+req GET "$HUB" /api/pinned
+check "GET /api/pinned with no pinned.json returns the 7 default pins (the home-agents sessions; Dell is the tile)" 200 "len(d['pins'])==7 and d['pins'][0]=={'label':'Claude · Mini 1','machine':'Mini 1','agent':'claude','session':'claude'} and [x['session'] for x in d['pins'][:6]]==['claude','codex']*3 and [x['machine'] for x in d['pins'][:6]]==['Mini 1','Mini 1','Mini 2','Mini 2','Neo','Neo'] and d['pins'][6]=={'label':'Claude · Dell','machine':'Dell','agent':'claude','session':'tile'}"
+req PUT "$HUB" /api/pinned '{"pins":[{"label":"x","machine":"Mini 1","agent":"claude"}]}'
+check "PUT /api/pinned rejects a pin with no session" 400
+req PUT "$HUB" /api/pinned '{"pins":[{"label":"x","machine":"Mini 1","agent":"claude","session":7}]}'
+check "PUT /api/pinned rejects a non-string field" 400
+req PUT "$HUB" /api/pinned '{"pins":[{"label":"One","machine":"Mini 1","agent":"claude","session":"s1"},{"label":"Two","machine":"Neo","agent":"codex","session":"s2"}]}'
+check "PUT /api/pinned saves the list" 200 "[x['label'] for x in d['pins']]==['One','Two'] and d['updatedAt']>0"
+req GET "$HUB" /api/pinned
+check "GET /api/pinned reads back what was saved" 200 "[x['session'] for x in d['pins']]==['s1','s2']"
+req GET "$HUB" /api/home
+check "/api/home carries the pins (the glasses read them from the poll they already make)" 200 "[x['label'] for x in d['pinned']]==['One','Two']"
+if [ -f "$HOME/.config/agent-glasses/pinned.json" ]; then ok "pinned.json is written under the config folder"; else bad "pinned.json is written under the config folder"; fi
+
 echo "Reminders"
 req GET "$HUB" /api/reminders
 check "GET /api/reminders lists open items with list titles" 200 "sorted((r['title'],r['list']) for r in d['reminders'])==[('Buy milk','Errands'),('Call dentist','Home'),('Mail the card','Errands')]"
@@ -250,6 +264,34 @@ check "POST /api/tile/action refuses an endpoint not in the layout" 404
 req POST "$HUB" /api/tile/action "{\"url\":\"$PLUGIN\"}"
 check "POST /api/tile/action needs an action id" 400
 
+
+echo "Sessions carry their tmux or screen name (fake tmux, screen and ps)"
+SCREEN_PORT=${SCREEN_PORT:-5397}
+mkdir -p "$work/fakebin" "$work/homeS/.config/agent-glasses"
+cat > "$work/fakebin/screen" <<'SH'
+#!/bin/sh
+printf 'There is a screen on:\n\t1234.claude\t(Detached)\n1 Socket in /tmp/screens.\n'
+SH
+cat > "$work/fakebin/tmux" <<'SH'
+#!/bin/sh
+printf '%%3 1500 codex|/tmp/proj\n%%4 1600 two words|/tmp/other\n'
+SH
+cat > "$work/fakebin/ps" <<'SH'
+#!/bin/sh
+printf '1234 1 SCREEN -S claude\n1300 1234 claude --x\n1500 1 -bash\n1501 1500 codex\n1600 1 -bash\n1601 1600 claude\n'
+SH
+cat > "$work/fakebin/lsof" <<'SH'
+#!/bin/sh
+printf 'p1300\nfcwd\nn/tmp/proj\n'
+SH
+chmod +x "$work/fakebin/"*
+PATH="$work/fakebin:$PATH" HOME="$work/homeS" HUD_TOKEN_FILE="$work/hud.token" node "$here/hud-server.mjs" --mode hub --port "$SCREEN_PORT" --machine "Fake" >"$work/screen.log" 2>&1 & pidS=$!; pids+=("$pidS")
+for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$SCREEN_PORT/api/health" && break; sleep 0.2; done
+req GET "http://127.0.0.1:$SCREEN_PORT" /api/home
+check "a GNU screen session '1234.claude (Detached)' becomes a session with tmux=claude" 200 "any(s.get('tmux')=='claude' and s['agent']=='claude' and s['pane']=='screen:1234.claude' for s in d['sessions'])"
+check "a tmux pane carries its session name" 200 "any(s.get('tmux')=='codex' and s['agent']=='codex' and s['pane']=='%3' for s in d['sessions'])"
+check "a tmux session name with a space is kept whole" 200 "any(s.get('tmux')=='two words' and s['pane']=='%4' for s in d['sessions'])"
+
 echo "Two hubs keeping one layout"
 PA="http://127.0.0.1:$PEER_A_PORT"
 PB="http://127.0.0.1:$PEER_B_PORT"
@@ -289,6 +331,14 @@ if [ "$CODE" = 200 ] && [ "$(b_left)" = clock ]; then ok "a relayed copy with no
 req PUT "$PB" /api/layout "$(relayed_body "$ZPAGES" $((upA1 + 500)))"
 if wait_until '[ "$(b_left)" = studio ]'; then ok "a newer relayed copy is saved"; else bad "a newer relayed copy is saved"; fi
 if [ "$(layout_field "$PA" "d['pages'][0]['left']")" = clock ]; then ok "a relayed copy is not passed back to A"; else bad "a relayed copy is not passed back to A"; fi
+
+pin_label() { curl -s -H "Authorization: Bearer $TOKEN" "$1/api/pinned" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['pins'][0]['label'], d['updatedAt'])"; }
+req PUT "$PA" /api/pinned '{"pins":[{"label":"Synced","machine":"Neo","agent":"codex","session":"s"}]}'
+if wait_until '[ "$(pin_label "$PB" | cut -d" " -f1)" = Synced ]'; then ok "B shows the pins saved on A"; else bad "B shows the pins saved on A"; fi
+sleep 1
+if [ "$(pin_label "$PA" | cut -d" " -f2)" = "$(pin_label "$PB" | cut -d" " -f2)" ]; then ok "pins: both hubs hold the same stamp, no loop"; else bad "pins: both hubs hold the same stamp, no loop"; fi
+req PUT "$PB" /api/pinned '{"relayed":true,"updatedAt":1,"pins":[{"label":"Old","machine":"Neo","agent":"codex","session":"s"}]}'
+if [ "$CODE" = 200 ] && [ "$(pin_label "$PB" | cut -d" " -f1)" = Synced ]; then ok "an older relayed pin list is ignored"; else bad "an older relayed pin list is ignored"; fi
 
 kill "$pidB"; wait "$pidB" 2>/dev/null
 req PUT "$PA" /api/layout "$YPAGES"

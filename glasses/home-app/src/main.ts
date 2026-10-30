@@ -59,6 +59,8 @@ const remote = new RemoteInput({
 function savedBrightness(): number { const n = Number(store.get('home.brightness')); return n >= 1 && n <= 4 ? Math.round(n) : 4; }
 const model = new HomeModel();
 model.hideDone = store.get('home.hideDone') === '1';
+// Quiet mode (on unless switched off): pop-ups only for pinned agents.
+model.quiet = store.get('home.quiet') !== '0';
 model.brightness = savedBrightness();
 // Texts older than 24 h are hidden on the glasses unless switched off (phone checkbox or the glasses menu).
 model.hideOldTexts = store.get('home.hideOldTexts') !== '0';
@@ -147,6 +149,11 @@ $('app').innerHTML = `
   <label class="row"><input type="checkbox" id="desk-swap"> Desk: swap axes</label>
   <label class="row"><input type="checkbox" id="desk-invx"> Desk: invert X</label>
   <label class="row"><input type="checkbox" id="desk-invy"> Desk: invert Y</label>
+  <label class="row"><input type="checkbox" id="quiet"> Quiet mode: pop-ups only for pinned agents</label>
+  <details class="row"><summary>Pinned agents</summary>
+    <textarea id="pinned-text" rows="8" spellcheck="false" placeholder="label | computer | agent | session"></textarea>
+    <button id="pinned-save">Save pinned</button> <span id="pinned-note"></span>
+  </details>
   <pre id="glass" class="glass"></pre>
   <div class="pad">
     <button data-input="up">▲ Swipe up</button>
@@ -389,6 +396,22 @@ for (const [id, key] of [['desk-swap', 'home.deskSwap'], ['desk-invx', 'home.des
   $<HTMLInputElement>(id).checked = store.get(key) === '1';
   $<HTMLInputElement>(id).onchange = () => { store.set(key, $<HTMLInputElement>(id).checked ? '1' : '0'); desk?.setPointerOptions(deskOptions()); diag('desk.options', JSON.stringify(deskOptions())); };
 }
+$<HTMLInputElement>('quiet').checked = model.quiet;
+$<HTMLInputElement>('quiet').onchange = () => { model.quiet = $<HTMLInputElement>('quiet').checked; store.set('home.quiet', model.quiet ? '1' : '0'); diag('quiet', model.quiet ? 'on' : 'off'); };
+/** The pinned list: one pin per line, "label | computer | agent | session". The hub stores it; Home's rows come from the sessions. */
+type PinLine = { label: string; machine: string; agent: string; session: string };
+const pinsToText = (pins: PinLine[]) => pins.map(p => `${p.label} | ${p.machine} | ${p.agent} | ${p.session}`).join('\n');
+async function loadPinnedEditor(): Promise<void> {
+  if (!token) return;
+  const r = await api<{ pins: PinLine[] }>('pinned').catch(() => null);
+  if (r && document.activeElement !== $('pinned-text')) $<HTMLTextAreaElement>('pinned-text').value = pinsToText(r.pins);
+}
+$('pinned-save').onclick = async () => {
+  const pins = $<HTMLTextAreaElement>('pinned-text').value.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [label, machine, agent, session] = l.split('|').map(x => x.trim()); return { label, machine, agent, session }; });
+  const r = await api('pinned', { method: 'PUT', body: JSON.stringify({ pins }) }).catch((e: Error) => ({ error: e.message }));
+  $('pinned-note').textContent = (r as { error?: string }).error ? `Not saved: ${(r as { error?: string }).error}` : 'Saved';
+  void poll();
+};
 function syncStartInTiles(): void { $<HTMLInputElement>('start-tiles').checked = tilesOn; }
 $<HTMLInputElement>('start-tiles').onchange = () => {
   tilesOn = $<HTMLInputElement>('start-tiles').checked;
@@ -882,6 +905,7 @@ async function shareLocation(): Promise<void> {
 }
 
 layoutLoader.start();
+void loadPinnedEditor();
 if (tilesOn) { tiles.resetPage(); enterTiles(true); } else paint();
 void glasses.connect().then(() => shareLocation());
 setInterval(() => void shareLocation(), 30 * 60_000);

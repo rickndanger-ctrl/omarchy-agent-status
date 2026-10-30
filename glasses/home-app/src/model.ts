@@ -3,10 +3,12 @@
 // file decides what that text is and what each tap or swipe does.
 
 import type { OpenTarget } from './tiles';
+import { findSession } from './tiles';
 
 export type Input = 'up' | 'down' | 'select' | 'back';
 
-export interface Session { agent: string; name: string; session: string; state: string; page: string; at: number; workspace: string; machine: string; pane?: string; window?: string; appThread?: string; desktopSession?: string }
+export interface Pin { label: string; machine: string; agent: string; session: string }
+export interface Session { tmux?: string; agent: string; name: string; session: string; state: string; page: string; at: number; workspace: string; machine: string; pane?: string; window?: string; appThread?: string; desktopSession?: string }
 export interface Desktop { machine: string; active: number; workspaces: { id: number; windows: string[] }[] }
 export interface Pending { id: string; agent: string; page: string; tool: string; summary: string; at: number; machine: string }
 export interface Chat { id: number; name: string; unread: boolean; when: number; snippet: string; fromMe: boolean; /** Set by tileChats: older than 24 h but kept because a tile is pinned to it; lists and chat:recent skip it. */ old?: boolean }
@@ -24,6 +26,8 @@ export interface HomeData {
   weather?: { temp: number; desc: string; hi: number; lo: number; rainAt: string | null; rainChance: number } | null;
   /** Studio Routing on the laptop: what each computer's workers are doing, and what they said to each other. */
   studio?: Studio | null;
+  /** The pinned agents (the hub stores only this list; their state is read from `sessions`). */
+  pinned?: Pin[];
 }
 export interface Studio { at: number; machines: { name: string; line: string; busy: boolean }[]; feed: { t: number; text: string; kind: string }[] }
 
@@ -95,7 +99,7 @@ export const WIDTH = 56; // characters per line; the G2 font fits ~60 narrow cha
 const MAX_LINES = 10;
 const LIST_ROWS = 7;
 const BODY_LINES = 6;
-const TERM_LINES = 8;
+const TERM_LINES = 9; // the agent page is a full-screen terminal: one header line + 9 lines of tail = the 10 lines the glasses fit
 export const QUICK_TEXTS = ['On my way', "Can't talk right now", 'Call you soon', 'Sounds good', 'Yes', 'No'];
 export const QUICK_REPLIES = ['Continue', 'Yes, go ahead', 'Run the tests', 'Commit it', 'Stop (Esc)'];
 const CONFIRM_CHOICES = ['Send', 'Talk again', 'Cancel'];
@@ -185,6 +189,7 @@ export function age(seconds: number, nowMs: number): string {
 }
 
 export const STATE_WORD: Record<string, string> = { working: 'busy', done: 'done', attention: 'needs you', error: 'error', stopped: 'stopped', idle: 'ready' };
+const STATE_RANK: Record<string, number> = { attention: 5, error: 4, working: 3, done: 2, idle: 1, stopped: 0 };
 const MARK: Record<string, string> = { attention: '!', error: '!', working: '•', done: '-', stopped: '-', idle: '·' };
 const NOTICE_MS = 10 * 60_000;
 
@@ -234,6 +239,8 @@ export class HomeModel {
   hideDone = false;
   /** Hide texts older than 24 h on the Home screens (the setting 'Hide old texts'). */
   hideOldTexts = true;
+  /** Quiet mode (phone toggle, on by default): pop-ups only for pinned agents. Lists are unchanged. */
+  quiet = true;
   private screen: Screen = { kind: 'home' };
   private cursor = 0;
   private scroll = 0;
@@ -251,6 +258,20 @@ export class HomeModel {
   private firstUpdate = true;
   private waitingFor: { machine: string; pane: string; until: number } | null = null;
 
+  /** The live session a pin stands for: same computer and agent AND the same tmux session name, exactly. Never a look-alike (a voice reply must reach the pinned agent). */
+  pinSession(pin: Pin): Session | undefined {
+    // 'tile' (Dell: a laptop window, no tmux): the very session the Tiles 'agent:<computer>/<agent>' tile follows.
+    if (pin.session === 'tile') return this.data ? findSession(this.data, `${pin.machine}/${pin.agent}`, this.data.now).session : undefined;
+    const mine = (this.data?.sessions ?? []).filter(x => x.machine === pin.machine && x.agent === pin.agent && x.tmux === pin.session && Boolean(x.pane || x.window));
+    return [...mine].sort((a, b) => (STATE_RANK[b.state] ?? 0) - (STATE_RANK[a.state] ?? 0) || b.at - a.at)[0];
+  }
+  private pins(): Pin[] { return this.data?.pinned ?? []; }
+  /** Quiet mode only filters when there is a pin list: a hub without one pops everything, as before. */
+  private mayPop(machine: string, agent: string, sessionKeyOf?: string): boolean {
+    if (!this.quiet || !this.pins().length) return true;
+    return this.pins().some(p => p.machine === machine && p.agent === agent && (sessionKeyOf === undefined || (() => { const x = this.pinSession(p); return x !== undefined && sessionKey(x) === sessionKeyOf; })()));
+  }
+
   get screenKind(): Screen['kind'] { return this.screen.kind; }
 
   /** New data from the hub. Anything new that needs you becomes a pop-up. */
@@ -262,7 +283,7 @@ export class HomeModel {
     for (const p of data.pending) {
       if (this.seenPending.has(pendingKey(p))) continue;
       this.seenPending.add(pendingKey(p));
-      this.queue({ id: `approve:${pendingKey(p)}`, title: `APPROVE? ${cap(p.agent)} · ${p.machine}`, detail: `${p.tool}: ${p.summary}`, open: { kind: 'approval', machine: p.machine, id: p.id } }, true);
+      if (this.mayPop(p.machine, p.agent)) this.queue({ id: `approve:${pendingKey(p)}`, title: `APPROVE? ${cap(p.agent)} · ${p.machine}`, detail: `${p.tool}: ${p.summary}`, open: { kind: 'approval', machine: p.machine, id: p.id } }, true);
     }
     // An approval answered elsewhere (at the desk, or it expired) closes its card and its pop-up.
     this.alerts = this.alerts.filter(a => a.open.kind !== 'approval' || data.pending.some(p => p.machine === (a.open as { machine: string }).machine && p.id === (a.open as { id: string }).id));
@@ -275,10 +296,10 @@ export class HomeModel {
       if (x.state === 'done' && before !== 'done') {
         const text = `${x.name} · ${x.machine} finished · ${x.page}`;
         this.notices = [{ key, text, at: data.now }, ...this.notices.filter(n => n.key !== key)];
-        this.queue({ id: `agent:${key}`, title: clip(`DONE · ${x.name} · ${x.machine}`), detail: x.page || 'finished', open: { kind: 'agent', key } });
+        if (this.mayPop(x.machine, x.agent, key)) this.queue({ id: `agent:${key}`, title: clip(`DONE · ${x.name} · ${x.machine}`), detail: x.page || 'finished', open: { kind: 'agent', key } });
       }
       if (x.state === 'attention') {
-        this.queue({ id: `agent:${key}`, title: clip(`NEEDS YOU · ${x.name} · ${x.machine}`), detail: x.page || 'waiting for you', open: { kind: 'agent', key } });
+        if (this.mayPop(x.machine, x.agent, key)) this.queue({ id: `agent:${key}`, title: clip(`NEEDS YOU · ${x.name} · ${x.machine}`), detail: x.page || 'waiting for you', open: { kind: 'agent', key } });
       }
     }
     this.lastState = new Map(data.sessions.map(x => [sessionKey(x), x.state]));
@@ -293,7 +314,7 @@ export class HomeModel {
     for (const c of data.messages ?? []) {
       const seen = this.seenTexts.get(c.id);
       this.seenTexts.set(c.id, Math.max(seen ?? 0, c.when));
-      if (quiet) continue;
+      if (quiet || (this.quiet && this.pins().length)) continue;
       if (c.unread && !c.fromMe && c.when > (seen ?? 0)) {
         this.queue({ id: `text:${c.id}`, title: clip(`TEXT · ${c.name}`), detail: c.snippet, open: { kind: 'chat', id: c.id, name: c.name } });
       }
@@ -490,7 +511,17 @@ export class HomeModel {
     // The items come first (no MENU title: its line is needed for the Listen row); anything waiting is one row that opens its own page.
     const waiting = d.pending.length + this.notices.length;
     const online = d.machines.filter(m => m.online).length;
-    rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
+    const pins = this.pins();
+    if (pins.length) {
+      for (const pin of pins) {
+        const x = this.pinSession(pin);
+        const machineUp = d.machines.find(m => m.name === pin.machine)?.online === true; // unknown or down = offline
+        const live = x && machineUp ? x : undefined;
+        // A computer that is down is offline; a computer that is up with no such session says the agent is not running.
+        const word = live ? STATE_WORD[live.state] ?? live.state : machineUp ? 'not running' : 'offline';
+        rows.push({ text: clip(`${live ? MARK[live.state] ?? '-' : '·'} ${pin.label} · ${word}`, WIDTH - 2), ...(live ? { open: { kind: 'agent' as const, key: sessionKey(live) } } : {}) });
+      }
+    } else rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
     if (d.messages) {
       const chats = recentChats(d.messages, nowMs, this.hideOldTexts);
       const unread = chats.filter(c => c.unread).length;
@@ -508,6 +539,7 @@ export class HomeModel {
     if (waiting) rows.push({ text: clip(`! Needs you · ${waiting}${d.pending.length ? ` (${d.pending.length} approval${d.pending.length === 1 ? '' : 's'})` : ''}`, WIDTH - 2), open: { kind: 'needs' } });
     rows.push({ text: 'Tiles · 5 pages of apps', open: { kind: 'tiles' } });
     rows.push({ text: 'Desk (test) · 3×3 apps, head pointer', open: { kind: 'desk' } });
+    if (pins.length) rows.push({ text: clip(`All agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
     return rows;
   }
 
@@ -757,7 +789,7 @@ export class HomeModel {
       const x = this.session();
       if (!x) return null;
       const total = this.terminalLines()?.length ?? 0;
-      if (input === 'up') { this.termScroll = Math.min(this.termScroll + 3, Math.max(0, total - TERM_LINES)); return null; }
+      if (input === 'up') { this.termScroll = Math.min(this.termScroll + 3, Math.max(0, total - (TERM_LINES - 1))); return null; }
       if (input === 'down') {
         if (this.termScroll > 0) { this.termScroll = Math.max(0, this.termScroll - 3); return null; }
         if (this.replyChoices(x).length) this.go({ kind: 'reply', key: s.key });
@@ -884,18 +916,15 @@ export class HomeModel {
           const all = this.terminalLines();
           if (all === null) lines.push('Loading…');
           else {
+            // A full-screen terminal: 9 lines of tail under the header; scrolled back, the last line says how far back you are (still 10 lines).
+            const rowsShown = this.termScroll ? TERM_LINES - 1 : TERM_LINES;
             const end = all.length - this.termScroll;
-            const start = Math.max(0, end - TERM_LINES);
+            const start = Math.max(0, end - rowsShown);
             const view = all.slice(start, end);
-            lines.push(...view, ...Array(TERM_LINES - view.length).fill(''));
-            // Scrolled back: the time of the message on screen and of the newest one, so you can tell how far back you are.
-            const timeAt = (i: number) => { for (; i >= 0; i--) { const t = all[i].match(BAR_TIME); if (t) return t[1]; } return ''; };
-            const firstBar = view.findIndex(l => BAR_TIME.test(l));
-            const reading = timeAt(firstBar >= 0 ? start + firstBar : start);
-            const newest = timeAt(all.length - 1);
-            if (this.termScroll) lines.push(reading && newest ? `${reading} · newest ${newest} · ▼ newer` : 'swipe up: scroll · down: newer');
+            lines.push(...view, ...Array(rowsShown - view.length).fill(''));
+            // Scrolled back: one short position line (no hints).
+            if (this.termScroll) lines.push(`▼ ${this.termScroll} newer`);
           }
-          if (!this.termScroll || all === null) lines.push(`${this.data.voice ? 'tap: talk · ' : ''}swipe up: scroll · down: quick replies`);
         }
       }
     } else if (s.kind === 'workspaces') {
