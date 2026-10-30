@@ -402,7 +402,7 @@ test('a long question + reply: the answer\'s first line is in the first drawn fr
 });
 
 // ---- muse-layout review: loadMuse out of date, scrollback kept, conversation asks, gave up ----
-import { MuseCache } from '../src/musecache';
+import { MuseCache, MUSE_UNREACHABLE } from '../src/musecache';
 import { pollMuseJob } from '../src/musepoll';
 
 test('a /muse read that began before an ask started or ended is out of date (MuseCache.isCurrent), like the tile', () => {
@@ -493,4 +493,39 @@ test('pollMuseJob gives up by the wall clock (150 s from the ask), not by the po
   // a final answer that arrives with the last read still counts
   t = 149_000;
   assert.equal(await pollMuseJob(async () => { t += 2000; return { status: 'done', question: 'q', reply: 'r' }; }, async () => {}, () => {}, 215, { at: 150_000, now: () => t }), true);
+});
+
+import { applyMuseLatest } from '../src/musesync';
+
+test('tile and screen share the /latest rule: ask 2 final, ask 1 read via /latest (tile refresh or loadMuse) -> both keep ask 2', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  const a1 = m.beginMuseAsk('first question');
+  const a2 = m.beginMuseAsk('second question');
+  tile.askStart('second question');
+  m.setMuseAnswer('second question', 'ANSWER TWO', a2);
+  tile.askReply('second question', 'ANSWER TWO');
+  m.setMuseAnswer('first question', 'ANSWER ONE', a1); // the older ask finishes later: below the newest, never the tile
+  tile.askEnd();
+  // the tile's own timed read: /latest is ask 1
+  const stamp = tile.fetchStart();
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'first question', reply: 'ANSWER ONE' }), false);
+  assert.deepEqual(tile.get(), { question: 'second question', reply: 'ANSWER TWO' }, 'the tile keeps ask 2');
+  assert.match(m.render(NOW), /Muse: ANSWER TWO/, 'and so does the screen');
+  // loadMuse goes through the same helper
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'first question', reply: 'ANSWER ONE' }), false);
+  assert.deepEqual(tile.get(), { question: 'second question', reply: 'ANSWER TWO' });
+  // a read that began before an ask is dropped (stale stamp)
+  const old = tile.fetchStart();
+  tile.askStart('third'); tile.askEnd();
+  assert.equal(applyMuseLatest(m, tile, old, { question: 'x', reply: 'y' }), false);
+  // a fresh session (no ask) takes /latest on screen and tile
+  const fm = new HomeModel(); fm.update(data); fm.goTo('muse');
+  const ft = new MuseCache();
+  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), { question: 'q', reply: 'FROM RELAY' }), true);
+  assert.deepEqual(ft.get(), { question: 'q', reply: 'FROM RELAY' });
+  assert.match(fm.render(NOW), /Muse: FROM RELAY/);
+  // and a failed read on a fresh session marks the tile unreachable
+  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), null), true);
+  assert.equal(ft.get(), MUSE_UNREACHABLE);
 });

@@ -1,6 +1,7 @@
 import './style.css';
 import { Glasses, DEFAULT_OUTLINE } from './glasses';
 import { ShownWatch } from './shownwatch';
+import { applyMuseLatest } from './musesync';
 import { pollMuseJob, MUSE_POLLS, MUSE_DEADLINE_MS, type MuseJob } from './musepoll';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { HubPicker } from './hubpick';
@@ -355,7 +356,7 @@ async function refreshTiles(): Promise<void> {
         } else if (need.kind === 'muse') {
           const stamp = museTile.pageFetchStart(page, homeLoaded);
           if (stamp === null) return; // already read for this page view, or an ask is in flight (its reply is the newest word)
-          try { museTile.fetchDone(stamp, await api<{ question: string; reply: string }>('muse')); } catch { museTile.fetchFailed(stamp); }
+          applyMuseLatest(model, museTile, stamp, await api<{ question: string; reply: string }>('muse').catch(() => null));
         } else if (need.kind === 'reminders') {
           const list = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
           writes.push(() => { tileData.reminders = list; });
@@ -840,12 +841,7 @@ async function run(action: Action): Promise<void> {
       if (stamp === null) { model.restoreMuse(); } // an ask is in flight: nothing is read, the ask's own screen stays
       else {
         const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
-        // Like the tile: a read that began before an ask started or finished is out of date and changes nothing.
-        if (museTile.isCurrent(stamp)) {
-          // /latest only fills an empty screen (or adds below): once this session has a final answer for its newest ask it stays, on screen and tile.
-          if (model.setMuse(latest)) { if (latest) museTile.fetchDone(stamp, latest); else museTile.fetchFailed(stamp); }
-        }
-        else model.restoreMuse();
+        applyMuseLatest(model, museTile, stamp, latest); // the same rule as the tile's own read (refreshTiles)
       }
     }
   } catch (error) {
