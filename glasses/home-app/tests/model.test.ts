@@ -78,7 +78,8 @@ test('messages and muse rows open and request their data', () => {
   m.input('back', NOW);
   assert.equal(m.screenKind, 'messages');
   m.input('back', NOW);
-  m.input('down', NOW);
+  // Back on Home: the highlight is still on Messages, where you left it.
+  assert.match(m.render(NOW), /> Messages/);
   m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'loadMuse' });
   m.setMuse({ question: 'Weather?', reply: 'Sunny, 72.' });
@@ -593,4 +594,123 @@ test('without Studio Routing there is no studio row', () => {
   const m = new HomeModel();
   m.update(base({ sessions: [], studio: null }));
   assert.doesNotMatch(m.render(NOW), /Studio/);
+});
+
+// ---- selection and back (review 2026-10-29) ----
+
+test('a pop-up and Later return you to the same highlighted row', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  m.input('down', NOW); // Messages
+  m.input('down', NOW); // Muse
+  assert.match(m.render(NOW), /> Muse/);
+  m.update(withChat({ now: NOW + 5000, sessions: [{ ...tmuxed().sessions[0], state: 'done' }] }));
+  assert.equal(m.screenKind, 'alert');
+  m.input('back', NOW); // Later
+  assert.equal(m.screenKind, 'home');
+  assert.match(m.render(NOW), /> Muse/);
+});
+
+test('the highlight stays on the same item when a row is added above it', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  m.input('down', NOW);
+  m.input('down', NOW);
+  m.input('down', NOW);
+  m.input('down', NOW); // Settings
+  assert.match(m.render(NOW), /> Settings/);
+  m.update(withChat({ now: NOW + 2000, studio: { at: NOW / 1000, machines: [], feed: [] } }));
+  assert.match(m.render(NOW), /> Settings/);
+  m.update(withChat({ now: NOW + 4000, sessions: [], machines: [{ name: 'Mini 1', online: true }] }));
+  assert.match(m.render(NOW), /> Settings/);
+});
+
+test('back from a chat lands on that chat in Messages, and quick texts back to the newest lines', () => {
+  const m = new HomeModel();
+  const two = withChat({ messages: [
+    { id: 7, name: 'Mom', unread: false, when: NOW / 1000 - 60, snippet: 'Running late', fromMe: false },
+    { id: 8, name: 'Bob', unread: false, when: NOW / 1000 - 120, snippet: 'ok', fromMe: false },
+  ] });
+  m.update(two);
+  m.input('down', NOW);
+  m.input('select', NOW); // Messages
+  m.input('down', NOW); // Bob
+  m.input('select', NOW);
+  const long = Array.from({ length: 20 }, (_, i) => ({ from: 'Bob', fromMe: false, when: NOW / 1000 - 600 + i, text: `line ${i}` })).reverse();
+  m.setChat(long, NOW);
+  assert.match(m.render(NOW), /line 19/);
+  m.input('down', NOW); // at the newest: opens quick texts
+  assert.equal(m.screenKind, 'textReply');
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'chat');
+  assert.match(m.render(NOW), /line 19/); // still at the newest, not the oldest
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'messages');
+  assert.match(m.render(NOW), /> {2}Bob|> {1,2}Bob/);
+});
+
+test('back on an approval returns to where you were, and does not leave a stale way back', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  m.input('select', NOW); // Agents
+  m.update(withChat({ pending: [pending] }));
+  assert.equal(m.screenKind, 'approval');
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'agents');
+  m.input('back', NOW); // home
+  m.input('down', NOW);
+  m.input('select', NOW); // Messages
+  m.input('select', NOW); // Mom
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'messages'); // not some old screen
+});
+
+test('an approval opened from Needs you comes back to Needs you', () => {
+  const m = new HomeModel();
+  m.update(base());
+  m.update(base({ pending: [pending] }));
+  m.input('back', NOW); // leave the pop-up for later
+  assert.equal(m.screenKind, 'home');
+  const needs = m.render(NOW).split('\n').filter(l => /^[ >] /.test(l)).findIndex(l => /Needs you/.test(l));
+  for (let i = 0; i < needs; i++) m.input('down', NOW);
+  m.input('select', NOW);
+  assert.equal(m.screenKind, 'needs');
+  m.input('select', NOW);
+  assert.equal(m.screenKind, 'approval');
+  m.input('select', NOW); // Leave for desk
+  assert.equal(m.screenKind, 'needs');
+});
+
+test('a started agent does not pull you off another screen', () => {
+  const m = new HomeModel();
+  const data = tmuxed();
+  m.update(data);
+  m.expectAgent('Mini 1', '%7', NOW);
+  m.openSettings();
+  m.update({ ...data, sessions: [...data.sessions, { agent: 'codex', name: 'Codex', session: 'tmux%7', state: 'idle', page: 'x', at: 0, workspace: '', machine: 'Mini 1', pane: '%7' }] });
+  assert.equal(m.screenKind, 'settings');
+});
+
+test('a terminal that gets shorter while scrolled back still fills the screen', () => {
+  const m = new HomeModel();
+  m.update(tmuxed());
+  openAgent(m);
+  const key = 'Mini 1/%3';
+  m.setTerminal(key, Array.from({ length: 30 }, (_, i) => `out ${i}`));
+  for (let i = 0; i < 8; i++) m.input('up', NOW);
+  m.setTerminal(key, Array.from({ length: 14 }, (_, i) => `out ${i}`));
+  const text = m.render(NOW);
+  assert.doesNotMatch(text, /22 newer/);
+  assert.match(text, /out 0/);
+});
+
+test('a Muse answer arriving on another screen does not move that screen', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  m.input('down', NOW);
+  m.input('select', NOW);
+  m.input('select', NOW); // Mom's chat
+  m.setChat(Array.from({ length: 20 }, (_, i) => ({ from: 'Mom', fromMe: false, when: NOW / 1000 - 600 + i, text: `line ${i}` })).reverse(), NOW);
+  m.setMuseAnswer('q', 'a');
+  assert.match(m.render(NOW), /line 19/);
 });

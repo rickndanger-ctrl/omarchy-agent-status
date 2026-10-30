@@ -234,6 +234,17 @@ export function studioText(st: Studio, nowMs: number, width = WIDTH): string[] {
   return lines;
 }
 
+/** Screens with a highlighted row that new data could move. */
+const LIST_SCREENS: Screen['kind'][] = ['home', 'agents', 'messages', 'needs', 'workspaces'];
+/** One key per place you can be (a chat or agent page is its own place). */
+function screenId(s: Screen): string {
+  if (s.kind === 'chat') return `chat:${s.id}`;
+  if (s.kind === 'agent' || s.kind === 'reply') return `${s.kind}:${s.key}`;
+  if (s.kind === 'workspaces') return `workspaces:${s.machine ?? ''}`;
+  return s.kind;
+}
+function rowId(r: Row): string { return r.open ? JSON.stringify(r.open) : `text:${r.text}`; }
+
 export class HomeModel {
   data: HomeData | null = null;
   error = '';
@@ -258,6 +269,8 @@ export class HomeModel {
   private termScroll = 0;
   private alerts: Alert[] = [];
   private returnTo: Screen | null = null;
+  /** Where you were on each screen you left (highlighted row and scroll), so going back puts you there again. */
+  private spots = new Map<string, { cursor: number; row: string | null; scroll: number; termScroll: number }>();
   private seenTexts = new Map<number, number>();
   private firstUpdate = true;
   private waitingFor: { machine: string; pane: string; until: number } | null = null;
@@ -280,7 +293,9 @@ export class HomeModel {
 
   /** New data from the hub. Anything new that needs you becomes a pop-up. */
   update(data: HomeData): void {
+    const held = this.data && LIST_SCREENS.includes(this.screen.kind) ? this.selectedRow() : null;
     this.data = data;
+    if (held !== null) this.followRow(held);
     this.error = '';
     const quiet = this.firstUpdate; // what's already there when Home opens isn't news
     this.firstUpdate = false;
@@ -312,7 +327,8 @@ export class HomeModel {
     if (w && data.now > w.until) this.waitingFor = null;
     else if (w && data.sessions.some(x => x.machine === w.machine && x.pane === w.pane)) {
       this.waitingFor = null;
-      if (!['listen', 'confirm', 'reply', 'textReply', 'approval', 'alert'].includes(this.screen.kind)) this.go({ kind: 'agent', key: `${w.machine}/${w.pane}` });
+      // Only from the Agents list (where starting one leaves you): never pull you off something else you opened meanwhile.
+      if (this.screen.kind === 'agents' && !this.talk) this.go({ kind: 'agent', key: `${w.machine}/${w.pane}` });
     }
     this.notices = this.notices.filter(n => data.now - n.at < NOTICE_MS && this.lastState.has(n.key));
     for (const c of data.messages ?? []) {
@@ -357,7 +373,7 @@ export class HomeModel {
   private finish(): void {
     const back = this.returnTo ?? { kind: 'home' as const };
     this.returnTo = null;
-    this.go(back.kind === 'alert' || back.kind === 'approval' ? { kind: 'home' } : back);
+    this.goBack(back.kind === 'alert' || back.kind === 'approval' ? { kind: 'home' } : back);
     this.showNextAlert();
   }
 
@@ -478,19 +494,19 @@ export class HomeModel {
     const shown = messages && recentMessages(messages, nowMs, this.hideOldTexts);
     this.chatLines = shown === null ? ['Could not load this chat.']
       : [...(shown.hidden ? ['(older messages hidden)'] : []), ...[...shown.messages].reverse().flatMap(m => wrap(`${m.fromMe ? 'Me' : m.from} (${age(m.when, nowMs)}): ${m.text}`))];
-    this.scroll = Math.max(0, this.chatLines.length - BODY_LINES);
+    if (this.screen.kind === 'chat') this.scroll = Math.max(0, this.chatLines.length - BODY_LINES);
   }
   private chatAtBottom(): boolean { return this.scroll >= Math.max(0, (this.chatLines?.length ?? 0) - BODY_LINES); }
   /** Show the newest part of a Muse answer (it is long-form; swipe up to read from the start). */
   setMuseAnswer(question: string, reply: string): void {
     const m = museDisplay(question, reply);
     this.museLines = [...wrap(`You: ${m.question}`), '', ...wrap(`Muse: ${m.reply}`)];
-    this.scroll = 0;
+    if (this.screen.kind === 'muse') this.scroll = 0;
   }
   /** Muse didn't answer: say why, in the relay's own words. */
   setMuseProblem(question: string, reason: string): void {
     this.museLines = [...wrap(`You: ${question}`), '', ...wrap(`Muse didn't get it: ${reason || 'no answer'}.`), '', 'Nothing was typed anywhere else.'];
-    this.scroll = 0;
+    if (this.screen.kind === 'muse') this.scroll = 0;
   }
   private museAnswerLines(question: string, reply: string): string[] {
     const m = museDisplay(question, reply);
@@ -499,7 +515,7 @@ export class HomeModel {
   setMuse(latest: { question: string; reply: string } | null): void {
     this.museLines = latest === null ? ["Couldn't reach Muse."]
       : latest.question || latest.reply ? this.museAnswerLines(latest.question, latest.reply) : ['No Muse conversation yet.'];
-    this.scroll = 0;
+    if (this.screen.kind === 'muse') this.scroll = 0;
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }
 
@@ -507,12 +523,42 @@ export class HomeModel {
   generation = 0;
 
   private go(screen: Screen): void {
+    this.remember();
     this.generation++;
     this.talk = null;
     this.screen = screen;
     this.cursor = 0;
     this.scroll = 0;
     this.termScroll = 0;
+  }
+
+  /** Go back to a screen you were on: same highlighted item and scroll as when you left it. */
+  private goBack(screen: Screen): void {
+    this.go(screen);
+    const spot = this.spots.get(screenId(screen));
+    if (!spot) return;
+    this.cursor = spot.cursor;
+    this.scroll = spot.scroll;
+    this.termScroll = spot.termScroll;
+    if (spot.row !== null) this.followRow(spot.row);
+  }
+
+  private remember(): void {
+    const s = this.screen;
+    if (['alert', 'approval', 'listen', 'confirm'].includes(s.kind)) return;
+    this.spots.set(screenId(s), { cursor: this.cursor, row: this.selectedRow(), scroll: this.scroll, termScroll: this.termScroll });
+  }
+
+  /** The highlighted item, by what it opens (or its text): stays the same item when rows are added or move. */
+  private selectedRow(): string | null {
+    const r = this.listRows(Date.now()).filter(x => !x.header)[this.cursor];
+    return r ? rowId(r) : null;
+  }
+
+  /** Put the highlight back on this item if it is still listed (else the cursor stays where it is). */
+  private followRow(id: string): void {
+    const i = this.listRows(Date.now()).filter(x => !x.header).findIndex(r => rowId(r) === id);
+    if (i >= 0) this.cursor = i;
   }
 
   private currentPending(): Pending | undefined {
@@ -714,22 +760,29 @@ export class HomeModel {
       return phase === 'ready' ? null : { kind: 'cancelMic' };
     }
     if (input === 'back') {
+      // An approval (popped up, or opened from Needs you): back to where you were, like Later on a pop-up.
+      if (s.kind === 'approval') { this.finish(); return null; }
+      // Double-tap on Home itself: stay put, highlight and all.
+      if (s.kind === 'home') return null;
+      // Anything else leaves what a pop-up opened behind, so a later double-tap can't jump back to it.
+      this.returnTo = null;
       // One double-tap always gets you home; only a chat and the reply/confirm steps go back one level.
-      if (s.kind === 'chat') this.go({ kind: 'messages' });
-      else if (s.kind === 'textReply') this.go({ kind: 'chat', id: s.id, name: s.name });
-      else if (s.kind === 'confirm' && s.chat) this.go({ kind: 'chat', ...s.chat });
-      else if (s.kind === 'confirm' && s.muse) this.go({ kind: 'muse' });
-      else if (s.kind === 'confirm' && s.reminder) this.go({ kind: 'home' });
-      else if ((s.kind === 'confirm' && s.start) || s.kind === 'newAgent') this.go({ kind: 'agents' });
-      else if (s.kind === 'reply' || s.kind === 'confirm') this.go({ kind: 'agent', key: s.key });
-      else this.go({ kind: 'home' });
+      // Each lands where you were on that screen (same highlighted row, same scroll).
+      if (s.kind === 'chat') this.goBack({ kind: 'messages' });
+      else if (s.kind === 'textReply') this.goBack({ kind: 'chat', id: s.id, name: s.name });
+      else if (s.kind === 'confirm' && s.chat) this.goBack({ kind: 'chat', ...s.chat });
+      else if (s.kind === 'confirm' && s.muse) this.goBack({ kind: 'muse' });
+      else if (s.kind === 'confirm' && s.reminder) this.goBack({ kind: 'home' });
+      else if ((s.kind === 'confirm' && s.start) || s.kind === 'newAgent') this.goBack({ kind: 'agents' });
+      else if (s.kind === 'reply' || s.kind === 'confirm') this.goBack({ kind: 'agent', key: s.key });
+      else this.goBack({ kind: 'home' });
       return null;
     }
     if (s.kind === 'settings' && input === 'select') {
       if (this.cursor === 0) return { kind: 'displayOff' };
       if (this.cursor === 1) { this.brightness = this.brightness >= 4 ? 1 : this.brightness + 1; return { kind: 'brightness', value: this.brightness }; }
       if (this.cursor === 2) return { kind: 'closeApp' };
-      this.go({ kind: 'home' });
+      this.goBack({ kind: 'home' });
       return { kind: 'settingsBack' };
     }
     if (s.kind === 'chat') {
@@ -750,7 +803,7 @@ export class HomeModel {
     }
     if (s.kind === 'textReply' && input === 'select') {
       const text = ['Back', ...QUICK_TEXTS][this.cursor];
-      if (text === 'Back') { this.go({ kind: 'chat', id: s.id, name: s.name }); return null; }
+      if (text === 'Back') { this.goBack({ kind: 'chat', id: s.id, name: s.name }); return null; }
       // A text is one and done: if a pop-up brought you here, sending closes it.
       if (this.returnTo && text) this.finish();
       else this.go({ kind: 'chat', id: s.id, name: s.name });
@@ -862,7 +915,7 @@ export class HomeModel {
       const target = { kind: 'prompt' as const, machine: session.machine, pane: session.pane ?? '', ...(session.window ? { window: session.window } : {}), ...(session.appThread ? { appThread: session.appThread } : {}) };
       if (s.kind === 'reply') {
         const text = this.replyChoices(session)[this.cursor];
-        this.go({ kind: 'agent', key: s.key });
+        this.goBack({ kind: 'agent', key: s.key });
         if (text === 'Speak') return this.startTalk(session, s.key, nowMs);
         if (!text || text === 'Back') return null;
         if (text.startsWith('Show on screen')) return { kind: 'focus', machine: session.machine, workspace: session.workspace };
@@ -884,6 +937,8 @@ export class HomeModel {
     if (target.kind === 'desk') return { kind: 'openDesk' };
     if (target.kind === 'conversation') return { kind: 'startConversation' };
     if (target.kind === 'agent') this.notices = this.notices.filter(n => n.key !== target.key);
+    // An approval answered from Needs you comes back to Needs you.
+    if (target.kind === 'approval') this.returnTo = s;
     this.go(target);
     if (target.kind === 'chat') { this.chatLines = null; return { kind: 'loadChat', id: target.id }; }
     if (target.kind === 'muse') { this.museLines = null; return { kind: 'loadMuse' }; }
@@ -915,6 +970,7 @@ export class HomeModel {
 
   private body(lines: string[] | null, loading: string): string[] {
     if (lines === null) return [loading];
+    this.scroll = Math.min(this.scroll, Math.max(0, lines.length - BODY_LINES)); // the text may have got shorter
     const view = lines.slice(this.scroll, this.scroll + BODY_LINES);
     if (this.scroll + BODY_LINES < lines.length) view.push('  ▼');
     return view;
@@ -964,6 +1020,7 @@ export class HomeModel {
           if (all === null) lines.push('Loading…');
           else {
             // A full-screen terminal: 9 lines of tail under the header; scrolled back, the last line says how far back you are (still 10 lines).
+            this.termScroll = Math.min(this.termScroll, Math.max(0, all.length - (TERM_LINES - 1))); // the conversation may have got shorter
             const rowsShown = this.termScroll ? TERM_LINES - 1 : TERM_LINES;
             const end = all.length - this.termScroll;
             const start = Math.max(0, end - rowsShown);
