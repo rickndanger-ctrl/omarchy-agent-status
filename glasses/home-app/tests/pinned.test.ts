@@ -11,7 +11,7 @@ const PINS: Pin[] = [
   { label: 'Codex · Mini 2', machine: 'Mini 2', agent: 'codex', session: 'g2-codex' },
   { label: 'Claude · Neo', machine: 'Neo', agent: 'claude', session: 'g2-claude' },
   { label: 'Codex · Neo', machine: 'Neo', agent: 'codex', session: 'g2-codex' },
-  { label: 'Claude · Dell', machine: 'Dell', agent: 'claude', session: 'g2-claude' },
+  { label: 'Claude · Dell', machine: 'Dell', agent: 'claude', session: 'tile' },
 ];
 const sess = (machine: string, agent: string, state: string, over: Partial<Session> = {}): Session =>
   ({ agent, name: agent === 'claude' ? 'Claude' : 'Codex', session: `tmux%${machine}${agent}`, state, page: 'proj', at: NOW / 1000 - 60, workspace: '', machine, pane: `%${machine}${agent}`, tmux: `g2-${agent}`, ...over });
@@ -161,4 +161,25 @@ test('a pin whose computer is not in the machine list at all shows offline; the 
   for (const ch of '●○✓') assert.ok(!m.render(NOW).includes(ch), `${ch} is not drawn by the glasses font`);
   m.update(data());
   assert.ok(!reveal(m, /Dell/).includes('○'));
+});
+
+test("a 'tile' pin (Dell's Claude) resolves like the Tiles agent:Dell/claude tile: the window, not a look-alike elsewhere", () => {
+  const win = sess('Dell', 'claude', 'working', { tmux: undefined, pane: undefined, window: '0xabc', session: 'win0xabc', workspace: '2' });
+  const other = sess('Mini 1', 'claude', 'working', { tmux: 'claude' });
+  const m = new HomeModel();
+  m.update(data({ sessions: [other, win] }));
+  assert.equal(m.pinSession(PINS[6])?.window, '0xabc');
+  assert.match(reveal(m, /Claude · Dell/), /• Claude · Dell · busy/);
+  const none = new HomeModel();
+  none.update(data({ sessions: [other] }));
+  assert.equal(none.pinSession(PINS[6]), undefined);
+  assert.match(reveal(none, /Claude · Dell/), /· Claude · Dell · not running/);
+});
+
+test('the default pins are the home-agents sessions (claude / codex on the Minis and Neo) and Dell\'s tile', () => {
+  const m = new HomeModel();
+  const pins: Pin[] = ['Mini 1', 'Mini 2', 'Neo'].flatMap(machine => ['claude', 'codex'].map(agent => ({ label: `${agent} · ${machine}`, machine, agent, session: agent })));
+  m.update(data({ pinned: pins, sessions: [sess('Neo', 'claude', 'done', { tmux: 'claude' }), sess('Neo', 'claude', 'working', { tmux: 'claude-other' })] }));
+  assert.equal(m.pinSession(pins[4])?.tmux, 'claude', 'Neo\'s screen session named claude');
+  assert.equal(m.pinSession(pins[0]), undefined);
 });

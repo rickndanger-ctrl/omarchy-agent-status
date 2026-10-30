@@ -1366,11 +1366,13 @@ async function pullLayouts() {
 const PINNED_FILE = path.join(CONFIG_DIR, 'pinned.json')
 const PIN_MAX = 12
 const pin = (label, machine, agent, session) => ({ label, machine, agent, session })
+// The sessions are the ones com.rick.home-agents already keeps: tmux 'claude'/'codex' on the Minis, screen 'claude'/'codex' on Neo.
+// Dell has no tmux: its Claude is the laptop window the Tiles 'agent:Dell/claude' tile follows (session 'tile', resolved by the app like that tile).
 const DEFAULT_PINS = [
-  pin('Claude · Mini 1', 'Mini 1', 'claude', 'g2-claude'), pin('Codex · Mini 1', 'Mini 1', 'codex', 'g2-codex'),
-  pin('Claude · Mini 2', 'Mini 2', 'claude', 'g2-claude'), pin('Codex · Mini 2', 'Mini 2', 'codex', 'g2-codex'),
-  pin('Claude · Neo', 'Neo', 'claude', 'g2-claude'), pin('Codex · Neo', 'Neo', 'codex', 'g2-codex'),
-  pin('Claude · Dell', 'Dell', 'claude', 'g2-claude'),
+  pin('Claude · Mini 1', 'Mini 1', 'claude', 'claude'), pin('Codex · Mini 1', 'Mini 1', 'codex', 'codex'),
+  pin('Claude · Mini 2', 'Mini 2', 'claude', 'claude'), pin('Codex · Mini 2', 'Mini 2', 'codex', 'codex'),
+  pin('Claude · Neo', 'Neo', 'claude', 'claude'), pin('Codex · Neo', 'Neo', 'codex', 'codex'),
+  pin('Claude · Dell', 'Dell', 'claude', 'tile'),
 ]
 // A pin list from a request or from disk: up to PIN_MAX pins of non-empty strings, or null.
 function checkPins(raw) {

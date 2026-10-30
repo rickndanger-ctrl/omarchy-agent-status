@@ -3,6 +3,7 @@
 // file decides what that text is and what each tap or swipe does.
 
 import type { OpenTarget } from './tiles';
+import { findSession } from './tiles';
 
 export type Input = 'up' | 'down' | 'select' | 'back';
 
@@ -259,6 +260,8 @@ export class HomeModel {
 
   /** The live session a pin stands for: same computer and agent AND the same tmux session name, exactly. Never a look-alike (a voice reply must reach the pinned agent). */
   pinSession(pin: Pin): Session | undefined {
+    // 'tile' (Dell: a laptop window, no tmux): the very session the Tiles 'agent:<computer>/<agent>' tile follows.
+    if (pin.session === 'tile') return this.data ? findSession(this.data, `${pin.machine}/${pin.agent}`, this.data.now).session : undefined;
     const mine = (this.data?.sessions ?? []).filter(x => x.machine === pin.machine && x.agent === pin.agent && x.tmux === pin.session && Boolean(x.pane || x.window));
     return [...mine].sort((a, b) => (STATE_RANK[b.state] ?? 0) - (STATE_RANK[a.state] ?? 0) || b.at - a.at)[0];
   }

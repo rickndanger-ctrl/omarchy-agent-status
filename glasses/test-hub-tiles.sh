@@ -154,7 +154,7 @@ check "GET /api/layout reads back what was saved" 200 "d['pages'][4]['left']=='u
 if [ -f "$HOME/.config/agent-glasses/layout.json" ]; then ok "layout.json is written under the config folder"; else bad "layout.json is written under the config folder"; fi
 
 req GET "$HUB" /api/pinned
-check "GET /api/pinned with no pinned.json returns the 7 default pins" 200 "len(d['pins'])==7 and d['pins'][0]=={'label':'Claude · Mini 1','machine':'Mini 1','agent':'claude','session':'g2-claude'} and d['pins'][6]['machine']=='Dell' and d['pins'][6]['agent']=='claude'"
+check "GET /api/pinned with no pinned.json returns the 7 default pins (the home-agents sessions; Dell is the tile)" 200 "len(d['pins'])==7 and d['pins'][0]=={'label':'Claude · Mini 1','machine':'Mini 1','agent':'claude','session':'claude'} and [x['session'] for x in d['pins'][:6]]==['claude','codex']*3 and [x['machine'] for x in d['pins'][:6]]==['Mini 1','Mini 1','Mini 2','Mini 2','Neo','Neo'] and d['pins'][6]=={'label':'Claude · Dell','machine':'Dell','agent':'claude','session':'tile'}"
 req PUT "$HUB" /api/pinned '{"pins":[{"label":"x","machine":"Mini 1","agent":"claude"}]}'
 check "PUT /api/pinned rejects a pin with no session" 400
 req PUT "$HUB" /api/pinned '{"pins":[{"label":"x","machine":"Mini 1","agent":"claude","session":7}]}'
@@ -263,6 +263,34 @@ req POST "$HUB" /api/tile/action "{\"url\":\"$RELAY/not-in-layout\",\"id\":\"ref
 check "POST /api/tile/action refuses an endpoint not in the layout" 404
 req POST "$HUB" /api/tile/action "{\"url\":\"$PLUGIN\"}"
 check "POST /api/tile/action needs an action id" 400
+
+
+echo "Sessions carry their tmux or screen name (fake tmux, screen and ps)"
+SCREEN_PORT=${SCREEN_PORT:-5397}
+mkdir -p "$work/fakebin" "$work/homeS/.config/agent-glasses"
+cat > "$work/fakebin/screen" <<'SH'
+#!/bin/sh
+printf 'There is a screen on:\n\t1234.claude\t(Detached)\n1 Socket in /tmp/screens.\n'
+SH
+cat > "$work/fakebin/tmux" <<'SH'
+#!/bin/sh
+printf '%%3 1500 codex|/tmp/proj\n%%4 1600 two words|/tmp/other\n'
+SH
+cat > "$work/fakebin/ps" <<'SH'
+#!/bin/sh
+printf '1234 1 SCREEN -S claude\n1300 1234 claude --x\n1500 1 -bash\n1501 1500 codex\n1600 1 -bash\n1601 1600 claude\n'
+SH
+cat > "$work/fakebin/lsof" <<'SH'
+#!/bin/sh
+printf 'p1300\nfcwd\nn/tmp/proj\n'
+SH
+chmod +x "$work/fakebin/"*
+PATH="$work/fakebin:$PATH" HOME="$work/homeS" HUD_TOKEN_FILE="$work/hud.token" node "$here/hud-server.mjs" --mode hub --port "$SCREEN_PORT" --machine "Fake" >"$work/screen.log" 2>&1 & pidS=$!; pids+=("$pidS")
+for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$SCREEN_PORT/api/health" && break; sleep 0.2; done
+req GET "http://127.0.0.1:$SCREEN_PORT" /api/home
+check "a GNU screen session '1234.claude (Detached)' becomes a session with tmux=claude" 200 "any(s.get('tmux')=='claude' and s['agent']=='claude' and s['pane']=='screen:1234.claude' for s in d['sessions'])"
+check "a tmux pane carries its session name" 200 "any(s.get('tmux')=='codex' and s['agent']=='codex' and s['pane']=='%3' for s in d['sessions'])"
+check "a tmux session name with a space is kept whole" 200 "any(s.get('tmux')=='two words' and s['pane']=='%4' for s in d['sessions'])"
 
 echo "Two hubs keeping one layout"
 PA="http://127.0.0.1:$PEER_A_PORT"
