@@ -16,7 +16,6 @@ export function sanitizeMuseReply(reply) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim()
     if (/^muse$/i.test(line) && isChrome(nextNonEmpty(i))) { cut = i; break }
-    if (/^approvals history$/i.test(line)) { cut = i; break }
     if (isChrome(line) && isChrome(nextNonEmpty(i))) { cut = i; break }
   }
   if (cut < 0) return { text: original, trimmed: 0 }
