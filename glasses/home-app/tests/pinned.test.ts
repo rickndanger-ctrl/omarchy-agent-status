@@ -1,0 +1,143 @@
+// Pinned agents on Home: rows from the same sessions the Agents page uses, the full-screen terminal view, and Quiet mode.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { HomeModel, WIDTH, type HomeData, type Pin, type Session } from '../src/model.ts';
+
+const NOW = Date.UTC(2026, 9, 26, 18, 42);
+const PINS: Pin[] = [
+  { label: 'Claude · Mini 1', machine: 'Mini 1', agent: 'claude', session: 'g2-claude' },
+  { label: 'Codex · Mini 1', machine: 'Mini 1', agent: 'codex', session: 'g2-codex' },
+  { label: 'Claude · Mini 2', machine: 'Mini 2', agent: 'claude', session: 'g2-claude' },
+  { label: 'Codex · Mini 2', machine: 'Mini 2', agent: 'codex', session: 'g2-codex' },
+  { label: 'Claude · Neo', machine: 'Neo', agent: 'claude', session: 'g2-claude' },
+  { label: 'Codex · Neo', machine: 'Neo', agent: 'codex', session: 'g2-codex' },
+  { label: 'Claude · Dell', machine: 'Dell', agent: 'claude', session: 'g2-claude' },
+];
+const sess = (machine: string, agent: string, state: string, over: Partial<Session> = {}): Session =>
+  ({ agent, name: agent === 'claude' ? 'Claude' : 'Codex', session: `tmux%${machine}${agent}`, state, page: 'proj', at: NOW / 1000 - 60, workspace: '', machine, pane: `%${machine}${agent}`, tmux: `g2-${agent}`, ...over });
+const data = (over: Partial<HomeData> = {}): HomeData => ({
+  now: NOW, paused: false,
+  machines: ['Mini 1', 'Mini 2', 'Neo', 'Dell'].map(name => ({ name, online: true })),
+  sessions: [sess('Mini 1', 'claude', 'working'), sess('Mini 1', 'codex', 'idle'), sess('Mini 2', 'claude', 'attention'), sess('Neo', 'codex', 'done')],
+  pending: [], messages: null, muse: false, pinned: PINS, ...over,
+});
+/** Move the Home cursor down until a row matching `re` is on screen. */
+function reveal(m: HomeModel, re: RegExp): string {
+  for (let i = 0; i < 25; i++) { const t = m.render(NOW); if (re.test(t)) return t; m.input('down', NOW); }
+  return m.render(NOW);
+}
+const lines = (m: HomeModel) => m.render(NOW).split('\n');
+
+test('Home: one row per pin with the bar symbol and the bar words, then the normal rows, All agents last', () => {
+  const m = new HomeModel();
+  m.update(data());
+  const text = m.render(NOW);
+  const rows = text.split('\n');
+  assert.match(text, /> ● Claude · Mini 1 · busy/);
+  assert.match(text, /○ Codex · Mini 1 · ready/);
+  assert.match(text, /● Claude · Mini 2 · needs you/);
+  assert.doesNotMatch(text, /Agents · \d+ on/, 'the old Agents row is gone');
+  assert.ok(rows.length <= 10, `${rows.length} lines`);
+  for (const l of rows) assert.ok(l.length <= WIDTH, l);
+  // walk the whole list: pins in the configured order, All agents last
+  const seen: string[] = [];
+  for (let i = 0; i < 20; i++) { for (const l of lines(m)) if (l.startsWith('>')) { if (seen.at(-1) !== l) seen.push(l); } m.input('down', NOW); }
+  const labels = seen.map(l => l.slice(2));
+  assert.deepEqual(labels.slice(0, 7).map(l => l.replace(/^\S+ /, '').split(' · ').slice(0, 2).join(' · ')), PINS.map(p => p.label));
+  assert.match(labels.at(-1)!, /^All agents · 4 on 4 computers/);
+  assert.ok(labels.findIndex(l => /^Listen/.test(l)) > 6, 'the normal rows come after the pins');
+});
+
+test('a pin with no matching session, or on an offline computer, shows offline and opens nothing', () => {
+  const m = new HomeModel();
+  m.update(data({ machines: [{ name: 'Mini 1', online: true }, { name: 'Mini 2', online: false }, { name: 'Neo', online: true }, { name: 'Dell', online: true }] }));
+  const text = m.render(NOW);
+  assert.match(text, /· Claude · Mini 2 · offline/, 'its computer is offline');
+  for (let i = 0; i < 6; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /> · Claude · Dell · offline/, 'no session on Dell');
+  assert.equal(m.input('select', NOW), null);
+  assert.equal(m.screenKind, 'home');
+});
+
+test('select on a pin opens its agent page; matching prefers the named session, else the best terminal one', () => {
+  const m = new HomeModel();
+  m.update(data({ sessions: [sess('Mini 1', 'claude', 'idle', { tmux: 'other', pane: '%9', session: 'tmux%9' }), sess('Mini 1', 'claude', 'working', { pane: '%1', session: 'tmux%1' }), sess('Mini 1', 'claude', 'attention', { tmux: 'g2-claude', pane: '%2', session: 'tmux%2' })] }));
+  assert.equal(m.pinSession(PINS[0])?.session, 'tmux%2', 'the named session wins');
+  m.input('select', NOW);
+  assert.equal(m.screenKind, 'agent');
+  const m2 = new HomeModel();
+  m2.update(data({ sessions: [sess('Mini 1', 'claude', 'idle', { tmux: undefined, pane: '%9', session: 'tmux%9' }), sess('Mini 1', 'claude', 'working', { tmux: undefined, pane: '%1', session: 'tmux%1' })] }));
+  assert.equal(m2.pinSession(PINS[0])?.session, 'tmux%1', 'no name given by the hub: the busiest terminal session of that computer and agent');
+});
+
+test('without a pin list (an older hub) Home keeps the Agents row', () => {
+  const m = new HomeModel();
+  m.update(data({ pinned: undefined }));
+  assert.match(m.render(NOW), /> Agents · 4 on 4 computers/);
+  assert.doesNotMatch(m.render(NOW), /All agents/);
+});
+
+test('the big view is the header line plus 9 lines of terminal: 10 lines, no hint, no auto-scroll', () => {
+  const m = new HomeModel();
+  m.update(data());
+  m.input('select', NOW); // Claude · Mini 1
+  const key = 'Mini 1/%Mini 1claude';
+  m.setTerminal(key, Array.from({ length: 40 }, (_, i) => `out ${i + 1}`));
+  const v = lines(m);
+  assert.equal(v.length, 10);
+  assert.match(v[0], /^CLAUDE · Mini 1/);
+  assert.deepEqual(v.slice(1), Array.from({ length: 9 }, (_, i) => `out ${32 + i}`));
+  assert.doesNotMatch(v.join('\n'), /swipe|tap:/);
+  m.input('up', NOW); // scrolls back by 3, still 10 lines
+  const s = lines(m);
+  assert.equal(s.length, 10);
+  assert.equal(s[1], 'out 30');
+  assert.ok(s.every(l => l.length <= WIDTH + 20));
+  m.input('down', NOW);
+  assert.equal(lines(m)[9], 'out 40', 'back at the bottom');
+});
+
+const approval = (machine: string, agent: string) => ({ id: `${machine}${agent}`, agent, page: 'proj', tool: 'Bash', summary: 'ls', at: NOW, machine });
+
+test('Quiet mode (default on): a pinned agent\'s approval pops, another agent\'s does not but stays in Needs you', () => {
+  const m = new HomeModel();
+  assert.equal(m.quiet, true);
+  m.update(data());
+  m.update(data({ pending: [approval('Mini 1', 'hermes')] }));
+  assert.equal(m.screenKind, 'home', 'not pinned: no pop-up');
+  assert.match(reveal(m, /Needs you/), /! Needs you · 1/, 'but it is still waiting in the list');
+  m.update(data({ pending: [approval('Mini 1', 'hermes'), approval('Mini 2', 'claude')] }));
+  assert.equal(m.screenKind, 'approval', 'pinned: pops');
+});
+
+test('Quiet mode: a pinned agent finishing or needing you pops; an unpinned one does not; texts never pop', () => {
+  const unpinned = (state: string) => sess('Mini 1', 'hermes', state, { pane: '%h', session: 'tmux%h', tmux: 'x' });
+  const m = new HomeModel();
+  m.update(data({ sessions: [unpinned('working')], messages: [{ id: 1, name: 'Ann', unread: false, when: NOW - 1000, snippet: 'hi', fromMe: false }] }));
+  m.update(data({ sessions: [unpinned('done')], messages: [{ id: 1, name: 'Ann', unread: true, when: NOW, snippet: 'new', fromMe: false }] }));
+  assert.equal(m.screenKind, 'home', 'neither the other agent finishing nor a text pops');
+  assert.match(reveal(m, /Messages/), /Messages · 1 new/, 'texts stay in their list');
+  const p = new HomeModel();
+  p.update(data({ sessions: [sess('Mini 1', 'claude', 'working')] }));
+  p.update(data({ sessions: [sess('Mini 1', 'claude', 'done')] }));
+  assert.equal(p.screenKind, 'alert');
+  assert.match(p.render(NOW), /DONE · Claude · Mini 1/);
+  const n = new HomeModel();
+  n.update(data({ sessions: [sess('Neo', 'codex', 'working')] }));
+  n.update(data({ sessions: [sess('Neo', 'codex', 'attention')] }));
+  assert.equal(n.screenKind, 'alert');
+  assert.match(n.render(NOW), /NEEDS YOU/);
+});
+
+test('Quiet mode off: everything pops as today', () => {
+  const m = new HomeModel();
+  m.quiet = false;
+  m.update(data());
+  m.update(data({ pending: [approval('Mini 1', 'hermes')] }));
+  assert.equal(m.screenKind, 'approval');
+  const t = new HomeModel();
+  t.quiet = false;
+  t.update(data({ messages: [{ id: 1, name: 'Ann', unread: false, when: NOW - 1000, snippet: 'hi', fromMe: false }] }));
+  t.update(data({ messages: [{ id: 1, name: 'Ann', unread: true, when: NOW, snippet: 'new', fromMe: false }] }));
+  assert.equal(t.screenKind, 'alert');
+});

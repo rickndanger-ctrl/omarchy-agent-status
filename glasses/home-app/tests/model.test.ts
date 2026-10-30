@@ -192,13 +192,14 @@ test('agent page is a terminal view: its conversation, newest at the bottom, swi
   m.setTerminal('Mini 1/%3', Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
   let text = m.render(NOW);
   assert.match(text, /^CLAUDE · Mini 1 · agent-status · busy/);
-  assert.match(text, /line 20\ntap: talk · swipe up: scroll · down: quick replies$/);
-  assert.doesNotMatch(text, /line 12\n/);
+  assert.match(text, /line 12\nline 13\n[\s\S]*line 20$/);
+  assert.equal(text.split('\n').length, 10, 'header + 9 lines of terminal, no hint line');
+  assert.doesNotMatch(text, /line 11\n/);
   m.input('up', NOW);
   text = m.render(NOW);
   assert.match(text, /line 17\nswipe up: scroll · down: newer$/);
   m.input('down', NOW);
-  assert.match(m.render(NOW), /line 20\n/);
+  assert.match(m.render(NOW), /line 20$/);
   assert.equal(m.screenKind, 'agent', 'swipe down from scrolled-back returns to newest, not replies');
 });
 
@@ -210,7 +211,7 @@ test('messages get a bar with who and the time (seconds); scrolled back, the foo
   const lines = ['::msg you ' + t0, 'how is it going', '::msg claude ' + (t0 + 17_000), ...Array.from({ length: 12 }, (_, i) => `reply ${i + 1}`)];
   m.setTerminal('Mini 1/%3', lines);
   let text = m.render(NOW);
-  assert.match(text, /reply 12\ntap: talk/);
+  assert.match(text, /reply 12$/);
   for (let i = 0; i < 3; i++) m.input('up', NOW);
   text = m.render(NOW);
   assert.match(text, /^--- YOU · 6:41:58 PM -+$/m);
