@@ -554,7 +554,7 @@ export class HomeModel {
     this.museHead = lines; this.museHeadReply = true; this.museHeadFinal = ask !== undefined;
     this.museEarlier = this.museEarlier.filter(e => e.ask !== ask);
     this.composeMuse();
-    this.scroll = 0;
+    if (this.screen.kind === 'muse') this.scroll = 0; // only when Muse is in front: the scroll is shared with every other page
     return true;
   }
   /** Muse didn't answer: say why, in the relay's own words. */
@@ -564,7 +564,7 @@ export class HomeModel {
     this.museHead = lines; this.museHeadReply = true; this.museHeadFinal = ask !== undefined;
     this.museEarlier = this.museEarlier.filter(e => e.ask !== ask);
     this.composeMuse();
-    this.scroll = 0;
+    if (this.screen.kind === 'muse') this.scroll = 0;
     return true;
   }
   /** The ask is under way: its question (as today) and "thinking"; the answer shown so far moves below. */
@@ -592,7 +592,7 @@ export class HomeModel {
     this.museHeadReply = latest !== null && Boolean(latest.question || latest.reply);
     this.museHead = latest === null ? ["Couldn't reach Muse."] : this.museHeadReply ? this.museAnswerView(latest.question, latest.reply) : ['No Muse conversation yet.'];
     this.composeMuse();
-    this.scroll = 0;
+    if (this.screen.kind === 'muse') this.scroll = 0;
     return true;
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }

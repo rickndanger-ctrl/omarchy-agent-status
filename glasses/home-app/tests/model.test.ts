@@ -882,3 +882,28 @@ test('Muse: a failed ask puts the reason under a one-line question; an older fai
   assert.match(rows[2], /^You: .*…$/);
   assert.match(rows[3], /^Muse didn't get it: no Muse is ready/);
 });
+
+test('a Muse read (tile refresh every 1.2 s) never moves the scroll of a chat or other page; with Muse in front it still resets to the answer top', () => {
+  const m = new HomeModel();
+  openChat(m);
+  m.setChat(Array.from({ length: 30 }, (_, i) => ({ from: 'Mom', fromMe: false, when: NOW / 1000 - 600 + i, text: `chat line ${i}` })).reverse(), NOW);
+  m.input('up', NOW); m.input('up', NOW);
+  const before = m.render(NOW);
+  assert.match(before, /chat line/);
+  m.setMuse({ question: 'q', reply: 'a new latest answer' });
+  m.setMuse(null);
+  m.setMuseAnswer('q2', 'an answer from an ask');
+  m.setMuseProblem('q3', 'no Muse');
+  assert.equal(m.render(NOW), before, 'the chat page did not jump');
+  // Muse in front: the answer top, as before
+  const w = new HomeModel();
+  w.update(withChat());
+  w.goTo('muse');
+  w.setMuse({ question: 'q', reply: Array.from({ length: 20 }, (_, i) => `answer line ${i}`).join('\n') });
+  w.input('down', NOW); w.input('down', NOW);
+  w.setMuseAnswer('q', 'a new answer\n' + 'x\n'.repeat(15));
+  assert.match(w.render(NOW), /Muse: a new answer/);
+  w.input('down', NOW);
+  w.setMuse({ question: 'q', reply: 'reloaded answer' });
+  assert.match(w.render(NOW), /Muse: reloaded answer/);
+});
