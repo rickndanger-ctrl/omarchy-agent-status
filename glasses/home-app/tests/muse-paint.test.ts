@@ -681,3 +681,8 @@ test('a lost job (hub restarted) answers status error at once: the poll loop end
   m.setMuseProblem('q', 'Muse job was lost (hub restarted)', ask);
   assert.match(m.render(NOW), /Muse didn't get it: Muse job was lost \(hub restarted\)\./);
 });
+
+test('a job\'s polls stay on the hub that accepted it: no failover, an unreachable hub is just kept waiting', () => {
+  assert.deepEqual(hubsToTry(['a', 'b', 'c'], false, 'b'), ['b']);
+  assert.deepEqual(hubsToTry(['a', 'b'], true, 'b'), ['b']);
+});

@@ -804,6 +804,8 @@ async function askMuse(text, start, trace = {}, deadline = Infinity) {
     trace.attempted = true
     try {
       const r = await call(`${ready.muse.url}/ask`, ready.muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
+      // A 200 without a usable job id proves nothing was queued that can be followed: unconfirmed, and never asked again.
+      if (!r || !/^\w{1,40}$/.test(String(r.id ?? ''))) return null
       return { id: `${ready.i}-${r.id}`, muse: ready.muse.name }
     } catch { return null } // the call failed after the question may have been sent: it stops here, no other relay is asked
   }

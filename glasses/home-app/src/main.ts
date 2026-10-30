@@ -245,9 +245,11 @@ function diag(name: string, detail: string | number | boolean = ''): void {
 class HttpError extends Error {}
 
 /** Calls the current hub; if it can't be reached at all, the next hub takes over (and stays current). */
-async function api<T>(path: string, init?: RequestInit, once = false): Promise<T> {
+/** The hub that answered the last successful request. */
+let answeredBy = '';
+async function api<T>(path: string, init?: RequestInit, once = false, only?: string): Promise<T> {
   let lastError: unknown = new Error('no hub reachable');
-  for (const hub of hubsToTry(hubs(), once)) {
+  for (const hub of hubsToTry(hubs(), once, only)) {
     let res: Response;
     try {
       res = await fetch(new URL(`api/${path}`, hub), {
@@ -265,6 +267,7 @@ async function api<T>(path: string, init?: RequestInit, once = false): Promise<T
       lastError = new Error(`hub down (${res.status})`);
       continue;
     }
+    answeredBy = hub;
     if (adopt(hub)) diag('hub.switch', new URL(hub).hostname);
     void learnName(hub);
     if (res.status === 401) throw new HttpError('wrong token');
@@ -768,11 +771,12 @@ async function run(action: Action): Promise<void> {
       const ask = action.ask ?? model.beginMuseAsk(action.text); // the newest ask owns the Muse screen and tile (conversation asks too)
       const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text, clientId: askKey }) }, true).catch(e => ({ error: String(e.message ?? e) }));
       if (asked.error) asked.error = plainMuseError(asked.error);
+      const acceptedBy = answeredBy; // this job lives on this hub: its polls never go to another one
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
       if (!asked.id) { const newest = model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay', ask); if (newest) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); } paint(); return; }
       // Muse answers in a few seconds; long answers take longer. Check every 0.7 s for up to 2.5 minutes.
       const ended = await pollMuseJob(
-        () => api<MuseJob>(`muse/reply?id=${encodeURIComponent(asked.id!)}`).catch(() => null),
+        () => api<MuseJob>(`muse/reply?id=${encodeURIComponent(asked.id!)}`, undefined, false, acceptedBy).catch(() => null), // unreachable: keep waiting until the deadline
         () => new Promise<void>(r => setTimeout(r, 700)),
         (job, finished) => {
         const waiting = job.status === 'waiting';

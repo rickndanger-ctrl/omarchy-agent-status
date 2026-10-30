@@ -63,6 +63,7 @@ export class HubPicker {
 }
 
 /** The hubs a request may try: all of them in order, or only the current one for a request that must never be sent twice (an ask to Muse). */
-export function hubsToTry<T>(hubs: T[], once: boolean): T[] {
+export function hubsToTry<T>(hubs: T[], once: boolean, only?: T): T[] {
+  if (only !== undefined) return [only]; // a job's polls stay on the hub that accepted it
   return once ? hubs.slice(0, 1) : hubs;
 }

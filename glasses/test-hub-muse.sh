@@ -32,7 +32,7 @@ const read = n => readFileSync(`${dir}/${n}.txt`, 'utf8')
 http.createServer((req, res) => {
   const send = body => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(body)) }
   if (req.url === '/selftest') { const slow = existsSync(`${dir}/slow`); setTimeout(() => send({ ok: !existsSync(`${dir}/notrunning`), composer: existsSync(`${dir}/ready`) }), slow ? 1500 : 0); return }
-  if (req.url === '/ask' && req.method === 'POST') { let b = ''; req.on('data', c => { b += c }); req.on('end', () => { appendFileSync(`${dir}/asks.log`, b + '\n'); if (b.includes('boom')) { res.statusCode = 500; res.end('{}'); return } send({ id: 'job1' }) }); return }
+  if (req.url === '/ask' && req.method === 'POST') { let b = ''; req.on('data', c => { b += c }); req.on('end', () => { appendFileSync(`${dir}/asks.log`, b + '\n'); if (b.includes('boom')) { res.statusCode = 500; res.end('{}'); return } if (b.includes('noid')) { send({}); return } send({ id: 'job1' }) }); return }
   if (req.url === '/reply/cmdfail') return send({ status: 'error', question: 'q', reply: '', error: 'Command failed: /usr/local/bin/musectl type --secret-path /Users/x' })
   if (req.url === '/reply/job1') return send({ status: 'done', question: 'asked once', reply: 'Answered once.' })
   if (req.url === '/latest') return send({ question: 'Can you hear me?', reply: read('polluted') })
@@ -141,6 +141,11 @@ getr http://127.0.0.1:5376 "0-cmdfail"
 check "(2)(6) a relay's raw job error ('Command failed …') becomes a plain reason" "d['status']=='error' and d['error']=='Muse ran into a problem' and 'Command' not in json.dumps(d) and '/Users' not in json.dumps(d)"
 [ "$(asks "$work/relayD2")" = 0 ] && ok "(2) and no other relay was asked because of it" || bad "(2) relay d2 was asked"
 grep -q '^muse.error Muse ran into a problem$' "$work/hubD.log" && ! grep -q 'Command failed' "$work/hubD.log" && ok "(6) the log has only the plain reason" || bad "(6) log: $(grep muse.error "$work/hubD.log")"
+postj http://127.0.0.1:5376 '{"text":"noid","clientId":"c9"}'; WIDN=$(python3 -c "import json; print(json.load(open('$work/out'))['id'])")
+before1=$(asks "$work/relayD1"); sleep 1.5
+getr http://127.0.0.1:5376 "$WIDN"
+check "(b) a relay /ask answering 200 without a job id is unconfirmed: the job fails, no '0-undefined'" "d['status']=='error' and d['error']=='Muse did not confirm the question'"
+[ "$(asks "$work/relayD2")" = 0 ] && [ "$(asks "$work/relayD1")" -le $((before1 + 1)) ] && ok "(b) and it is not retried or passed to another relay" || bad "(b) retried: d1 $(asks "$work/relayD1") d2 $(asks "$work/relayD2")"
 # (4) slow selftest: nothing is sent after the deadline
 touch "$work/relayE/ready" "$work/relayE/slow"
 printf '{"muse":[{"name":"e","url":"http://127.0.0.1:5375","tokenFile":"%s"}]}\n' "$work/relay.token" > "$work/hubE.json"
