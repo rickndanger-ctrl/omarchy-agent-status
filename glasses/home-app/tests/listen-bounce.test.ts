@@ -6,7 +6,6 @@ import { Tiles } from '../src/tiles';
 import type { TileContext } from '../src/tiles';
 import { MuseCache } from '../src/musecache';
 import { applyMuseLatest } from '../src/musesync';
-import { makeHandle, type FlowHost } from '../src/inputflow';
 
 const NOW = Date.UTC(2026, 9, 26, 18, 42);
 const data: HomeData = { now: NOW, paused: false, machines: [{ name: 'lap', online: true }], sessions: [], pending: [], messages: [], muse: true, voice: true };
@@ -80,28 +79,19 @@ test('leaving listen any way stops the microphone: Back, Tiles/Desk taking over,
   assert.equal(menu.micWanted(), true);
 });
 
-test('a double-tap on the Muse screen (click then double-click 340 ms apart) is one Back from Muse: the mic is cancelled and Muse is left', async () => {
+test('a Back within 0.5 s of starting to listen is ignored (the double-click of the same tap): the listening goes on; a later Back cancels', () => {
   const model = new HomeModel(); model.update(data);
   model.openTarget({ kind: 'muse' } as never);
-  let now = NOW; let backToTiles = 0; const done: string[] = [];
-  const host = {
-    model, tiles: {}, tileCtx: () => ({}), showingTiles: () => false, inOpenedScreen: () => true, leaveTiles: () => {}, backToTiles: () => { backToTiles++; },
-    paint: () => {}, isBlank: () => false, wake: () => {}, runTileEffect: () => {}, saveLayout: () => {}, refreshTiles: () => {}, refreshTerminal: () => {}, now: () => now,
-    runModelAction: (a: { kind: string }) => { done.push(a.kind); },
-  } as unknown as FlowHost;
-  const handle = makeHandle(host);
-  await handle('select');
+  assert.deepEqual(model.input('select', NOW), { kind: 'startMic' });
   assert.equal(model.screenKind, 'listen');
-  now += 340;
-  await handle('back');
-  assert.deepEqual(done, ['startMic', 'cancelMic']);
-  assert.equal(backToTiles, 1, 'and the Back from Muse that the double-tap meant went to Tiles');
-  // a slow Back (the owner changed their mind seconds later) only cancels the listening
+  assert.equal(model.input('back', NOW + 340), null, 'the stray Back');
+  assert.equal(model.screenKind, 'listen');
+  assert.equal(model.micWanted(), true);
+  assert.deepEqual(model.input('back', NOW + 3000), { kind: 'cancelMic' }, 'a real Back later still cancels');
+  assert.equal(model.screenKind, 'muse');
+  assert.equal(model.micWanted(), false);
+  // the same Back right after the stop press (thinking) is ignored too; a tap that stops listening still works at any time
   const m2 = new HomeModel(); m2.update(data); m2.openTarget({ kind: 'muse' } as never);
-  now = NOW; backToTiles = 0; done.length = 0;
-  const host2 = { ...host, model: m2 } as unknown as FlowHost;
-  const handle2 = makeHandle(host2);
-  await handle2('select'); now += 3000; await handle2('back');
-  assert.equal(m2.screenKind, 'muse');
-  assert.equal(backToTiles, 0);
+  m2.input('select', NOW);
+  assert.deepEqual(m2.input('select', NOW + 100), { kind: 'stopMic' });
 });

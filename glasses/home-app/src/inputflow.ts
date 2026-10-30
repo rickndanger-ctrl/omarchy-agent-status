@@ -64,8 +64,6 @@ export function makeHandle(host: FlowHost): (input: Input) => void | Promise<voi
     host.paint();
     const job = action ? host.runModelAction(action) : undefined;
     if (action) host.paint();
-    // A double-tap on a screen where a tap starts listening: the click started it, the double-click cancelled it. The owner meant Back from that screen.
-    if (action?.kind === 'cancelMic' && action.quick) return Promise.resolve(job).then(() => handle('back'));
     host.refreshTerminal();
     // Microphone on/off and a Conversation start must finish before the next press (a stop must not overtake its start); other actions go on in the background.
     return action && (action.kind === 'startMic' || action.kind === 'stopMic' || action.kind === 'cancelMic' || action.kind === 'startConversation' || action.kind === 'closeApp') ? job : undefined;
