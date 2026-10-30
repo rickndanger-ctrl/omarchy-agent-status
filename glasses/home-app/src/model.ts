@@ -528,6 +528,8 @@ export class HomeModel {
   // Older answers (an earlier ask that finished, or one that answers after a newer ask began) stay reachable below the newest one.
   private museHead: string[] | null = null;
   private museHeadReply = false;
+  /** The head is this session's own final answer for the newest ask: the relay's /latest must never replace it. */
+  private museHeadFinal = false;
   private museEarlier: { ask: number; lines: string[] }[] = [];
   private museAskSeq = 0;
   private composeMuse(): void { this.museLines = this.museHead ? [...this.museHead, ...this.museEarlier.flatMap(e => ['', RULE.slice(0, 24) + ' earlier', ...e.lines])] : this.museLines; }
@@ -549,7 +551,7 @@ export class HomeModel {
   setMuseAnswer(question: string, reply: string, ask?: number): boolean {
     const lines = this.museAnswerView(question, reply);
     if (ask !== undefined && !this.museIsNewest(ask)) { this.museAsEarlier(ask, lines); return false; }
-    this.museHead = lines; this.museHeadReply = true;
+    this.museHead = lines; this.museHeadReply = true; this.museHeadFinal = ask !== undefined;
     this.museEarlier = this.museEarlier.filter(e => e.ask !== ask);
     this.composeMuse();
     this.scroll = 0;
@@ -559,7 +561,7 @@ export class HomeModel {
   setMuseProblem(question: string, reason: string, ask?: number): boolean {
     const lines = [clip(`You: ${question}`), ...wrap(`Muse didn't get it: ${reason || 'no answer'}.`), '', 'Nothing was typed anywhere else.'];
     if (ask !== undefined && !this.museIsNewest(ask)) { this.museAsEarlier(ask, lines); return false; }
-    this.museHead = lines; this.museHeadReply = true;
+    this.museHead = lines; this.museHeadReply = true; this.museHeadFinal = ask !== undefined;
     this.museEarlier = this.museEarlier.filter(e => e.ask !== ask);
     this.composeMuse();
     this.scroll = 0;
@@ -569,18 +571,29 @@ export class HomeModel {
   beginMuseAsk(text: string): number {
     if (this.museHead && this.museHeadReply) this.museEarlier = [{ ask: this.museAskSeq, lines: this.museHead }, ...this.museEarlier.filter(e => e.ask !== this.museAskSeq)].slice(0, 3);
     const ask = ++this.museAskSeq;
-    this.museHead = [...wrap(`You: ${text}`), '', 'Muse is thinking…']; this.museHeadReply = false;
+    this.museHead = [...wrap(`You: ${text}`), '', 'Muse is thinking…']; this.museHeadReply = false; this.museHeadFinal = false;
     this.composeMuse();
     return ask;
   }
   /** Put the ask-in-progress back on screen (the Muse screen was opened or reloaded while an ask is under way: nothing is fetched then). */
   restoreMuse(): void { if (this.museHead) this.composeMuse(); }
-  setMuse(latest: { question: string; reply: string } | null): void {
+  /** The relay's latest exchange. Returns whether it took the screen: it does not once this session holds a final answer for its newest ask (it is added below, if it is something new). */
+  setMuse(latest: { question: string; reply: string } | null): boolean {
+    if (this.museHeadFinal) {
+      if (latest && (latest.question || latest.reply)) {
+        const lines = this.museAnswerView(latest.question, latest.reply);
+        const known = [this.museHead ?? [], ...this.museEarlier.map(e => e.lines)].some(l => l.join('\n') === lines.join('\n'));
+        if (!known) this.museAsEarlier(-1, lines);
+      }
+      this.composeMuse(); // the screen was cleared on opening: put the head back
+      return false;
+    }
     // The scrollback of earlier answers stays: reopening Muse must not lose it.
     this.museHeadReply = latest !== null && Boolean(latest.question || latest.reply);
     this.museHead = latest === null ? ["Couldn't reach Muse."] : this.museHeadReply ? this.museAnswerView(latest.question, latest.reply) : ['No Muse conversation yet.'];
     this.composeMuse();
     this.scroll = 0;
+    return true;
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }
 

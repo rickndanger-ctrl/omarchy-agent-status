@@ -1,7 +1,7 @@
 import './style.css';
 import { Glasses, DEFAULT_OUTLINE } from './glasses';
 import { ShownWatch } from './shownwatch';
-import { pollMuseJob, type MuseJob } from './musepoll';
+import { pollMuseJob, MUSE_POLLS, MUSE_DEADLINE_MS, type MuseJob } from './musepoll';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { HubPicker } from './hubpick';
 import { LayoutLoader } from './layoutcache';
@@ -791,6 +791,8 @@ async function run(action: Action): Promise<void> {
           paint();
         }
         },
+        MUSE_POLLS,
+        { at: askedAt + MUSE_DEADLINE_MS, now: Date.now },
       );
       if (!ended) {
         // Every poll failed or Muse never finished: do not stay on "Muse is thinking…".
@@ -839,7 +841,10 @@ async function run(action: Action): Promise<void> {
       else {
         const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
         // Like the tile: a read that began before an ask started or finished is out of date and changes nothing.
-        if (museTile.isCurrent(stamp)) { model.setMuse(latest); if (latest) museTile.fetchDone(stamp, latest); else museTile.fetchFailed(stamp); }
+        if (museTile.isCurrent(stamp)) {
+          // /latest only fills an empty screen (or adds below): once this session has a final answer for its newest ask it stays, on screen and tile.
+          if (model.setMuse(latest)) { if (latest) museTile.fetchDone(stamp, latest); else museTile.fetchFailed(stamp); }
+        }
         else model.restoreMuse();
       }
     }

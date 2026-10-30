@@ -455,3 +455,42 @@ test('every poll failing (or never finishing) ends in "Muse took too long", not 
   const never = await pollMuseJob(async () => ({ status: 'sending', question: 'q', reply: '' }), async () => {}, () => {}, 4);
   assert.equal(never, false);
 });
+
+test('ask 2 finishes, then older ask 1 finishes: reopening Muse (relay /latest = ask 1) never replaces ask 2; a fresh start is filled; unknown latest goes below', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const a1 = m.beginMuseAsk('first question');
+  const a2 = m.beginMuseAsk('second question');
+  assert.equal(m.setMuseAnswer('second question', 'ANSWER TWO', a2), true);
+  assert.equal(m.setMuseAnswer('first question', 'ANSWER ONE', a1), false);
+  m.goTo('muse'); // reopened: the relay's latest is ask 1
+  assert.equal(m.setMuse({ question: 'first question', reply: 'ANSWER ONE' }), false, 'did not take the screen (nor the tile)');
+  const text = m.render(NOW);
+  assert.match(text, /You: second question/);
+  assert.match(text, /Muse: ANSWER TWO/);
+  assert.equal(m.render(NOW).match(/ANSWER ONE/g)?.length ?? 0, 1, 'known answer not added twice') ;
+  // something the session has not seen is added below
+  assert.equal(m.setMuse({ question: 'asked on the desk', reply: 'DESK ANSWER' }), false);
+  for (let i = 0; i < 4; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /DESK ANSWER|ANSWER ONE/);
+  // a fresh start (no ask this session) is filled from /latest
+  const fresh = new HomeModel(); fresh.update(data); fresh.goTo('muse');
+  assert.equal(fresh.setMuse({ question: 'q', reply: 'FROM RELAY' }), true);
+  assert.match(fresh.render(NOW), /Muse: FROM RELAY/);
+  assert.equal(fresh.setMuse(null), true);
+});
+
+test('pollMuseJob gives up by the wall clock (150 s from the ask), not by the poll count: slow reads end it early', async () => {
+  let t = 0;
+  let reads = 0;
+  const finished = await pollMuseJob(
+    async () => { reads++; t += 8000; return { status: 'sending', question: 'q', reply: '' }; }, // each read takes 8 s
+    async () => { t += 700; },
+    () => {}, 215, { at: 150_000, now: () => t },
+  );
+  assert.equal(finished, false);
+  assert.ok(t >= 150_000 && t < 150_000 + 9000, `stopped at ${t} ms`);
+  assert.ok(reads < 20, `${reads} reads, not 215`);
+  // a final answer that arrives with the last read still counts
+  t = 149_000;
+  assert.equal(await pollMuseJob(async () => { t += 2000; return { status: 'done', question: 'q', reply: 'r' }; }, async () => {}, () => {}, 215, { at: 150_000, now: () => t }), true);
+});
