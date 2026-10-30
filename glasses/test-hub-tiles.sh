@@ -398,6 +398,9 @@ a, b = json.loads(sys.argv[1])['pages'], json.loads(sys.argv[2])['pages']
 diff = [(i, k) for i in range(len(a)) for k in ('left', 'right') if a[i][k] != b[i][k]]
 sys.exit(0 if diff == [(1, 'right')] or (diff == [] and a[1]['right'] == 'orchestrator') else 1)
 PY
+if /bin/bash -n "$ST" && /bin/bash -n "$here/test-hub-tiles.sh"; then ok "set-tile.sh passes /bin/bash -n"; else bad "bash -n"; fi
+if ! grep -qE 'Bearer \$token"? *[^ ]*(curl|$)' <(grep curl "$ST" | grep -v '^#'); then ok "the token is not on a curl command line (header file)"; else bad "token on a curl command line"; fi
+if [ ! -e "$here/set-tile.py" ] || ! grep -q '<<' "$ST"; then ok "no heredocs in set-tile.sh (python lives in set-tile.py)"; else bad "heredoc in set-tile.sh"; fi
 if "$ST" "$HUB" 9 right x >/dev/null 2>&1 </dev/null; then bad "page 9 should fail"; else ok "a page that does not exist is refused"; fi
 req PUT "$HUB" /api/layout "$BEFORE_LAYOUT"
 
