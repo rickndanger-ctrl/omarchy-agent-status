@@ -171,7 +171,8 @@ export function findSession(data: HomeData | null, ref: string, now: number): { 
   const slash = ref.indexOf('/');
   const machine = ref.slice(0, slash);
   const name = ref.slice(slash + 1).toLowerCase();
-  const onMachine = data.sessions.filter(s => s.machine === machine);
+  // The orchestrator is only ever found by its exact ref (or its own tile), never as "the Claude on this computer".
+  const onMachine = data.sessions.filter(s => s.machine === machine && s.pane !== 'orchestrator');
   const byName = onMachine.filter(s => s.agent.toLowerCase() === name || s.name.toLowerCase() === name);
   if (byName.length || AGENT_KINDS.includes(name)) {
     const rank = (s: Session) => (s.pane ? 0 : s.window ? 1 : s.appThread ? 2 : 3);

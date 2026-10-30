@@ -1,6 +1,7 @@
 // Pinned agents on Home: rows from the same sessions the Agents page uses, the full-screen terminal view, and Quiet mode.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { findSession } from '../src/tiles.ts';
 import { HomeModel, WIDTH, type HomeData, type Pin, type Session } from '../src/model.ts';
 
 const NOW = Date.UTC(2026, 9, 26, 18, 42);
@@ -234,4 +235,27 @@ test('orchestrator pin: laptop down says laptop offline; laptop up without the s
   assert.match(none.render(NOW), /· Claude · Orchestrator · not running/);
   assert.equal(off.input('select', NOW), null);
   assert.equal(off.screenKind, 'home');
+});
+
+test('the Dell window pin and the Tiles Claude (Dell) tile pick the window, never the orchestrator that shares machine Dell + claude', () => {
+  const win = sess('Dell', 'claude', 'idle', { session: 'dellwin', page: 'window', pane: undefined, window: '0xabc', tmux: undefined, at: NOW / 1000 - 600 });
+  const tm = sess('Dell', 'claude', 'idle', { session: 'delltmux', page: 'tmux', pane: '%9', tmux: 'other', at: NOW / 1000 - 300 });
+  const orch = sess('Dell', 'claude', 'working', { name: 'Orchestrator', session: 'orchestrator', page: 'Orchestrator', pane: 'orchestrator', tmux: 'orchestrator', at: NOW / 1000 });
+  const d = data({ pinned: [PINS[6]], sessions: [win, tm, orch], machines: [{ name: 'Dell', online: true }] });
+  const m = new HomeModel();
+  m.update(d);
+  assert.equal(m.pinSession(PINS[6])?.session, 'delltmux', 'the tile pin = what the tile follows: a pane before a window, never the orchestrator');
+  const found = findSession(d, 'Dell/claude', NOW);
+  assert.notEqual(found.session?.pane, 'orchestrator');
+  assert.equal(found.session?.session, 'delltmux');
+  const onlyWin = findSession({ ...d, sessions: [win, orch] }, 'Dell/claude', NOW);
+  assert.equal(onlyWin.session?.session, 'dellwin', 'window + orchestrator: the window');
+  assert.equal(findSession({ ...d, sessions: [orch] }, 'Dell/claude', NOW).session, undefined, 'only the orchestrator: no Claude window');
+  // the exact ref still finds it, and so does its own pin
+  assert.equal(findSession(d, 'Dell/orchestrator', NOW).session?.pane, 'orchestrator');
+  const op = new HomeModel();
+  op.update({ ...d, pinned: [{ label: 'o', machine: 'Dell', agent: 'claude', session: 'orchestrator' }] });
+  assert.equal(op.pinSession({ label: 'o', machine: 'Dell', agent: 'claude', session: 'orchestrator' })?.pane, 'orchestrator');
+  // a fallback for a gone pinned ref does not land on it either
+  assert.notEqual(findSession({ ...d, sessions: [orch, tm] }, 'Dell/gone-pane', NOW).session?.pane, 'orchestrator');
 });
