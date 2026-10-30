@@ -365,3 +365,12 @@ test('ShownWatch: only the exact expected text, once', () => {
   assert.equal(w.drawn('Muse: Yes, I can hear you', 400), 300);
   assert.equal(w.drawn('Muse: Yes, I can hear you', 500), null);
 });
+
+test('ShownWatch.expectOnScreen: not armed when Muse is not the painted screen (muse.shown is never logged for another screen)', () => {
+  const w = new ShownWatch();
+  assert.equal(w.expectOnScreen(false, 'Home text', 100), false);
+  assert.equal(w.drawn('Home text', 300), null, 'a frame of the other screen is not "the Muse reply"');
+  assert.equal(w.expectOnScreen(true, null, 100), false, 'tiles or no single frame: nothing to wait for');
+  assert.equal(w.expectOnScreen(true, 'Muse: hi', 100), true);
+  assert.equal(w.drawn('Muse: hi', 250), 150);
+});

@@ -773,11 +773,10 @@ async function run(action: Action): Promise<void> {
             urgentPaint = true;
             try { paint(); } finally { urgentPaint = false; }
             const wanted = glasses.wantedText();
-            if (wanted !== null) {
-              museShown.expect(wanted, askedAt);
-              // Already on the glasses (nothing changed and no older write in flight)? Then it is shown now.
-              if (glasses.upToDate()) { const ms = museShown.drawn(wanted, Date.now()); if (ms !== null) diag('muse.shown', ms); }
-            }
+            // Only when the Muse screen is what was painted: the owner may have gone elsewhere (another screen, Tiles, the Desk, display off).
+            if (!museShown.expectOnScreen(!blank && !showingDesk() && !showingTiles() && model.screenKind === 'muse', wanted, askedAt)) diag('muse.shown', 'not on screen');
+            // Already on the glasses (nothing changed and no older write in flight)? Then it is shown now.
+            else if (glasses.upToDate()) { const ms = museShown.drawn(wanted!, Date.now()); if (ms !== null) diag('muse.shown', ms); }
           } else paint();
         }
         if (finished) {
