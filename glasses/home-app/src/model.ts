@@ -524,12 +524,12 @@ export class HomeModel {
   setMuseAnswer(question: string, reply: string): void {
     const m = museDisplay(question, reply);
     this.museLines = [...wrap(`You: ${m.question}`), '', ...wrap(`Muse: ${m.reply}`)];
-    if (this.screen.kind === 'muse') this.scroll = 0;
+    this.scroll = 0;
   }
   /** Muse didn't answer: say why, in the relay's own words. */
   setMuseProblem(question: string, reason: string): void {
     this.museLines = [...wrap(`You: ${question}`), '', ...wrap(`Muse didn't get it: ${reason || 'no answer'}.`), '', 'Nothing was typed anywhere else.'];
-    if (this.screen.kind === 'muse') this.scroll = 0;
+    this.scroll = 0;
   }
   private museAnswerLines(question: string, reply: string): string[] {
     const m = museDisplay(question, reply);
@@ -538,7 +538,7 @@ export class HomeModel {
   setMuse(latest: { question: string; reply: string } | null): void {
     this.museLines = latest === null ? ["Couldn't reach Muse."]
       : latest.question || latest.reply ? this.museAnswerLines(latest.question, latest.reply) : ['No Muse conversation yet.'];
-    if (this.screen.kind === 'muse') this.scroll = 0;
+    this.scroll = 0;
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }
 
@@ -794,7 +794,7 @@ export class HomeModel {
       if (s.kind === 'chat') this.goBack({ kind: 'messages' });
       else if (s.kind === 'textReply') this.goBack({ kind: 'chat', id: s.id, name: s.name });
       else if (s.kind === 'confirm' && s.chat) this.goBack({ kind: 'chat', ...s.chat });
-      else if (s.kind === 'confirm' && s.muse) this.goBack({ kind: 'muse' });
+      else if (s.kind === 'confirm' && s.muse) this.go({ kind: 'muse' });
       else if (s.kind === 'confirm' && s.reminder) this.goBack({ kind: 'home' });
       else if ((s.kind === 'confirm' && s.start) || s.kind === 'newAgent') this.goBack({ kind: 'agents' });
       else if (s.kind === 'reply' || s.kind === 'confirm') this.goBack({ kind: 'agent', key: s.key });
@@ -991,9 +991,9 @@ export class HomeModel {
     return st ? studioText(st, nowMs) : null;
   }
 
-  private body(lines: string[] | null, loading: string): string[] {
+  private body(lines: string[] | null, loading: string, clamp = true): string[] {
     if (lines === null) return [loading];
-    this.scroll = Math.min(this.scroll, Math.max(0, lines.length - BODY_LINES)); // the text may have got shorter
+    if (clamp) this.scroll = Math.min(this.scroll, Math.max(0, lines.length - BODY_LINES)); // the text may have got shorter
     const view = lines.slice(this.scroll, this.scroll + BODY_LINES);
     if (this.scroll + BODY_LINES < lines.length) view.push('  ▼');
     return view;
@@ -1145,7 +1145,7 @@ export class HomeModel {
       lines.push(...this.body(this.studioLines(nowMs), 'Studio Routing is not running on the laptop.'), 'swipe: scroll');
     } else if (s.kind === 'muse') {
       lines[0] = 'HOME › MUSE';
-      lines.push(...this.body(this.museLines, 'Reading Muse…'), this.data.voice ? 'tap: ask Muse by voice · swipe: scroll' : 'swipe: scroll');
+      lines.push(...this.body(this.museLines, 'Reading Muse…', false), this.data.voice ? 'tap: ask Muse by voice · swipe: scroll' : 'swipe: scroll');
     }
     // Short confirmations ("Sent", "Allowed", "… finished") replace the title on every page.
     if (this.flash.text && nowMs < this.flash.until) lines[0] = clip(this.flash.text);

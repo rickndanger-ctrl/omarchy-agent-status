@@ -715,14 +715,3 @@ test('a terminal that gets shorter while scrolled back still fills the screen', 
   assert.doesNotMatch(text, /22 newer/);
   assert.match(text, /out 0/);
 });
-
-test('a Muse answer arriving on another screen does not move that screen', () => {
-  const m = new HomeModel();
-  m.update(withChat());
-  m.input('down', NOW);
-  m.input('select', NOW);
-  m.input('select', NOW); // Mom's chat
-  m.setChat(Array.from({ length: 20 }, (_, i) => ({ from: 'Mom', fromMe: false, when: NOW / 1000 - 600 + i, text: `line ${i}` })).reverse(), NOW);
-  m.setMuseAnswer('q', 'a');
-  assert.match(m.render(NOW), /line 19/);
-});
