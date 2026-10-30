@@ -53,6 +53,9 @@ const CONTAINER_NAME = 'home-main';
 // Tiles mode: two text containers side by side, 288 px each (27 characters, 9 lines).
 const TILE_IDS = { left: 2, right: 3 } as const;
 const TILE_NAMES = { left: 'tile-left', right: 'tile-right' } as const;
+export const OUTLINE_FULL = 15; // the lit tile's border: the brightest grey level
+export const OUTLINE_MIN = 1;
+export const DEFAULT_OUTLINE = 4; // faint but visible; the phone slider moves it
 const TILE_W = 288;
 /** What the glasses should show: one full-screen text block, or two tiles. `key` is page + focus: a change rebuilds the page. */
 type Frame = { kind: 'single'; text: string } | { kind: 'tiles'; key: string; focus: TilesFrame['focus']; left: string; right: string };
@@ -110,6 +113,8 @@ export class Glasses {
   private deviceTimer: ReturnType<typeof setInterval> | undefined;
   /** Text brightness 0..4 (SDK range). Unfocused tiles are one step dimmer. */
   private brightness = MAX_TEXT_BRIGHTNESS;
+  /** The faint outline of an unlit tile (0..15 grey levels). The SDK offers no way to change a border without rebuilding the page. */
+  private outline = DEFAULT_OUTLINE;
   private settleWaiters = new SettleWaiters();
   /** Microphone on/off run one after another, so a stop can never overtake a start. */
   private micChain = new Serial();
@@ -122,6 +127,13 @@ export class Glasses {
   setBrightness(value: number): void {
     this.brightness = Math.min(MAX_TEXT_BRIGHTNESS, Math.max(MIN_TEXT_BRIGHTNESS, Math.round(value)));
     this.shown = null; // a brightness change needs the page rebuilt
+    this.scheduleRender();
+  }
+
+  /** Tile outline brightness (phone slider); the page is rebuilt to draw it. */
+  setOutline(level: number): void {
+    this.outline = Math.min(OUTLINE_FULL, Math.max(OUTLINE_MIN, Math.round(level)));
+    this.shown = null;
     this.scheduleRender();
   }
 
@@ -180,13 +192,14 @@ export class Glasses {
         containerID: CONTAINER_ID, containerName: CONTAINER_NAME, isEventCapture: 1, content: frame.text, textColor: this.brightness,
       })];
     }
-    // At page level no tile is lit: the left one catches the gestures, with no border on either.
-    // Choosing a tile draws a thin border, being inside it a thick one.
+    // Both tiles always have an outline, at the faint level (phone slider); the lit one is full brightness: thin while choosing, thick inside it.
+    // At page level no tile is lit: the left one catches the gestures, and both outlines are faint.
     const owner = frame.focus.endsWith('right') ? 'right' : 'left';
-    const border = (side: 'left' | 'right') => (frame.focus === side ? 2 : frame.focus === `choose-${side}` ? 1 : 0);
+    const lit = (side: 'left' | 'right') => frame.focus === side || frame.focus === `choose-${side}`;
+    const border = (side: 'left' | 'right') => (frame.focus === side ? 2 : 1);
     return (['left', 'right'] as const).map(side => new TextContainerProperty({
       xPosition: side === 'left' ? 0 : TILE_W, yPosition: 0, width: TILE_W, height: 288,
-      borderWidth: border(side), borderColor: 13, borderRadius: 4, paddingLength: 4,
+      borderWidth: border(side), borderColor: lit(side) ? OUTLINE_FULL : this.outline, borderRadius: 4, paddingLength: 4,
       containerID: TILE_IDS[side], containerName: TILE_NAMES[side], isEventCapture: side === owner ? 1 : 0, content: frame[side],
       // Where you are is the bright one; the other tile is a step dimmer (at page level both are bright).
       textColor: frame.focus === 'page' || frame.focus.endsWith(side) ? this.brightness : Math.max(MIN_TEXT_BRIGHTNESS, this.brightness - 1),

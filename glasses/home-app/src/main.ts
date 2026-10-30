@@ -1,5 +1,5 @@
 import './style.css';
-import { Glasses } from './glasses';
+import { Glasses, DEFAULT_OUTLINE } from './glasses';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
 import { HubPicker } from './hubpick';
 import { LayoutLoader } from './layoutcache';
@@ -56,6 +56,7 @@ const remote = new RemoteInput({
   apply: input => (input === 'settings' ? inputQueue.pushMenu(INTERNAL_MENU.settings, 'remote') : handle(input, 'remote')),
 });
 
+function savedOutline(): number { const n = Number(store.get('home.outline')); return n >= 1 && n <= 15 ? Math.round(n) : DEFAULT_OUTLINE; }
 function savedBrightness(): number { const n = Number(store.get('home.brightness')); return n >= 1 && n <= 4 ? Math.round(n) : 4; }
 const model = new HomeModel();
 model.hideDone = store.get('home.hideDone') === '1';
@@ -149,6 +150,7 @@ $('app').innerHTML = `
   <label class="row"><input type="checkbox" id="desk-swap"> Desk: swap axes</label>
   <label class="row"><input type="checkbox" id="desk-invx"> Desk: invert X</label>
   <label class="row"><input type="checkbox" id="desk-invy"> Desk: invert Y</label>
+  <label class="row">Tile outline brightness <input type="range" id="outline" min="1" max="15" step="1"> <span id="outline-val"></span></label>
   <label class="row"><input type="checkbox" id="quiet"> Quiet mode: pop-ups only for pinned agents</label>
   <details class="row"><summary>Pinned agents</summary>
     <textarea id="pinned-text" rows="8" spellcheck="false" placeholder="label | computer | agent | session"></textarea>
@@ -396,6 +398,11 @@ for (const [id, key] of [['desk-swap', 'home.deskSwap'], ['desk-invx', 'home.des
   $<HTMLInputElement>(id).checked = store.get(key) === '1';
   $<HTMLInputElement>(id).onchange = () => { store.set(key, $<HTMLInputElement>(id).checked ? '1' : '0'); desk?.setPointerOptions(deskOptions()); diag('desk.options', JSON.stringify(deskOptions())); };
 }
+const outlineInput = $<HTMLInputElement>('outline');
+outlineInput.value = String(savedOutline());
+$('outline-val').textContent = outlineInput.value;
+glasses.setOutline(Number(outlineInput.value));
+outlineInput.oninput = () => { store.set('home.outline', outlineInput.value); $('outline-val').textContent = outlineInput.value; glasses.setOutline(Number(outlineInput.value)); diag('outline', outlineInput.value); };
 $<HTMLInputElement>('quiet').checked = model.quiet;
 $<HTMLInputElement>('quiet').onchange = () => { model.quiet = $<HTMLInputElement>('quiet').checked; store.set('home.quiet', model.quiet ? '1' : '0'); diag('quiet', model.quiet ? 'on' : 'off'); };
 /** The pinned list: one pin per line, "label | computer | agent | session". The hub stores it; Home's rows come from the sessions. */
