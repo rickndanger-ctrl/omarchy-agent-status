@@ -44,7 +44,7 @@ export type Action =
   | { kind: 'stopMic' }
   | { kind: 'cancelMic' }
   | { kind: 'sendText'; chat: number; name: string; text: string }
-  | { kind: 'askMuse'; text: string; ask?: number }
+  | { kind: 'askMuse'; text: string; ask?: number; fromTile?: true }
   | { kind: 'loadFolders'; machine: string }
   | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string }
   | { kind: 'openTiles' }
@@ -72,8 +72,8 @@ type Screen =
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
   | { kind: 'reply'; key: string }
-  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef }
-  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef }
+  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef; tile?: true }
+  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef; tile?: true }
   | { kind: 'newAgent'; machine: string; agent?: string; folders?: string[] | null }
   | { kind: 'textReply'; id: number; name: string }
   | { kind: 'alert'; alert: Alert };
@@ -464,7 +464,7 @@ export class HomeModel {
       return;
     }
     if (s.kind !== 'listen') return;
-    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.reminder ? { reminder: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
+    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.tile ? { tile: true as const } : {}), ...(s.reminder ? { reminder: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
     else {
       this.showFlash(text === null ? 'Voice failed. Try again' : "Didn't catch that", nowMs);
       this.go(s.reminder ? { kind: 'home' } : s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key });
@@ -493,7 +493,7 @@ export class HomeModel {
     }
     if (target.kind === 'muse') {
       this.museLines = null;
-      if (target.then === 'listen' && this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, muse: true }); return { kind: 'startMic' }; }
+      if (target.then === 'listen' && this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, muse: true, ...(target.fromTile ? { tile: true as const } : {}) }); return { kind: 'startMic' }; }
       this.go({ kind: 'muse' });
       return { kind: 'loadMuse' };
     }
@@ -955,10 +955,10 @@ export class HomeModel {
     }
     if (s.kind === 'confirm' && s.muse && input === 'select') {
       const choice = CONFIRM_CHOICES[this.cursor];
-      if (choice === 'Talk again') { this.go({ kind: 'listen', key: '', thinking: false, muse: true }); return { kind: 'startMic' }; }
+      if (choice === 'Talk again') { this.go({ kind: 'listen', key: '', thinking: false, muse: true, ...(s.tile ? { tile: true as const } : {}) }); return { kind: 'startMic' }; }
       this.go({ kind: 'muse' });
       if (choice !== 'Send') return null;
-      return { kind: 'askMuse', text: s.text, ask: this.beginMuseAsk(s.text) };
+      return { kind: 'askMuse', text: s.text, ask: this.beginMuseAsk(s.text), ...(s.tile ? { fromTile: true as const } : {}) };
     }
     if (s.kind === 'newAgent' && input === 'select') {
       if (!s.agent) {

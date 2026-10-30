@@ -130,3 +130,8 @@ export function runSettingsAction(h: SettingsHost, action: NonNullable<ReturnTyp
     default: return { handled: false };
   }
 }
+
+/** The phone remote's volume-up ("settings") is ignored while you are reading or talking to Muse: scrolling must never open Quick settings over it. */
+export function remoteSettingsIgnored(screen: string): boolean {
+  return screen === 'muse' || screen === 'listen' || screen === 'confirm';
+}

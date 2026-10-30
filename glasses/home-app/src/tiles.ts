@@ -84,7 +84,7 @@ export type TileNeed =
 export type OpenTarget =
   | { kind: 'agent'; key: string; then?: 'listen' | 'reply' }
   | { kind: 'chat'; id: number; name: string; then?: 'listen' | 'textReply' }
-  | { kind: 'muse'; then?: 'listen' }
+  | { kind: 'muse'; then?: 'listen'; fromTile?: true }
   | { kind: 'messages' } | { kind: 'needs' } | { kind: 'studio' } | { kind: 'home' }
   | { kind: 'reminderAdd' };
 
@@ -259,7 +259,7 @@ function museWidget(): Widget {
     actions: ctx => [...(ctx.muse() === MUSE_UNREACHABLE ? [{ id: 'retry', label: 'Retry' }] : []), { id: 'ask', label: 'Ask Muse' }],
     act: actionId => {
       if (actionId === 'retry') return { kind: 'action', action: { kind: 'loadMuse' } };
-      if (actionId === 'ask') return { kind: 'open', target: { kind: 'muse', then: 'listen' } };
+      if (actionId === 'ask') return { kind: 'open', target: { kind: 'muse', then: 'listen', fromTile: true } };
       return actionId === FULL ? { kind: 'open', target: { kind: 'muse' } } : null;
     },
     needs: () => [{ kind: 'muse' }],

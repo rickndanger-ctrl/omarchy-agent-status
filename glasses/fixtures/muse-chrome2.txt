@@ -1,0 +1,11 @@
+Got it — test received.
+Status
+Approvals history
+Fill saved credentials in Browser
+The agent wants to sign in to [site] using your saved login de…
+Allowed once · 2h ago
+Share a one-time code in Browser
+The agent will see your one-time code…
+Allowed once · 19h ago
+Allow access to [site]
+Allow this browser task to access this sensitive site…

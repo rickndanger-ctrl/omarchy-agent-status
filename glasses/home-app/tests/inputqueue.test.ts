@@ -384,3 +384,29 @@ test('(9) the log says what really happened: shown, settle-capped or not-visible
     assert.equal(r.log[1], `${word} agents`);
   }
 });
+test('diag: every press is logged as input.queued when it arrives, and one that has the queue\'s turn for too long is reported as input.stuck', async () => {
+  const log: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(r => { release = r; });
+  const q = new InputQueue({
+    apply: () => {}, menu: () => {}, foreground: () => true, generation: () => 0, screen: () => 'tiles',
+    settled: () => gate.then(() => 'rendered' as SettleResult), // the glasses never confirm the frame
+    log: () => {}, trace: (n, d) => log.push(`${n} ${d}`),
+  }, undefined, undefined, undefined, 60);
+  q.push('select', 'touch');
+  q.push('down', 'remote');
+  q.pushMenu(3, 'touch');
+  assert.deepEqual(log.filter(l => l.startsWith('input.queued')), ['input.queued select from touch', 'input.queued down from remote (0 waiting)', 'input.queued menu 3 from touch']);
+  await new Promise(r => setTimeout(r, 200));
+  const stuck = log.filter(l => l.startsWith('input.stuck'));
+  assert.equal(stuck.length, 1, log.join(' | '));
+  assert.match(stuck[0], /input\.stuck \d+ ms on select from touch \(2 waiting\)/);
+  release();
+  await new Promise(r => setTimeout(r, 50));
+  // a press that is handled in time never reports stuck
+  const log2: string[] = [];
+  const ok = new InputQueue({ apply: () => {}, menu: () => {}, foreground: () => true, generation: () => 0, screen: () => 'tiles', settled: async () => 'rendered' as SettleResult, log: () => {}, trace: (n, d) => log2.push(`${n} ${d}`) }, undefined, undefined, undefined, 60);
+  ok.push('select', 'touch');
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(log2.filter(l => l.startsWith('input.stuck')).length, 0);
+});

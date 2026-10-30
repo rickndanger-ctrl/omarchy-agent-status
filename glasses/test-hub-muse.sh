@@ -20,6 +20,11 @@ bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
 
 printf '%s\n' "$TOKEN" > "$work/hud.token"
 cp "$here/fixtures/muse-polluted.txt" "$work/polluted.txt"
+cp "$here/fixtures/muse-chrome2.txt" "$work/chrome2.txt"
+printf 'Got it — test received.\nStatus\nApprovals history\n' > "$work/chrome2partial.txt"
+printf 'Try these:\nAllow access to [site]\n' > "$work/errlabel.txt"
+printf 'The build is green.\nStatus\n' > "$work/statusalone.txt"
+printf 'Approvals history\nAllowed once · 2h ago\n' > "$work/onlychrome.txt"
 printf 'Your calendar is clear today.\nMy plan: Muse is a good name for it.\nDone.\n' > "$work/clean.txt"
 printf 'Approvals history shows two pending requests.\nAllow access to your calendar only after you review it.\nPlace this order? No, compare prices first.\n' > "$work/sentences.txt"
 printf 'Approvals history\nNo approvals are pending.\n' > "$work/heading.txt"
@@ -34,6 +39,13 @@ http.createServer((req, res) => {
   if (req.url === '/latest') return send({ question: 'Can you hear me?', reply: read('polluted') })
   if (req.url === '/reply/polluted') return send({ status: 'done', question: 'Can you hear me?', reply: read('polluted') })
   if (req.url === '/reply/clean') return send({ status: 'done', question: 'q', reply: read('clean') })
+  if (req.url === '/reply/chrome2') return send({ status: 'done', question: 'q', reply: read('chrome2') })
+  if (req.url === '/reply/chrome2partial') return send({ status: 'sending', question: 'q', reply: read('chrome2partial') })
+  if (req.url === '/reply/errlabel') return send({ status: 'error', question: 'q', reply: read('errlabel'), error: 'Command failed: x' })
+  if (req.url === '/reply/timeoutlabel') return send({ status: 'timeout', question: 'q', reply: read('errlabel'), error: '' })
+  if (req.url === '/reply/runninglabel') return send({ status: 'running', question: 'q', reply: read('errlabel') })
+  if (req.url === '/reply/statusalone') return send({ status: 'done', question: 'q', reply: read('statusalone') })
+  if (req.url === '/reply/onlychrome') return send({ status: 'done', question: 'q', reply: read('onlychrome') })
   if (req.url === '/reply/sentences') return send({ status: 'done', question: 'q', reply: read('sentences') })
   if (req.url === '/reply/heading') return send({ status: 'done', question: 'q', reply: read('heading') })
   if (req.url === '/reply/midline') return send({ status: 'done', question: 'q', reply: read('midline') })
@@ -67,9 +79,24 @@ get "/api/muse/reply?id=0-sentences"
 check "real sentences that start like chrome (Allow access to… / Place this order? No…) are kept" "d['reply']=='Approvals history shows two pending requests.\nAllow access to your calendar only after you review it.\nPlace this order? No, compare prices first.\n'"
 get "/api/muse/reply?id=0-heading"
 check "a lone 'Approvals history' line followed by prose is kept (no chrome context)" "d['reply']=='Approvals history\nNo approvals are pending.\n'"
+get "/api/muse/reply?id=0-chrome2"
+check "chrome variant 2 (Status / Approvals history / Fill saved credentials / Allowed once · …): the answer only" "d['reply']=='Got it — test received.'"
+get "/api/muse/reply?id=0-chrome2partial"
+check "the same in a PARTIAL reply (status sending, chrome just started)" "d['status']=='sending' and d['reply']=='Got it — test received.'"
+get "/api/muse/reply?id=0-errlabel"
+check "(1) a terminal status (error) uses the FINAL rule: a real answer with one label line is kept" "d['status']=='error' and d['reply']=='Try these:\nAllow access to [site]\n'"
+get "/api/muse/reply?id=0-timeoutlabel"
+check "(1) timeout uses the final rule too" "d['status']=='timeout' and d['reply']=='Try these:\nAllow access to [site]\n'"
+get "/api/muse/reply?id=0-runninglabel"
+check "(1) while running the partial rule hides it" "d['status']=='running' and d['reply']=='Try these:'"
+get "/api/muse/reply?id=0-statusalone"
+check "an answer followed by 'Status' alone is kept (no anchor)" "d['reply']=='The build is green.\nStatus\n'"
+grep -q '^muse.trimmed [0-9]* chars at Approvals history$' "$work/hub.log" && ok "logged with the anchor: $(grep -m1 'at Approvals history' "$work/hub.log")" || bad "anchor not in the log: $(grep muse.trimmed "$work/hub.log" | head -3)"
+get "/api/muse/reply?id=0-onlychrome"
+check "a final reply that was only window chrome becomes the note, never the chrome" "d['reply']=='Muse sent no text' and 'Approvals' not in json.dumps(d)"
 get "/api/muse/reply?id=0-sending"
 check "a reply still being typed passes through" "d['status']=='sending' and d['reply']==''"
-if grep -qE '^muse\.trimmed [0-9]+ chars$' "$work/hub.log"; then ok "the trim is logged: $(grep -m1 '^muse.trimmed' "$work/hub.log")"; else bad "muse.trimmed not logged"; fi
-n=$(grep -c '^muse.trimmed' "$work/hub.log"); if [ "$n" -le 2 ]; then ok "logged once per reply, not per poll ($n lines)"; else bad "log spam: $n lines"; fi
+if grep -qE '^muse\.trimmed [0-9]+ chars at ' "$work/hub.log"; then ok "the trim is logged: $(grep -m1 '^muse.trimmed' "$work/hub.log")"; else bad "muse.trimmed not logged"; fi
+n=$(grep -c '^muse.trimmed 181 chars' "$work/hub.log"); if [ "$n" -le 2 ]; then ok "logged once per reply, not per poll ($n lines)"; else bad "log spam: $n lines"; fi
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

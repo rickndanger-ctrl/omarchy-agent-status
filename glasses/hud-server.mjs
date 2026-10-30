@@ -783,11 +783,11 @@ async function studioSummary() {
 // whose text box is ready. Returns {id, muse} or null.
 // Every reply taken from a relay goes through this before it is served: the answer only, the cut logged once per reply.
 const museTrimLogged = new Set()
-function museReply(raw, id) {
-  const { text, trimmed } = sanitizeMuseReply(raw)
+function museReply(raw, id, partial = false) {
+  const { text, trimmed, anchor } = sanitizeMuseReply(raw, { partial })
   if (trimmed > 0) {
     const key = `${id}:${trimmed}`
-    if (!museTrimLogged.has(key)) { museTrimLogged.add(key); if (museTrimLogged.size > 200) museTrimLogged.clear(); console.log(`muse.trimmed ${trimmed} chars`) }
+    if (!museTrimLogged.has(key)) { museTrimLogged.add(key); if (museTrimLogged.size > 200) museTrimLogged.clear(); console.log(`muse.trimmed ${trimmed} chars at ${anchor}`) }
   }
   return text
 }
@@ -1903,7 +1903,7 @@ async function handle(req, res) {
           return send(res, 200, { status: 'sending', question: clip(r.question, 300), reply: '', error: '' })
         }
       }
-      return send(res, 200, { status: String(r.status ?? ''), question: clip(r.question, 300), reply: museReply(r.reply, id).slice(0, 2000), error: clip(r.error, 120) })
+      return send(res, 200, { status: String(r.status ?? ''), question: clip(r.question, 300), reply: museReply(r.reply, id, !['done', 'error', 'timeout'].includes(String(r.status))).slice(0, 2000), error: clip(r.error, 120) })
     }
     if (req.method === 'GET' && p === '/api/muse') {
       if (DEMO) return send(res, 200, { question: 'What is on my calendar today?', reply: 'You have a dentist appointment at 3 PM and dinner with Alex at 7.' })

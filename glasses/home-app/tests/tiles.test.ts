@@ -55,7 +55,7 @@ test('tile level: open the action list, run an action, back to page', () => {
   assert.match(f.left, /> Ask Muse/);
   assert.match(f.left, /Full screen/);
   assert.doesNotMatch(f.left, /Switch to other tile/);
-  assert.deepEqual(u.input('select', ctx()), { kind: 'open', target: { kind: 'muse', then: 'listen' } });
+  assert.deepEqual(u.input('select', ctx()), { kind: 'open', target: { kind: 'muse', then: 'listen', fromTile: true } });
   u.input('back', ctx()); // tile -> choose (same side)
   assert.equal(u.render(ctx()).focus, 'choose-left');
   u.input('back', ctx()); // choose -> page

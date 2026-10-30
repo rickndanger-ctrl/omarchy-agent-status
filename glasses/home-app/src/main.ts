@@ -10,7 +10,7 @@ import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
 import { TerminalCache } from './terminalcache';
 import { InputQueue, type InputSource } from './inputqueue';
-import { makeHandle, TOP_SCREENS, runConversationEffect, startConversation, openSettings, runSettingsAction } from './inputflow';
+import { remoteSettingsIgnored, makeHandle, TOP_SCREENS, runConversationEffect, startConversation, openSettings, runSettingsAction } from './inputflow';
 import { MENU, GLASSES_MENU, INTERNAL_MENU, setHideDone } from './menu';
 import { Latest } from './latest';
 import { ConversationSession, ConvHttpError, CONV_BACKENDS, asBackend, type Conversation, type ConvHub } from './conversation';
@@ -56,7 +56,12 @@ let foreground = true;
 // The phone remote: while Home is in front, one long-poll to the current hub brings the phone's buttons; each one goes through handle() like a gesture.
 const remote = new RemoteInput({
   hub: () => base, token: () => token, active: () => foreground,
-  apply: input => (input === 'settings' ? inputQueue.pushMenu(INTERNAL_MENU.settings, 'remote') : handle(input, 'remote')),
+  apply: input => {
+    if (input !== 'settings') return handle(input, 'remote');
+    const screen = showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind;
+    if (remoteSettingsIgnored(screen)) { diag('input.ignored', `settings on ${screen}`); return; }
+    inputQueue.pushMenu(INTERNAL_MENU.settings, 'remote');
+  },
 });
 
 function savedOutline(): number { const n = Number(store.get('home.outline')); return n >= 1 && n <= 15 ? Math.round(n) : DEFAULT_OUTLINE; }
@@ -607,6 +612,7 @@ function paint(): void {
   if (recording !== null && !(model.micWanted() && foreground && !showingDesk())) void run({ kind: 'cancelMic' });
   // A reminder that was added or cancelled (or whose voice failed) ends on Home: that is back in Tiles.
   if (fromTiles && model.screenKind === 'home' && (prevKind === 'listen' || prevKind === 'confirm')) fromTiles = false;
+  const enteredVoiceScreen = prevKind !== model.screenKind && ['listen', 'confirm', 'muse'].includes(model.screenKind);
   prevKind = model.screenKind;
   let preview: string;
   if (blank) {
@@ -623,6 +629,8 @@ function paint(): void {
     preview = Array.from({ length: Math.max(l.length, r.length) }, (_, i) => (l[i] ?? '').padEnd(28) + '│ ' + (r[i] ?? '')).join('\n');
   } else {
     preview = model.render(Date.now());
+    // The Muse screen and the steps into it are drawn as a full page rebuild, not a text update (updates over a page left by the microphone were not drawn).
+    if (enteredVoiceScreen || urgentPaint) glasses.forceRebuild();
     glasses.setText(preview, urgentPaint);
   }
   $('glass').textContent = preview;
@@ -760,6 +768,8 @@ async function run(action: Action): Promise<void> {
       const fresh = await api<{ messages: Parameters<HomeModel['setChat']>[0] }>(`messages?chat=${action.chat}`).catch(() => null);
       if (fresh && chatLoads.isLatest(req)) model.setChat(fresh.messages, Date.now(), action.chat);
     } else if (action.kind === 'askMuse') {
+      // Asked from the Muse TILE: back to Tiles, the answer lands in the tile (never the full-screen Muse view after it).
+      if (action.fromTile && tilesActive) { fromTiles = false; void refreshTiles(); }
       museTile.askStart(action.text);
       paint();
       const askedAt = Date.now();
@@ -892,6 +902,7 @@ const inputQueue = new InputQueue({
   cancelRemoteUp: () => { if (showingDesk()) deskArrivals.shift(); },
   settled: capMs => glasses.settled(capMs),
   log: (name, detail) => diag(name, detail),
+  trace: (name, detail) => diag(name, detail),
 });
 function handle(input: Input, source: InputSource = 'touch'): void {
   if (showingDesk()) deskArrivals.push(Date.now());
