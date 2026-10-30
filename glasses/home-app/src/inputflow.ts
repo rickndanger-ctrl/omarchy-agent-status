@@ -55,6 +55,8 @@ export function makeHandle(host: FlowHost): (input: Input) => void | Promise<voi
       // A Conversation start/stop must finish before the next press (a stop must not overtake its start).
       return result?.kind === 'conversation' ? job : undefined;
     }
+    // Muse chat: the 'back' of a quick double-press of Down, while there is more below, keeps scrolling.
+    if (input === 'back' && host.model.backIsScroll(host.now())) { host.model.input('down', host.now()); host.paint(); return; }
     if (host.inOpenedScreen() && input === 'back' && TOP_SCREENS.includes(host.model.screenKind)) {
       host.backToTiles();
       return;

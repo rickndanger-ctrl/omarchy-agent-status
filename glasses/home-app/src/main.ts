@@ -4,7 +4,7 @@ import { ShownWatch } from './shownwatch';
 import { applyMuseLatest } from './musesync';
 import { plainMuseError, pollMuseJob, MUSE_POLLS, MUSE_DEADLINE_MS, type MuseJob } from './musepoll';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
-import { HubPicker, hubsToTry } from './hubpick';
+import { HubPicker, hubsToTry, firstAnswer, NoHubAnswered } from './hubpick';
 import { LayoutLoader } from './layoutcache';
 import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
@@ -245,37 +245,36 @@ function diag(name: string, detail: string | number | boolean = ''): void {
 class HttpError extends Error {}
 
 /** Calls the current hub; if it can't be reached at all, the next hub takes over (and stays current). */
-/** The hub that answered the last successful request. */
-let answeredBy = '';
-async function api<T>(path: string, init?: RequestInit, once = false, only?: string): Promise<T> {
-  let lastError: unknown = new Error('no hub reachable');
-  for (const hub of hubsToTry(hubs(), once, only)) {
-    let res: Response;
-    try {
-      res = await fetch(new URL(`api/${path}`, hub), {
-        ...init,
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(8000),
-      });
-    } catch (error) {
-      lastError = error;
-      continue;
-    }
-    // Tailscale answers 502/503/504 itself when the hub program behind it is down (no JSON body).
-    // Home's own errors are JSON, so only the bare gateway errors count as "this hub is down".
-    if (res.status >= 502 && res.status <= 504 && !(res.headers.get('content-type') ?? '').includes('json')) {
-      lastError = new Error(`hub down (${res.status})`);
-      continue;
-    }
-    answeredBy = hub;
-    if (adopt(hub)) diag('hub.switch', new URL(hub).hostname);
-    void learnName(hub);
-    if (res.status === 401) throw new HttpError('wrong token');
-    if (!res.ok) throw new HttpError(`server said ${res.status}`);
-    return res.json() as Promise<T>;
+async function apiFrom<T>(path: string, init?: RequestInit, once = false, only?: string): Promise<{ hub: string; body: T }> {
+  try {
+    const { hub, value } = await firstAnswer<Promise<T>>(hubsToTry(hubs(), once, only), async hub => {
+      let res: Response;
+      try {
+        res = await fetch(new URL(`api/${path}`, hub), {
+          ...init,
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(8000),
+        });
+      } catch (error) {
+        return { skip: error };
+      }
+      // Tailscale answers 502/503/504 itself when the hub program behind it is down (no JSON body).
+      // Home's own errors are JSON, so only the bare gateway errors count as "this hub is down".
+      if (res.status >= 502 && res.status <= 504 && !(res.headers.get('content-type') ?? '').includes('json')) return { skip: new Error(`hub down (${res.status})`) };
+      if (adopt(hub)) diag('hub.switch', new URL(hub).hostname);
+      void learnName(hub);
+      if (res.status === 401) throw new HttpError('wrong token');
+      if (!res.ok) throw new HttpError(`server said ${res.status}`);
+      return { value: res.json() as Promise<T> };
+    });
+    return { hub, body: await value };
+  } catch (error) {
+    if (error instanceof NoHubAnswered) picker.allFailed();
+    throw error instanceof NoHubAnswered ? error.last : error;
   }
-  picker.allFailed();
-  throw lastError;
+}
+async function api<T>(path: string, init?: RequestInit, once = false, only?: string): Promise<T> {
+  return (await apiFrom<T>(path, init, once, only)).body;
 }
 
 /** The hubs say their own name in /api/health ("machine"); the clock tile shows "via <name>". Asked once per hub. */
@@ -323,8 +322,9 @@ const tileCtx = (): TileContext => ({
   now: Date.now(), battery: model.battery, hub: picker.state(), sent: pane => model.sentTo(pane, Date.now()),
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,
-  muse: () => museTile.get(),
-  museWaiting: () => museTile.isWaiting,
+  // The tile reads the same chat as the Muse screen: every reply of this session is on it. Before any ask it shows what the relay last said.
+  muse: () => model.museTileView() ?? museTile.get(),
+  museWaiting: () => model.museTileView()?.waiting ?? museTile.isWaiting,
   // For ~5 s after a voice add the Reminders tile shows "Added: <title>" at the top, from the add result (no extra fetch).
   reminders: () => (tileData.reminders && justAdded && Date.now() - justAdded.at < 5000
     ? [{ id: 'just-added', title: justAdded.title, due: null, list: '', added: justAdded.at }, ...tileData.reminders]
@@ -663,6 +663,7 @@ async function poll(): Promise<void> {
     const fresh = await api<HomeData>('home');
     homeLoaded = true;
     inputQueue.pushExternal('poll', () => { model.update(fresh); buildEditor(); paint(); });
+    startSimAsks();
     // No weather yet? Try sharing the location again (at most every 2 minutes).
     if (!fresh.weather && Date.now() - lastLocationTry > 120_000) void shareLocation();
   } catch (error) {
@@ -691,6 +692,28 @@ async function refreshTerminal(): Promise<void> {
     // The same text as last time changes nothing on the glasses: no update, no repaint.
     if (terminalCache.shouldApply(target.key, lines, model.hasTerminal(target.key))) inputQueue.pushExternal('terminal', () => { if (model.setTerminal(target.key, lines)) terminalCache.record(target.key, lines); paint(); });
   }
+}
+
+/**
+ * Simulator only: ?museasks=3 types 3 asks ("Sim question one/two/three") through the real askMuse path, one after the reply of the previous.
+ * Off without the flag.
+ */
+const SIM_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+let simAsksStarted = false;
+function startSimAsks(): void {
+  const n = (() => { try { return Math.min(9, Math.max(0, Number(new URLSearchParams(globalThis.location?.search ?? '').get('museasks')) || 0)); } catch { return 0; } })();
+  if (!n || simAsksStarted) return;
+  simAsksStarted = true;
+  void (async () => {
+    model.goTo('muse');
+    paint();
+    for (let i = 0; i < n; i++) {
+      const text = `Sim question ${SIM_WORDS[i]}`;
+      const ask = model.beginMuseAsk(text);
+      paint();
+      await run({ kind: 'askMuse', text, ask });
+    }
+  })();
 }
 
 /** Only the newest chat load / microphone start counts: an older answer arriving late is ignored. */
@@ -769,9 +792,9 @@ async function run(action: Action): Promise<void> {
       const askedAt = Date.now();
       const askKey = `${askedAt.toString(36)}-${Math.random().toString(36).slice(2, 10)}`; // the hub ignores a repeat of the same ask
       const ask = action.ask ?? model.beginMuseAsk(action.text); // the newest ask owns the Muse screen and tile (conversation asks too)
-      const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text, clientId: askKey }) }, true).catch(e => ({ error: String(e.message ?? e) }));
+      const asked: { id?: string; error?: string; hub?: string } = await apiFrom<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text, clientId: askKey }) }, true).then(r => ({ ...r.body, hub: r.hub })).catch(e => ({ error: String(e.message ?? e) }));
       if (asked.error) asked.error = plainMuseError(asked.error);
-      const acceptedBy = answeredBy; // this job lives on this hub: its polls never go to another one
+      const acceptedBy = asked.hub; // this job lives on this hub: its polls never go to another one
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
       if (!asked.id) { const newest = model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay', ask); if (newest) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); } paint(); return; }
       // Muse answers in a few seconds; long answers take longer. Check every 0.7 s for up to 2.5 minutes.

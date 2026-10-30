@@ -278,19 +278,18 @@ test('Muse: a reply tailed with relay chrome and blanks still shows the answer',
   assert.doesNotMatch(m.render(NOW), /Connected/);
 });
 
-test('Muse tile: a long reply shows its start right under the question, and swipe scrolls', () => {
+test('Muse tile: the latest reply under ONE line of the question, and swipe scrolls', () => {
   const reply = Array.from({ length: 30 }, (_, i) => `answer line ${i}`).join('\n');
   const c = ctx({ muse: () => ({ question: 'a very long question that wraps around the tile and then some more words', reply }) });
   const body = widgetFor('muse').body(c, 27);
   assert.equal(body.length > 8, true);
-  assert.ok(body[0].startsWith('You:'));
-  assert.equal(body[2], '');
-  assert.equal(body[3], 'answer line 0');
-  assert.match(body[1], /…$/);
+  assert.ok(body[0].startsWith('You:') && body[0].endsWith('…') && body[0].length <= 27, body[0]);
+  assert.equal(body[1], 'Muse: answer line 0');
+  assert.equal(body[2], 'answer line 1');
   const t = new Tiles();
   t.input('select', c); t.input('select', c);
   const frame = t.render(c).left.split('\n');
-  assert.equal(frame[4], 'answer line 0'); // title, then question, blank, answer: not scrolled to the end
+  assert.equal(frame[2], 'Muse: answer line 0'); // title, question, answer from its start
   t.input('down', c); t.input('down', c); // scroll later text
   assert.notEqual(t.render(c).left.split('\n')[1], frame[1]);
 });
@@ -299,7 +298,7 @@ test('Muse tile: shows "Muse is thinking…" while an ask is in flight', async (
   const { MuseCache } = await import('../src/musecache');
   const cache = new MuseCache();
   cache.askStart('what now?');
-  assert.deepEqual(widgetFor('muse').body(ctx({ muse: () => cache.get() }), 27), ['You: what now?', '', 'Muse is thinking…']);
+  assert.deepEqual(widgetFor('muse').body(ctx({ muse: () => cache.get() }), 27), ['You: what now?', 'Muse: Muse is thinking…']);
 });
 
 test('Muse: a fetch that started before an ask never overwrites the newer reply', async () => {

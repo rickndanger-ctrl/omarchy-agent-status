@@ -252,11 +252,10 @@ function museWidget(): Widget {
       const raw = ctx.muse();
       if (!raw) return ['Loading…'];
       if (raw === MUSE_UNREACHABLE) return ["Muse: can't reach"];
-      // The question (at most two lines), a blank, then the answer from its start; swipe scrolls on.
+      // The latest reply of this session ("Muse: …") under one line of the question; swipe scrolls on.
       const m = museDisplay(raw.question, raw.reply);
-      const q = wrap(`You: ${m.question}`, width);
-      const question = q.length > 2 ? [q[0], `${q[1].slice(0, width - 1)}…`] : q;
-      return [...question, '', ...(m.reply ? wrap(m.reply, width) : [ctx.museWaiting?.() ? 'Muse is busy, waiting…' : 'Muse is thinking…'])];
+      const question = m.question ? [clip(`You: ${m.question}`, width)] : [];
+      return [...question, ...wrap(`Muse: ${m.reply || (ctx.museWaiting?.() ? 'Muse is busy, waiting…' : 'Muse is thinking…')}`, width)];
     },
     actions: ctx => [...(ctx.muse() === MUSE_UNREACHABLE ? [{ id: 'retry', label: 'Retry' }] : []), { id: 'ask', label: 'Ask Muse' }],
     act: actionId => {

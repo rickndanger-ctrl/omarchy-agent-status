@@ -67,3 +67,20 @@ export function hubsToTry<T>(hubs: T[], once: boolean, only?: T): T[] {
   if (only !== undefined) return [only]; // a job's polls stay on the hub that accepted it
   return once ? hubs.slice(0, 1) : hubs;
 }
+
+export class NoHubAnswered extends Error {
+  constructor(readonly last: unknown) { super('no hub reachable'); }
+}
+/**
+ * Tries the hubs in order; the first that answers wins and the result carries THAT hub with it (no shared "last hub" variable that an
+ * overlapping request could overwrite). `attempt` returns { skip: why } to go on to the next hub, { value } to stop, or throws to stop with an error.
+ */
+export async function firstAnswer<V>(hubs: string[], attempt: (hub: string) => Promise<{ skip: unknown } | { value: V }>): Promise<{ hub: string; value: V }> {
+  let last: unknown = new Error('no hub reachable');
+  for (const hub of hubs) {
+    const r = await attempt(hub);
+    if ('skip' in r) { last = r.skip; continue; }
+    return { hub, value: r.value };
+  }
+  throw new NoHubAnswered(last);
+}
