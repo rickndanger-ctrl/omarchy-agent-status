@@ -279,10 +279,13 @@ export class HomeModel {
   /** Remember just the position an up gesture can change, without rewinding incoming data. */
   capturePosition(): () => void {
     const cursor = this.cursor, scroll = this.scroll, termScroll = this.termScroll;
+    // The highlighted item too: a poll between the up and the undo may have moved rows, so the item wins over the old index.
+    const row = this.data && LIST_SCREENS.includes(this.screen.kind) ? this.selectedRow() : null;
     const alertId = this.screen.kind === 'alert' ? this.screen.alert.id : null;
     const alertIndex = this.alerts.findIndex(a => a.id === alertId);
     return () => {
       this.cursor = cursor; this.scroll = scroll; this.termScroll = termScroll;
+      if (row !== null) this.followRow(row);
       // Up on an alert also moves it to the front of the pending list. Preserve new arrivals.
       if (alertId !== null) {
         const at = this.alerts.findIndex(a => a.id === alertId);

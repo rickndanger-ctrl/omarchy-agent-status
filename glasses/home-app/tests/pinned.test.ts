@@ -282,3 +282,21 @@ test('the highlight stays on a pin row when it goes offline -> live while a row 
   m2.update({ ...off, pinned: [added, ...pinsTwo] });
   assert.match(m2.render(NOW).split('\n').find(l => l.startsWith('>'))!, /Claude · Mini 2 · busy/);
 });
+
+test('remote up then Settings: a poll that inserts a row above between the two does not move the item Back returns to', () => {
+  const m = new HomeModel();
+  m.update(data());
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
+  const cur = () => m.render(NOW).split('\n').find(l => l.startsWith('>'));
+  const item = cur();
+  assert.ok(item);
+  const undo = m.capturePosition(); // the remote's up is about to move the highlight
+  m.input('up', NOW);
+  m.update(data({ pinned: [{ label: 'Codex · Neo', machine: 'Neo', agent: 'codex', session: 'g2-codex' }, ...PINS] })); // a poll adds a row above
+  undo();
+  assert.equal(cur(), item, 'the same item is highlighted after the undo');
+  m.openSettings();
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'home');
+  assert.equal(cur(), item, 'Back from Settings lands on it');
+});
