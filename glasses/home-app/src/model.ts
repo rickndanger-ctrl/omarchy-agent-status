@@ -42,7 +42,7 @@ export type Action =
   | { kind: 'continueSession'; machine: string; session: string }
   | { kind: 'startMic' }
   | { kind: 'stopMic' }
-  | { kind: 'cancelMic' }
+  | { kind: 'cancelMic'; quick?: boolean }
   | { kind: 'sendText'; chat: number; name: string; text: string }
   | { kind: 'askMuse'; text: string; ask?: number }
   | { kind: 'loadFolders'; machine: string }
@@ -101,6 +101,7 @@ export const WIDTH = 56; // characters per line; the G2 font fits ~60 narrow cha
 const MAX_LINES = 10;
 const LIST_ROWS = 7;
 const BODY_LINES = 6;
+const DOUBLE_TAP_MS = 600; // click and double-click of one double-tap arrive within this
 const TERM_LINES = 9; // the agent page is a full-screen terminal: one header line + 9 lines of tail = the 10 lines the glasses fit
 export const QUICK_TEXTS = ['On my way', "Can't talk right now", 'Call you soon', 'Sounds good', 'Yes', 'No'];
 export const QUICK_REPLIES = ['Continue', 'Yes, go ahead', 'Run the tests', 'Commit it', 'Stop (Esc)'];
@@ -617,6 +618,15 @@ export class HomeModel {
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }
 
+  private lastSelectAt = -Infinity;
+  /** The listening was left by a press at the glasses' own request (Back from listen): return to where the listening began, same as the press would. */
+  abandonListen(): boolean {
+    const s = this.screen;
+    if (s.kind !== 'listen') return false;
+    this.go(s.reminder ? { kind: 'home' } : s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key });
+    return true;
+  }
+
   /** Bumped whenever the screen is replaced (by a press, an alert or a poll): queued presses use it to notice. */
   generation = 0;
 
@@ -849,6 +859,8 @@ export class HomeModel {
   /** Apply one tap or swipe. Returns work for the network layer, if any. */
   input(input: Input, nowMs: number): Action | null {
     const s = this.screen;
+    const selectedAt = this.lastSelectAt;
+    if (input === 'select') this.lastSelectAt = nowMs;
     if (s.kind === 'alert') {
       this.alerts = this.alerts.filter(a => a.id !== s.alert.id);
       if (input === 'back' || (input === 'select' && this.cursor === 1)) { this.finish(); return null; }
@@ -862,7 +874,13 @@ export class HomeModel {
     // Double-tap out of something a pop-up opened returns to where you were.
     if (input === 'back' && this.returnTo && ['agent', 'chat'].includes(s.kind)) { this.finish(); return null; }
     if (s.kind === 'listen') {
-      if (input === 'back') { this.go(s.reminder ? { kind: 'home' } : s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key }); return { kind: 'cancelMic' }; }
+      if (input === 'back') {
+        // The glasses send a double-tap as a click and then a double-click a few hundred ms later: a Back this soon after the press
+        // that started the listening was meant as one Back from the screen before it (the caller applies that Back too).
+        const quick = nowMs - selectedAt < DOUBLE_TAP_MS;
+        this.go(s.reminder ? { kind: 'home' } : s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key });
+        return quick ? { kind: 'cancelMic', quick: true } : { kind: 'cancelMic' };
+      }
       if (input === 'select' && !s.thinking) { this.screen = { ...s, thinking: true }; return { kind: 'stopMic' }; }
       return null;
     }

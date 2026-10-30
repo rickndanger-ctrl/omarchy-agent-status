@@ -481,6 +481,7 @@ async function saveLayout(layout: Layout): Promise<void> {
 }
 
 function enterTiles(startup = false): void {
+  model.abandonListen(); // Tiles in front must not leave a listening screen (and its open microphone) behind
   museTile.resetPage();
   tilesActive = true;
   fromTiles = false;
@@ -534,6 +535,7 @@ async function openDesk(): Promise<void> {
     return;
   }
   tilesActive = false; fromTiles = false;
+  model.abandonListen();
   model.goHome();
   deskMode = 'desk'; deskApp = null; deskArrivals = [];
   paint();
@@ -719,6 +721,7 @@ async function run(action: Action): Promise<void> {
       // A start that failed late must not undo a newer recording (or a cancel) made meanwhile.
       if (!on && recordings.isLatest(id)) { recording = null; model.setTranscript(null, Date.now()); }
     } else if (action.kind === 'cancelMic') {
+      diag('mic.cancel', recording === null ? 'not recording' : `${recording.length} chunks`);
       recordings.invalidate();
       recording = null;
       await glasses.microphone(false);
