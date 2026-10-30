@@ -262,6 +262,24 @@ export class HomeModel {
   private firstUpdate = true;
   private waitingFor: { machine: string; pane: string; until: number } | null = null;
 
+  /** Remember just the position an up gesture can change, without rewinding incoming data. */
+  capturePosition(): () => void {
+    const cursor = this.cursor, scroll = this.scroll, termScroll = this.termScroll;
+    const alertId = this.screen.kind === 'alert' ? this.screen.alert.id : null;
+    const alertIndex = this.alerts.findIndex(a => a.id === alertId);
+    return () => {
+      this.cursor = cursor; this.scroll = scroll; this.termScroll = termScroll;
+      // Up on an alert also moves it to the front of the pending list. Preserve new arrivals.
+      if (alertId !== null) {
+        const at = this.alerts.findIndex(a => a.id === alertId);
+        if (at >= 0) {
+          const [alert] = this.alerts.splice(at, 1);
+          if (alertIndex >= 0) this.alerts.splice(Math.min(alertIndex, this.alerts.length), 0, alert);
+        }
+      }
+    };
+  }
+
   /** The live session a pin stands for: same computer and agent AND the same tmux session name, exactly. Never a look-alike (a voice reply must reach the pinned agent). */
   pinSession(pin: Pin): Session | undefined {
     // 'tile' (Dell: a laptop window, no tmux): the very session the Tiles 'agent:<computer>/<agent>' tile follows.

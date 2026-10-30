@@ -566,6 +566,13 @@ export class Tiles implements TilesApi {
   /** The side last highlighted on each page while Home is open; a page not visited yet starts on the left. */
   private sides: Side[] = [];
 
+  /** Remember the page, focus and scroll before a remote up. */
+  capturePosition(): () => void {
+    const page = this.page, mode = { ...this.mode }, scroll = this.scroll;
+    const sides = this.sides.slice(), edit = this.edit ? { ...this.edit } : null;
+    return () => { this.page = page; this.mode = mode; this.scroll = scroll; this.sides = sides; this.edit = edit; };
+  }
+
   getLayout(): Layout { return this.layout; }
 
   /** Start editing the current page (the long-press menu's "Edit page"). */

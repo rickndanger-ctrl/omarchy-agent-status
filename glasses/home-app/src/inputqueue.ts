@@ -4,6 +4,7 @@
 // the owner can see, and a press acts on the screen it was made on. Free of the SDK and the DOM.
 import type { Input } from './model';
 import type { SettleResult } from './settle';
+import { INTERNAL_MENU } from './menu';
 
 export type InputSource = 'touch' | 'remote';
 /** At most this many remote presses wait; touch and menu choices may queue up to MAX_TOUCH_QUEUED. When full, the new press is dropped. */
@@ -15,6 +16,7 @@ export const APPLY_WAIT_MS = 3000;
 export const EXTERNAL_WAIT_MS = 300;
 /** A waiting update goes before the next press once it has waited this long, so a steady stream of presses cannot starve it (an alert). */
 export const EXTERNAL_MAX_DEFER_MS = 1000;
+export const REMOTE_HOLD_MS = 1500;
 
 export interface QueueHost {
   /** Apply one press (the app's handle flow). May return a promise to be awaited (microphone changes). */
@@ -33,11 +35,17 @@ export interface QueueHost {
   /** Resolves when the glasses show what the model says (capped by the caller). */
   settled(capMs?: number): Promise<SettleResult>;
   log(name: string, detail: string): void;
+  /** Save the current position before a remote up; the returned function restores it. */
+  captureRemoteUp?(): () => void;
+  /** Desk up can open an app, so defer it until it cannot be part of a hold. */
+  holdRemoteUp?(): boolean;
+  cancelRemoteUp?(): void;
 }
 
+type Up = { at: number; undo?: () => void; generation?: number; cancelled?: boolean; discarded?: boolean; release?: () => void };
 type Entry =
-  | { kind: 'input'; input: Input; source: InputSource; stamp: number }
-  | { kind: 'menu'; id: number; source: InputSource }
+  | { kind: 'input'; input: Input; source: InputSource; stamp: number; up?: Up }
+  | { kind: 'menu'; id: number; source: InputSource; up?: Up }
   | { kind: 'external'; name: string; run: () => void; since: number };
 const label = (e: Entry) => (e.kind === 'input' ? `${e.input} from ${e.source}` : e.kind === 'menu' ? `menu ${e.id} from ${e.source}` : `update ${e.name}`);
 
@@ -46,6 +54,7 @@ export class InputQueue {
   private running = false;
   /** Screen changes made by our own presses; everything else counted by generation() is unsolicited. */
   private own = 0;
+  private previousUp: Up | null = null;
 
   constructor(private readonly host: QueueHost, private readonly max = MAX_QUEUED, private readonly maxTouch = MAX_TOUCH_QUEUED, private readonly applyWaitMs = APPLY_WAIT_MS) {}
 
@@ -55,12 +64,20 @@ export class InputQueue {
 
   push(input: Input, source: InputSource): void {
     if (!this.host.foreground()) { this.host.log('input.ignored', `${input} from ${source} (not in front)`); return; }
-    this.add({ kind: 'input', input, source, stamp: this.unsolicited() });
+    this.previousUp?.release?.();
+    const up = input === 'up' && source === 'remote' ? { at: Date.now() } : undefined;
+    this.previousUp = up ?? null;
+    if (!this.add({ kind: 'input', input, source, stamp: this.unsolicited(), up })) this.previousUp = null;
   }
 
   pushMenu(id: number, source: InputSource = 'touch'): void {
     if (!this.host.foreground()) { this.host.log('input.ignored', `menu ${id} (not in front)`); return; }
-    this.add({ kind: 'menu', id, source });
+    const prev = this.previousUp;
+    const up = source === 'remote' && id === INTERNAL_MENU.settings && prev && Date.now() - prev.at <= REMOTE_HOLD_MS ? prev : undefined;
+    this.previousUp = null;
+    if (up) up.cancelled = true;
+    prev?.release?.();
+    if (!this.add({ kind: 'menu', id, source, up }) && up) up.cancelled = false;
   }
 
   /**
@@ -77,6 +94,9 @@ export class InputQueue {
 
   /** Forget everything waiting (the app left the front, the glasses disconnected, nothing is visible). Updates still run. */
   clear(reason: string): void {
+    if (this.previousUp) this.previousUp.discarded = true;
+    this.previousUp?.release?.();
+    this.previousUp = null;
     const keep: Entry[] = [];
     for (const e of this.pending.splice(0)) {
       if (e.kind === 'external') keep.push(e); else this.host.log('input.cancelled', `${label(e)} (${reason})`);
@@ -84,12 +104,13 @@ export class InputQueue {
     this.pending = keep;
   }
 
-  private add(entry: Entry): void {
+  private add(entry: Entry): boolean {
     const waiting = this.pending.filter(p => p.kind !== 'external').length;
     const cap = entry.kind !== 'external' && entry.source === 'remote' ? this.max : this.maxTouch;
-    if (waiting >= cap) { this.host.log('input.dropped', `${label(entry)} (queue full)`); return; }
+    if (waiting >= cap) { this.host.log('input.dropped', `${label(entry)} (queue full)`); return false; }
     this.pending.push(entry);
     if (!this.running) void this.drain();
+    return true;
   }
 
   /** Await a job's promise, but not longer than APPLY_WAIT_MS. */
@@ -119,12 +140,29 @@ export class InputQueue {
           continue;
         }
         if (next.kind !== 'external') this.host.log(next.kind, next.kind === 'input' ? `${label(next)} on ${this.host.screen()}` : `${next.id} from ${next.source} on ${this.host.screen()}`);
+        if (next.kind === 'input' && next.up && this.host.holdRemoteUp?.()) {
+          const up = next.up;
+          const remaining = Math.max(0, REMOTE_HOLD_MS - (Date.now() - up.at));
+          if (!up.cancelled && this.previousUp === up && remaining) await new Promise<void>(resolve => {
+            const timer = setTimeout(() => { up.release = undefined; resolve(); }, remaining);
+            up.release = () => { clearTimeout(timer); up.release = undefined; resolve(); };
+          });
+          if (up.cancelled || up.discarded) { this.host.cancelRemoteUp?.(); continue; }
+          if (!this.host.foreground() || next.stamp !== this.unsolicited()) continue;
+        }
         const before = this.host.generation();
         const screenBefore = this.host.screen();
         let job: void | Promise<void> = undefined;
         try {
-          if (next.kind === 'input') job = this.host.apply(next.input);
-          else if (next.kind === 'menu') job = this.host.menu(next.id);
+          if (next.kind === 'input') {
+            if (next.up) next.up.undo = this.host.captureRemoteUp?.();
+            job = this.host.apply(next.input);
+            if (next.up) next.up.generation = this.host.generation();
+          }
+          else if (next.kind === 'menu') {
+            if (next.up?.undo && next.up.generation === this.host.generation()) next.up.undo();
+            job = this.host.menu(next.id);
+          }
           else next.run();
         } catch (error) { this.host.log('input.error', error instanceof Error ? error.message : String(error)); }
         // Screen changes from our own presses are not "unsolicited"; an update's are (an alert popping up).

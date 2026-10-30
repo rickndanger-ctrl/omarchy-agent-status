@@ -850,6 +850,9 @@ const inputQueue = new InputQueue({
   foreground: () => foreground,
   generation: screenGeneration,
   screen: () => (showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind),
+  captureRemoteUp: () => showingTiles() ? tiles.capturePosition() : model.capturePosition(),
+  holdRemoteUp: () => showingDesk(),
+  cancelRemoteUp: () => { if (showingDesk()) deskArrivals.shift(); },
   settled: capMs => glasses.settled(capMs),
   log: (name, detail) => diag(name, detail),
 });
