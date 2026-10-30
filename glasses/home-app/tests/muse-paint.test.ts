@@ -525,9 +525,13 @@ test('tile and screen share the /latest rule: ask 2 final, ask 1 read via /lates
   assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), { question: 'q', reply: 'FROM RELAY' }, ft.startRead()), true);
   assert.deepEqual(ft.get(), { question: 'q', reply: 'FROM RELAY' });
   assert.match(fm.render(NOW), /Muse: FROM RELAY/);
-  // and a failed read on a fresh session marks the tile unreachable
-  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), null, ft.startRead()), true);
-  assert.equal(ft.get(), MUSE_UNREACHABLE);
+  // a failed read on a session with nothing to show marks the tile unreachable; with an answer it changes nothing
+  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), null, ft.startRead()), false);
+  assert.deepEqual(ft.get(), { question: 'q', reply: 'FROM RELAY' });
+  const em = new HomeModel(); em.update(data); em.goTo('muse');
+  const et = new MuseCache();
+  assert.equal(applyMuseLatest(em, et, et.fetchStart(), null, et.startRead()), true);
+  assert.equal(et.get(), MUSE_UNREACHABLE);
 });
 
 test('two /latest reads sharing a stamp: the newer finishes first, the older one finishing later changes nothing (screen and tile)', () => {
@@ -544,4 +548,23 @@ test('two /latest reads sharing a stamp: the newer finishes first, the older one
   // a read that started later and finishes later still applies
   assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'NEWEST' }, tile.startRead()), true);
   assert.match(m.render(NOW), /Muse: NEWEST/);
+});
+
+test('a failed /latest read never advances the order and never replaces an answer; the unreachable note is only for nothing to show', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  const stamp = tile.fetchStart();
+  const older = tile.startRead();
+  const newer = tile.startRead();
+  // the newer read fails first, then the older one succeeds: its answer is shown
+  assert.equal(applyMuseLatest(m, tile, stamp, null, newer), true, 'nothing to show yet: the unreachable note');
+  assert.match(m.render(NOW), /Couldn't reach Muse/);
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'THE ANSWER' }, older), true, 'the older success is not dropped by the failure');
+  assert.match(m.render(NOW), /Muse: THE ANSWER/);
+  assert.deepEqual(tile.get(), { question: 'q', reply: 'THE ANSWER' });
+  // a failure with an answer on screen and tile: both stay
+  assert.equal(applyMuseLatest(m, tile, stamp, null, tile.startRead()), false);
+  assert.match(m.render(NOW), /Muse: THE ANSWER/);
+  assert.doesNotMatch(m.render(NOW), /Couldn't reach/);
+  assert.deepEqual(tile.get(), { question: 'q', reply: 'THE ANSWER' });
 });

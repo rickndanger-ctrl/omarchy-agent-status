@@ -575,6 +575,8 @@ export class HomeModel {
     this.composeMuse();
     return ask;
   }
+  /** Muse's screen already holds an answer (or an ask's failure note): an unreachable relay must not replace it. */
+  museHasAnswer(): boolean { return this.museHead !== null && this.museHeadReply; }
   /** Put the ask-in-progress back on screen (the Muse screen was opened or reloaded while an ask is under way: nothing is fetched then). */
   restoreMuse(): void { if (this.museHead) this.composeMuse(); }
   /** The relay's latest exchange. Returns whether it took the screen: it does not once this session holds a final answer for its newest ask (it is added below, if it is something new). */
