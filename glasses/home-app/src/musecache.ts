@@ -29,6 +29,16 @@ export class MuseCache {
 
   /** Before a fetch of /api/muse: null means skip it (an ask is in flight). Hand the result to fetchDone. */
   fetchStart(): number | null { return this.asking ? null : this.stamp; }
+  private readSeq = 0;
+  private appliedRead = 0;
+  /** Every /latest read (screen or tile) gets its own increasing number when it starts. */
+  startRead(): number { return ++this.readSeq; }
+  /** A result is taken only if no read that started later has been applied already; taking it records that. */
+  takeRead(read: number): boolean {
+    if (read < this.appliedRead) return false;
+    this.appliedRead = read;
+    return true;
+  }
   /** Is a fetch that started with this stamp still the newest word (no ask began or ended since)? */
   isCurrent(stamp: number | null): boolean { return stamp !== null && !this.asking && stamp === this.stamp; }
   /** The fetch's result is used only if nothing newer (an ask) happened since it started. */

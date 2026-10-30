@@ -356,7 +356,8 @@ async function refreshTiles(): Promise<void> {
         } else if (need.kind === 'muse') {
           const stamp = museTile.pageFetchStart(page, homeLoaded);
           if (stamp === null) return; // already read for this page view, or an ask is in flight (its reply is the newest word)
-          applyMuseLatest(model, museTile, stamp, await api<{ question: string; reply: string }>('muse').catch(() => null));
+          const read = museTile.startRead();
+          applyMuseLatest(model, museTile, stamp, await api<{ question: string; reply: string }>('muse').catch(() => null), read);
         } else if (need.kind === 'reminders') {
           const list = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
           writes.push(() => { tileData.reminders = list; });
@@ -838,10 +839,11 @@ async function run(action: Action): Promise<void> {
       await openDesk();
     } else if (action.kind === 'loadMuse') {
       const stamp = museTile.fetchStart();
+      const read = museTile.startRead();
       if (stamp === null) { model.restoreMuse(); } // an ask is in flight: nothing is read, the ask's own screen stays
       else {
         const latest = await api<{ question: string; reply: string }>('muse').catch(() => null);
-        applyMuseLatest(model, museTile, stamp, latest); // the same rule as the tile's own read (refreshTiles)
+        applyMuseLatest(model, museTile, stamp, latest, read); // the same rule as the tile's own read (refreshTiles)
       }
     }
   } catch (error) {

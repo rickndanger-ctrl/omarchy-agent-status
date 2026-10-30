@@ -509,23 +509,39 @@ test('tile and screen share the /latest rule: ask 2 final, ask 1 read via /lates
   tile.askEnd();
   // the tile's own timed read: /latest is ask 1
   const stamp = tile.fetchStart();
-  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'first question', reply: 'ANSWER ONE' }), false);
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'first question', reply: 'ANSWER ONE' }, tile.startRead()), false);
   assert.deepEqual(tile.get(), { question: 'second question', reply: 'ANSWER TWO' }, 'the tile keeps ask 2');
   assert.match(m.render(NOW), /Muse: ANSWER TWO/, 'and so does the screen');
   // loadMuse goes through the same helper
-  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'first question', reply: 'ANSWER ONE' }), false);
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'first question', reply: 'ANSWER ONE' }, tile.startRead()), false);
   assert.deepEqual(tile.get(), { question: 'second question', reply: 'ANSWER TWO' });
   // a read that began before an ask is dropped (stale stamp)
   const old = tile.fetchStart();
   tile.askStart('third'); tile.askEnd();
-  assert.equal(applyMuseLatest(m, tile, old, { question: 'x', reply: 'y' }), false);
+  assert.equal(applyMuseLatest(m, tile, old, { question: 'x', reply: 'y' }, tile.startRead()), false);
   // a fresh session (no ask) takes /latest on screen and tile
   const fm = new HomeModel(); fm.update(data); fm.goTo('muse');
   const ft = new MuseCache();
-  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), { question: 'q', reply: 'FROM RELAY' }), true);
+  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), { question: 'q', reply: 'FROM RELAY' }, ft.startRead()), true);
   assert.deepEqual(ft.get(), { question: 'q', reply: 'FROM RELAY' });
   assert.match(fm.render(NOW), /Muse: FROM RELAY/);
   // and a failed read on a fresh session marks the tile unreachable
-  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), null), true);
+  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), null, ft.startRead()), true);
   assert.equal(ft.get(), MUSE_UNREACHABLE);
+});
+
+test('two /latest reads sharing a stamp: the newer finishes first, the older one finishing later changes nothing (screen and tile)', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  const stamp = tile.fetchStart();
+  const tileRead = tile.startRead(); // the tile's read starts first (older relay answer is on its way)
+  const screenRead = tile.startRead(); // the screen's load starts later and returns the newer answer
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'NEWER' }, screenRead), true);
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'OLDER' }, tileRead), false);
+  assert.deepEqual(tile.get(), { question: 'q', reply: 'NEWER' });
+  assert.match(m.render(NOW), /Muse: NEWER/);
+  assert.doesNotMatch(m.render(NOW), /OLDER/);
+  // a read that started later and finishes later still applies
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'NEWEST' }, tile.startRead()), true);
+  assert.match(m.render(NOW), /Muse: NEWEST/);
 });
