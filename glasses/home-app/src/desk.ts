@@ -14,6 +14,17 @@ export const DOUBLE_DOWN_MS = 400;
 export const IMU_DIAG_MS = 10_000;
 export const IMU_PACE = 100;
 
+/** ?imu=fake (simulator runs): a scripted head, a leg every 2 s: right, down, left, up. Each leg turns over 0.5 s, then holds. */
+export function fakePose(ms: number): Sample {
+  const legs: Sample[] = [{ x: 0, y: 0, z: 0 }, { x: 20, y: 0, z: 0 }, { x: 20, y: -20, z: 0 }, { x: 0, y: -20, z: 0 }];
+  const leg = Math.floor(ms / 2000) % 4;
+  const from = legs[(leg + 3) % 4];
+  const to = legs[leg];
+  const k = Math.min(1, (ms % 2000) / 500);
+  return { x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k, z: 0 };
+}
+const urlFlagFake = () => { try { return new URLSearchParams(globalThis.location?.search ?? '').get('imu') === 'fake'; } catch { return false; } };
+
 export type DeskResult = { kind: 'open'; app: DeskAppId } | { kind: 'home' } | null;
 
 export interface DeskHost {
@@ -42,8 +53,11 @@ export class Desk {
   private moveStart = 0;
   private notice = '';
   private failedLogged = false;
+  private failed = false;
 
-  constructor(private readonly host: DeskHost, cfg: PointerConfig = DEFAULT_POINTER) { this.pointer = new Pointer(cfg); }
+  private readonly fake: boolean;
+  private fakeTimer: ReturnType<typeof setInterval> | undefined;
+  constructor(private readonly host: DeskHost, cfg: PointerConfig = DEFAULT_POINTER, opts: { fake?: boolean } = {}) { this.pointer = new Pointer(cfg); this.fake = opts.fake ?? urlFlagFake(); }
 
   get highlighted(): DeskAppId { return DESK_APPS[this.cursor].id; }
   get minimizedApps(): readonly DeskAppId[] { return this.minimized; }
@@ -101,26 +115,46 @@ export class Desk {
   private minimize(id: DeskAppId): void { if (!this.minimized.includes(id)) this.minimized.push(id); }
 
   // --- head pointer -------------------------------------------------------------------------------------------------
-  /** Desk is in front: switch head tracking on. */
+  /** Desk is in front: fresh pointer and stats, head tracking on. */
   async enter(): Promise<void> {
     this.menu = null;
     this.pointer.recenter();
     this.stats = new ImuStats();
     this.statsDone = false;
     this.painted = this.cursor;
+    this.failed = false;
+    await this.startImu();
+  }
+  /** Only asks the glasses for tracking; nothing on screen or in the pointer is reset. */
+  private async startImu(): Promise<void> {
+    if (this.fake) {
+      this.tracking = true;
+      if (!this.fakeTimer) { const t0 = this.host.now(); this.fakeTimer = setInterval(() => this.imuSample(fakePose(this.host.now() - t0)), 100); }
+      return;
+    }
     this.tracking = true;
-    if (!(await this.host.imu(true))) { this.tracking = false; if (!this.failedLogged) this.host.diag('desk.imu', 'could not start'); this.failedLogged = true; } else this.failedLogged = false;
+    if (await this.host.imu(true)) { this.failed = false; this.failedLogged = false; return; }
+    this.tracking = false;
+    this.failed = true; // no more tries until the front comes back (resume(true))
+    if (!this.failedLogged) this.host.diag('desk.imu', 'could not start');
+    this.failedLogged = true;
   }
   /** Desk left (an app, Home, the glasses menu): switch it off. */
   leave(): void {
-    if (!this.tracking) return;
+    this.stopFake();
+    if (!this.tracking || this.fake) { this.tracking = false; return; }
     this.tracking = false;
     void this.host.imu(false);
   }
   /** The transport switched tracking off (left the front, app exit, reconnect). */
-  imuLost(): void { this.tracking = false; }
-  /** Back in front with Desk showing: tracking on again. */
-  resume(): Promise<void> { return this.tracking ? Promise.resolve() : this.enter(); }
+  imuLost(): void { this.tracking = false; this.stopFake(); }
+  private stopFake(): void { if (this.fakeTimer) clearInterval(this.fakeTimer); this.fakeTimer = undefined; }
+  /** Tracking on again after the transport switched it off. After a failed start it waits for `force` (the app came to the front). */
+  resume(force = false): Promise<void> {
+    if (this.tracking || (this.failed && !force)) return Promise.resolve();
+    this.pointer.recenter();
+    return this.startImu();
+  }
 
   imuSample(s: Sample): void {
     if (!this.tracking) return;

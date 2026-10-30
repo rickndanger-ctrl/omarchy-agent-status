@@ -111,7 +111,7 @@ const glasses = new Glasses({
   onInput: input => handle(input, 'touch'),
   onMenu: id => inputQueue.pushMenu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
-  onForeground: on => { foreground = on; if (!on) { inputQueue.clear('left the front'); void getConv()?.stop('background'); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(); } },
+  onForeground: on => { foreground = on; if (!on) { inputQueue.clear('left the front'); void getConv()?.stop('background'); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); } },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
     if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }

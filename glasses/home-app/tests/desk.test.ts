@@ -6,7 +6,7 @@ import { StartUpPageCreateResult, OsEventTypeList, type EvenAppBridge } from '@e
 import { Glasses } from '../src/glasses';
 import { GLASSES_MENU, GLASSES_MENU_MAX } from '../src/menu';
 import { HomeModel, type HomeData } from '../src/model';
-import { Desk, DESK_APPS, type DeskHost } from '../src/desk';
+import { Desk, DESK_APPS, fakePose, type DeskHost } from '../src/desk';
 import { Pointer, DEFAULT_POINTER, type Sample } from '../src/deskpointer';
 import { makeHandle, type FlowHost } from '../src/inputflow';
 
@@ -146,6 +146,23 @@ test('moves while a frame is in flight are painted once, after it settles (never
   assert.match(r.diag.join('\n'), /desk\.move 0->1 \d+/);
 });
 
+test('no IMU (the Even app says no): the menu stays open across 10 s of retry timers, and "could not start" is logged once', async () => {
+  const { r, desk } = rig();
+  let asked = 0;
+  (desk as unknown as { host: DeskHost }).host.imu = async () => { asked++; return false; };
+  await desk.enter();
+  assert.equal(asked, 1);
+  desk.input('down', 1000);
+  assert.ok(desk.menuOpen);
+  for (let i = 0; i < 4; i++) { r.t += 3000; await desk.resume(); } // main.ts's 3 s timer
+  assert.ok(desk.menuOpen, 'the menu is still open');
+  assert.equal(asked, 1, 'no retries after a failure');
+  await desk.resume(true); // the app came back to the front: one more try, still no reset
+  assert.equal(asked, 2);
+  assert.ok(desk.menuOpen);
+  assert.equal(r.diag.filter(d => d === 'desk.imu could not start').length, 1);
+});
+
 test('desk.imu is logged once, after the first 10 s, with pace, rate and ranges', async () => {
   const { r, desk } = rig();
   await desk.enter();
@@ -276,4 +293,30 @@ test('the press flow: the Desk takes every press while showing; an app opened fr
   handle('back'); // Messages -> Home -> the Desk
   assert.equal(back, 1);
   assert.equal(desk, true);
+});
+
+test('?imu=fake: the scripted head walks the highlight right, down, left, up; off without the flag; stops on leave', async () => {
+  const mk = (fake: boolean) => {
+    const r = { t: 0, imu: [] as boolean[], diag: [] as string[], paints: 0 };
+    const host: DeskHost = { imu: async o => { r.imu.push(o); return false; }, paint: () => { r.paints++; }, settled: async () => {}, diag: (n, d) => r.diag.push(`${n} ${d}`), now: () => r.t };
+    return { r, desk: new Desk(host, { ...DEFAULT_POINTER, smoothing: 1 }, { fake }) };
+  };
+  const { r, desk } = mk(true);
+  await desk.enter();
+  assert.ok(desk.imuOn);
+  const path: string[] = [desk.highlighted];
+  try {
+    for (let ms = 0; ms <= 10_000; ms += 100) {
+      r.t = ms;
+      desk.imuSample(fakePose(ms));
+      if (path.at(-1) !== desk.highlighted) path.push(desk.highlighted);
+    }
+  } finally { desk.leave(); }
+  assert.deepEqual(path, ['muse', 'messages', 'clock', 'reminders', 'muse'].map(x => x));
+  assert.ok(r.paints >= 1);
+  desk.leave();
+  assert.ok(!desk.imuOn);
+  const off = mk(false);
+  await off.desk.enter();
+  assert.ok(!off.desk.imuOn, 'without the flag nothing is scripted');
 });
