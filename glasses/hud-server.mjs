@@ -177,8 +177,8 @@ const AGENT_NAMES = { claude: 'Claude', codex: 'Codex', hermes: 'Hermes' }
 async function agentPanes() {
   let panes, processes
   try {
-    // Spaces, path last: newer tmux prints a tab in -F output as "_".
-    panes = (await run('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{pane_current_path}'], { timeout: 2000 })).stdout
+    // Spaces, session name before the path (path last, it may hold spaces): newer tmux prints a tab in -F output as "_".
+    panes = (await run('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{session_name} #{pane_current_path}'], { timeout: 2000 })).stdout
     processes = (await run('ps', ['-eo', 'pid=,ppid=,args='], { timeout: 2000 })).stdout
   } catch {
     return []
@@ -197,13 +197,13 @@ async function agentPanes() {
   }
   const result = []
   for (const line of panes.split('\n')) {
-    const [, pane, pid, cwd] = line.match(/^(\S+) (\S+) ?(.*)$/) ?? []
+    const [, pane, pid, tmux, cwd] = line.match(/^(\S+) (\S+) (\S+) ?(.*)$/) ?? []
     if (!/^%\d+$/.test(pane || '')) continue
     const queue = [pid]
     for (let i = 0; i < queue.length && i < 200; i++) {
       const agent = agentOf.get(queue[i])
       if (agent) {
-        result.push({ pane, agent, page: path.basename(cwd || ''), pid: queue[i], cwd })
+        result.push({ pane, agent, page: path.basename(cwd || ''), pid: queue[i], cwd, tmux })
         break
       }
       queue.push(...(children.get(queue[i]) ?? []))
@@ -284,7 +284,7 @@ async function agentScreens() {
         try {
           cwd = (await run('lsof', ['-a', '-p', queue[i], '-d', 'cwd', '-Fn'], { timeout: 2000 })).stdout.split('\n').find(l => l.startsWith('n'))?.slice(1) ?? ''
         } catch { /* unknown folder */ }
-        result.push({ pane: `screen:${pid}.${name}`, agent, page: path.basename(cwd), pid: queue[i], cwd })
+        result.push({ pane: `screen:${pid}.${name}`, agent, page: path.basename(cwd), pid: queue[i], cwd, tmux: name })
         break
       }
       queue.push(...(children.get(queue[i]) ?? []))
@@ -316,14 +316,14 @@ async function sessionsWithPanes() {
     const match = byRecency.find(s => !s.pane && !s.window && sameChat(s, term))
     if (!match) continue
     if (term.window) Object.assign(match, { window: term.window, workspace: term.workspace || match.workspace })
-    else match.pane = term.pane
+    else Object.assign(match, { pane: term.pane, tmux: term.tmux })
     term.matched = true
   }
   for (const pane of panes) {
     if (pane.matched) continue
     const match = byRecency.find(s => !s.pane && s.agent === pane.agent && s.page === pane.page)
-    if (match) match.pane = pane.pane
-    else sessions.push({ agent: pane.agent, name: AGENT_NAMES[pane.agent], session: `tmux${pane.pane}`, state: 'idle', page: pane.page, at: 0, workspace: '', machine: MACHINE, pane: pane.pane })
+    if (match) Object.assign(match, { pane: pane.pane, tmux: pane.tmux })
+    else sessions.push({ agent: pane.agent, name: AGENT_NAMES[pane.agent], session: `tmux${pane.pane}`, state: 'idle', page: pane.page, at: 0, workspace: '', machine: MACHINE, pane: pane.pane, tmux: pane.tmux })
   }
   // Agents in a plain terminal window (no tmux): prompt them by typing into that window.
   for (const win of windows) {

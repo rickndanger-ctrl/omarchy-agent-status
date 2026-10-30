@@ -259,14 +259,10 @@ export class HomeModel {
   private firstUpdate = true;
   private waitingFor: { machine: string; pane: string; until: number } | null = null;
 
-  /** The live session a pin stands for: same computer and agent, matched by session name when the hub says it, else the best terminal one. */
+  /** The live session a pin stands for: same computer and agent AND the same tmux session name, exactly. Never a look-alike (a voice reply must reach the pinned agent). */
   pinSession(pin: Pin): Session | undefined {
-    const mine = (this.data?.sessions ?? []).filter(x => x.machine === pin.machine && x.agent === pin.agent);
-    if (!mine.length) return undefined;
-    const exact = mine.filter(x => x.tmux === pin.session || x.name === pin.session || x.session === pin.session);
-    const pool = exact.length ? exact : mine.filter(x => Boolean(x.pane || x.window));
-    if (!pool.length) return undefined;
-    return [...pool].sort((a, b) => (STATE_RANK[b.state] ?? 0) - (STATE_RANK[a.state] ?? 0) || b.at - a.at)[0];
+    const mine = (this.data?.sessions ?? []).filter(x => x.machine === pin.machine && x.agent === pin.agent && x.tmux === pin.session && Boolean(x.pane || x.window));
+    return [...mine].sort((a, b) => (STATE_RANK[b.state] ?? 0) - (STATE_RANK[a.state] ?? 0) || b.at - a.at)[0];
   }
   private pins(): Pin[] { return this.data?.pinned ?? []; }
   /** Quiet mode only filters when there is a pin list: a hub without one pops everything, as before. */
@@ -520,7 +516,9 @@ export class HomeModel {
         const x = this.pinSession(pin);
         const machineUp = d.machines.find(m => m.name === pin.machine)?.online !== false;
         const live = x && machineUp ? x : undefined;
-        rows.push({ text: clip(`${live ? SYMBOL[live.state] ?? '●' : '·'} ${pin.label} · ${live ? STATE_WORD[live.state] ?? live.state : 'offline'}`, WIDTH - 2), ...(live ? { open: { kind: 'agent' as const, key: sessionKey(live) } } : {}) });
+        // A computer that is down is offline; a computer that is up with no such session says the agent is not running.
+        const word = live ? STATE_WORD[live.state] ?? live.state : machineUp ? 'not running' : 'offline';
+        rows.push({ text: clip(`${live ? SYMBOL[live.state] ?? '●' : '·'} ${pin.label} · ${word}`, WIDTH - 2), ...(live ? { open: { kind: 'agent' as const, key: sessionKey(live) } } : {}) });
       }
     } else rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
     if (d.messages) {

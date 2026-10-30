@@ -48,26 +48,36 @@ test('Home: one row per pin with the bar symbol and the bar words, then the norm
   assert.ok(labels.findIndex(l => /^Listen/.test(l)) > 6, 'the normal rows come after the pins');
 });
 
-test('a pin with no matching session, or on an offline computer, shows offline and opens nothing', () => {
+test('a pin on an offline computer shows offline, with no session on an online one not running; neither opens anything', () => {
   const m = new HomeModel();
   m.update(data({ machines: [{ name: 'Mini 1', online: true }, { name: 'Mini 2', online: false }, { name: 'Neo', online: true }, { name: 'Dell', online: true }] }));
   const text = m.render(NOW);
-  assert.match(text, /· Claude · Mini 2 · offline/, 'its computer is offline');
+  assert.match(text, /· Claude · Mini 2 · offline/, 'its computer is offline (not "not running")');
   for (let i = 0; i < 6; i++) m.input('down', NOW);
-  assert.match(m.render(NOW), /> · Claude · Dell · offline/, 'no session on Dell');
+  assert.match(m.render(NOW), /> · Claude · Dell · not running/, 'Dell is up but has no such session');
   assert.equal(m.input('select', NOW), null);
   assert.equal(m.screenKind, 'home');
 });
 
-test('select on a pin opens its agent page; matching prefers the named session, else the best terminal one', () => {
+test('two Claude sessions on Mini 1 (claude and g2-claude): the pin opens g2-claude, never the other', () => {
   const m = new HomeModel();
-  m.update(data({ sessions: [sess('Mini 1', 'claude', 'idle', { tmux: 'other', pane: '%9', session: 'tmux%9' }), sess('Mini 1', 'claude', 'working', { pane: '%1', session: 'tmux%1' }), sess('Mini 1', 'claude', 'attention', { tmux: 'g2-claude', pane: '%2', session: 'tmux%2' })] }));
-  assert.equal(m.pinSession(PINS[0])?.session, 'tmux%2', 'the named session wins');
+  m.update(data({ sessions: [sess('Mini 1', 'claude', 'attention', { tmux: 'claude', pane: '%9', session: 'tmux%9' }), sess('Mini 1', 'claude', 'idle', { tmux: 'g2-claude', pane: '%2', session: 'tmux%2' })] }));
+  assert.equal(m.pinSession(PINS[0])?.session, 'tmux%2');
+  assert.match(m.render(NOW), /> ○ Claude · Mini 1 · ready/, 'the row shows the pinned session\'s state, not the busier one\'s');
   m.input('select', NOW);
   assert.equal(m.screenKind, 'agent');
-  const m2 = new HomeModel();
-  m2.update(data({ sessions: [sess('Mini 1', 'claude', 'idle', { tmux: undefined, pane: '%9', session: 'tmux%9' }), sess('Mini 1', 'claude', 'working', { tmux: undefined, pane: '%1', session: 'tmux%1' })] }));
-  assert.equal(m2.pinSession(PINS[0])?.session, 'tmux%1', 'no name given by the hub: the busiest terminal session of that computer and agent');
+  assert.match(m.render(NOW), /^CLAUDE · Mini 1/);
+  assert.equal(m.terminalTarget()?.pane, '%2');
+});
+
+test('only a differently named Claude session on that computer: the pin says not running and opens nothing', () => {
+  const m = new HomeModel();
+  m.update(data({ sessions: [sess('Mini 1', 'claude', 'working', { tmux: 'claude', pane: '%9', session: 'tmux%9' }), sess('Mini 1', 'claude', 'idle', { tmux: undefined, pane: '%8', session: 'tmux%8' })] }));
+  assert.equal(m.pinSession(PINS[0]), undefined);
+  assert.match(m.render(NOW), /> · Claude · Mini 1 · not running/);
+  assert.equal(m.input('select', NOW), null);
+  assert.equal(m.screenKind, 'home');
+  assert.match(m.render(NOW), /· Claude · Mini 2 · not running/, 'a computer that is up with no sessions at all');
 });
 
 test('without a pin list (an older hub) Home keeps the Agents row', () => {
