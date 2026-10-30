@@ -20,7 +20,7 @@ export const REMOTE_HOLD_MS = 1500;
 
 export interface QueueHost {
   /** Apply one press (the app's handle flow). May return a promise to be awaited (microphone changes). */
-  apply(input: Input): void | Promise<void>;
+  apply(input: Input, source?: InputSource): void | Promise<void>;
   /** Apply one long-press menu choice. May return a promise (Pause waits for the hub). */
   menu(id: number): void | Promise<void>;
   /** The screen the model is on, for the log. */
@@ -156,7 +156,7 @@ export class InputQueue {
         try {
           if (next.kind === 'input') {
             if (next.up) next.up.undo = this.host.captureRemoteUp?.();
-            job = this.host.apply(next.input);
+            job = this.host.apply(next.input, next.source);
             if (next.up) next.up.generation = this.host.generation();
           }
           else if (next.kind === 'menu') {

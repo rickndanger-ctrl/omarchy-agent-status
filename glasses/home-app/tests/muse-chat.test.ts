@@ -130,20 +130,20 @@ test('Remote on the Muse chat: a quick Back after a Down while there is more bel
   } as unknown as FlowHost;
   const handle = makeHandle(host);
   const before = screen(m).join('\n');
-  await handle('down');
+  await handle('down', 'remote');
   now += 220; // the 17:42:06 case: a Back 220 ms after a Down
-  await handle('back');
+  await handle('back', 'remote');
   assert.equal(backToTiles, 0, 'not kicked to Tiles mid-scroll');
   assert.notEqual(screen(m).join('\n'), before, 'it scrolled on');
   // scroll to the end, then a quick Back goes back
-  for (let i = 0; i < 12; i++) { now += 1500; await handle('down'); }
+  for (let i = 0; i < 12; i++) { now += 1500; await handle('down', 'remote'); }
   now += 220;
-  await handle('back');
+  await handle('back', 'remote');
   assert.equal(backToTiles, 1, 'at the end the same Back leaves');
   // a Back with no Down just before is always a Back
   now += 5000; backToTiles = 0;
   m.input('up', now);
-  await handle('back');
+  await handle('back', 'remote');
   assert.equal(backToTiles, 1);
 });
 
@@ -161,4 +161,67 @@ test('two overlapping requests each carry the hub that answered THEM (no shared 
   const r3 = await firstAnswer<string>(['down', 'up'], async hub => (hub === 'down' ? { skip: new Error('down') } : { value: 'ok' }));
   assert.equal(r3.hub, 'up');
   await assert.rejects(firstAnswer<string>(['x'], async () => ({ skip: new Error('nope') })), /no hub reachable/);
+});
+
+test('review (1): a question seeded as "thinking" by /latest is completed by a later /latest with the same question + a reply, and only that', () => {
+  const m = open(); const tile = new MuseCache();
+  applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead());
+  assert.match(screen(m).join('\n'), /Muse is thinking…/);
+  // a different question or an empty reply does not complete it
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'something else', reply: 'WRONG' }, tile.startRead()), false);
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead()), false);
+  assert.doesNotMatch(screen(m).join('\n'), /WRONG/);
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: 'The real answer.' }, tile.startRead()), true);
+  assert.match(screen(m).join('\n'), /Muse: The real answer\./);
+  assert.doesNotMatch(screen(m).join('\n'), /thinking/);
+  assert.deepEqual(tile.get(), { question: 'asked elsewhere', reply: 'The real answer.' });
+  // once completed (or after our own ask) later reads change nothing
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: 'A different later text' }, tile.startRead()), false);
+  // our own thinking turn is never completed by /latest
+  const own = open(); const t2 = new MuseCache();
+  own.beginMuseAsk('my question', NOW);
+  assert.equal(applyMuseLatest(own, t2, t2.fetchStart(), { question: 'my question', reply: 'relay text' }, t2.startRead()), false);
+});
+
+test('review (2): opening Muse scrolls to the newest reply; a late answer to an older ask never moves the scroll', () => {
+  const m = new HomeModel(); m.update(data);
+  const a1 = m.beginMuseAsk('First', NOW);
+  m.setMuseAnswer('q', Array.from({ length: 10 }, (_, i) => `first line ${i}`).join('\n'), a1);
+  const a2 = m.beginMuseAsk('Second', NOW + 1);
+  m.goTo('home'); // Muse is off screen when the second reply arrives
+  m.setMuseAnswer('q', Array.from({ length: 12 }, (_, i) => `second line ${i}`).join('\n'), a2);
+  m.goTo('muse');
+  assert.ok(screen(m).some(l => l.startsWith('Muse: second line 0')), `the newest reply is in view on opening:\n${screen(m).join('\n')}`);
+  // scrolled to read, then a LATE answer to the older ask arrives: the view stays
+  m.input('down', NOW); m.input('down', NOW);
+  const before = screen(m).join('\n');
+  m.setMuseAnswer('q', 'late text for the first', a1);
+  assert.equal(screen(m).join('\n'), before, 'an older ask never moves the scroll');
+});
+
+test('review (3): the Back-after-Down rule is for the phone remote only, and a converted Back does not renew the window', async () => {
+  const m = open();
+  const ask = m.beginMuseAsk('Long one', NOW);
+  m.setMuseAnswer('q', Array.from({ length: 60 }, (_, i) => `line ${i}`).join('\n'), ask);
+  for (let i = 0; i < 6; i++) m.input('up', NOW);
+  let now = NOW; let backs = 0;
+  const host = {
+    model: m, tiles: {}, tileCtx: () => ({}), showingTiles: () => false, inOpenedScreen: () => true, leaveTiles: () => {}, backToTiles: () => { backs++; },
+    paint: () => {}, isBlank: () => false, wake: () => {}, runTileEffect: () => {}, saveLayout: () => {}, refreshTiles: () => {}, refreshTerminal: () => {}, now: () => now, runModelAction: () => {},
+  } as unknown as FlowHost;
+  const handle = makeHandle(host);
+  await handle('down', 'touch'); now += 200;
+  await handle('back', 'touch'); // a touch double-tap right after a swipe: always a Back
+  assert.equal(backs, 1, 'touch is never converted');
+  // remote: one Down, then Backs keep coming (double-taps): only the first, inside the window, is converted
+  now += 5000; backs = 0;
+  m.goTo('muse'); for (let i = 0; i < 6; i++) m.input('up', NOW);
+  await handle('down', 'remote'); now += 200;
+  await handle('back', 'remote'); // converted: scrolls
+  assert.equal(backs, 0);
+  now += 200;
+  await handle('back', 'remote'); // 400 ms after the Down: still inside 0.6 s, converted
+  now += 300;
+  await handle('back', 'remote'); // 700 ms after the real Down: the window has NOT been renewed by the converted Backs, so this leaves
+  assert.equal(backs, 1, 'a long reply can be left by double-tapping');
 });

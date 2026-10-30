@@ -39,8 +39,8 @@ export interface FlowHost {
   backToDesk?(): void;
 }
 
-export function makeHandle(host: FlowHost): (input: Input) => void | Promise<void> {
-  const handle = (input: Input): void | Promise<void> => {
+export function makeHandle(host: FlowHost): (input: Input, source?: 'touch' | 'remote') => void | Promise<void> {
+  const handle = (input: Input, source?: 'touch' | 'remote'): void | Promise<void> => {
     if (host.isBlank()) { host.wake(); return; }
     if (host.showingDesk?.()) { host.deskInput?.(input); return; }
     if (host.showingTiles()) {
@@ -55,8 +55,8 @@ export function makeHandle(host: FlowHost): (input: Input) => void | Promise<voi
       // A Conversation start/stop must finish before the next press (a stop must not overtake its start).
       return result?.kind === 'conversation' ? job : undefined;
     }
-    // Muse chat: the 'back' of a quick double-press of Down, while there is more below, keeps scrolling.
-    if (input === 'back' && host.model.backIsScroll(host.now())) { host.model.input('down', host.now()); host.paint(); return; }
+    // Muse chat, phone remote only: the 'back' of a quick double-press of Down, while there is more below, keeps scrolling (it does not renew the window).
+    if (input === 'back' && source === 'remote' && host.model.backIsScroll(host.now())) { host.model.scrollMuseOn(); host.paint(); return; }
     if (host.inOpenedScreen() && input === 'back' && TOP_SCREENS.includes(host.model.screenKind)) {
       host.backToTiles();
       return;

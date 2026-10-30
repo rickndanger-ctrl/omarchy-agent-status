@@ -480,7 +480,7 @@ export class HomeModel {
     if (this.screen.kind === 'listen') return;
     this.returnTo = null;
     this.go({ kind });
-    if (kind === 'muse') { this.museLines = null; this.composeMuse(); }
+    if (kind === 'muse') { this.museLines = null; this.composeMuse(); this.museRevealNewest(); }
   }
   /**
    * Open a full screen from a Tiles action. Voice steps fall back to the quick-reply lists when the
@@ -497,6 +497,7 @@ export class HomeModel {
       this.museLines = null; this.composeMuse();
       if (target.then === 'listen' && this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, muse: true }); return { kind: 'startMic' }; }
       this.go({ kind: 'muse' });
+      this.composeMuse(); this.museRevealNewest();
       return { kind: 'loadMuse' };
     }
     if (target.kind === 'chat') {
@@ -530,7 +531,7 @@ export class HomeModel {
   // ---- The Muse screen is a clean chat of THIS session: "You: …" / "Muse: …" turns in the order they happened. ----
   // Session = since the app started; an ask after 30 minutes without Muse activity starts a fresh one. The relay's /latest only seeds an
   // empty session with its one exchange; it never adds anything to a chat that has started. No lists, no history.
-  private museChat: { who: 'you' | 'muse'; text: string; ask: number; waiting?: boolean; problem?: boolean }[] = [];
+  private museChat: { who: 'you' | 'muse'; text: string; ask: number; waiting?: boolean; problem?: boolean; seeded?: boolean }[] = [];
   private museNote: string | null = null; // "Couldn't reach Muse." / "No Muse conversation yet." while there is no chat
   private museAskSeq = 0;
   private museLastAt = -Infinity;
@@ -567,6 +568,11 @@ export class HomeModel {
     return ask;
   }
   museIsNewest(ask: number): boolean { return ask === this.museAskSeq; }
+  /** Opening Muse: the newest turn's reply (or the newest question while it is thinking) is in view. */
+  private museRevealNewest(): void {
+    const last = this.museChat.at(-1);
+    if (last) this.museReveal(last.who, last.ask);
+  }
   /** The newest reply's first line is inside the window. */
   museAnswerInView(): boolean {
     if (this.screen.kind !== 'muse') return false;
@@ -583,7 +589,8 @@ export class HomeModel {
     turn.text = text; turn.waiting = false;
     this.museLastAt = Date.now();
     this.composeMuse();
-    if (text && !this.museRevealed.has(id)) { this.museRevealed.add(id); this.museReveal('muse', id); }
+    // Only the newest ask moves the view, and only when Muse is in front (a late answer to an older ask never does; opening Muse scrolls to the newest later).
+    if (text && this.screen.kind === 'muse' && this.museIsNewest(id) && !this.museRevealed.has(id)) { this.museRevealed.add(id); this.museReveal('muse', id); }
     return this.museIsNewest(id);
   }
   /** Muse didn't answer: say why, in the relay's own words. */
@@ -593,7 +600,7 @@ export class HomeModel {
     if (!turn) return false;
     turn.text = `Muse didn't get it: ${reason || 'no answer'}.`; turn.waiting = false; turn.problem = true;
     this.composeMuse();
-    if (!this.museRevealed.has(id)) { this.museRevealed.add(id); this.museReveal('muse', id); }
+    if (this.screen.kind === 'muse' && this.museIsNewest(id) && !this.museRevealed.has(id)) { this.museRevealed.add(id); this.museReveal('muse', id); }
     return this.museIsNewest(id);
   }
   /** The hub holds the question until a busy / updating Muse is ready: say so instead of "thinking" (and back to thinking once it was sent). */
@@ -604,6 +611,16 @@ export class HomeModel {
     this.composeMuse();
   }
   museIsEmpty(): boolean { return this.museChat.length === 0; }
+  /** A turn that /latest seeded as "thinking" (a question asked from another client) is completed by a later /latest with the SAME question and a reply: nothing else is ever taken from /latest. */
+  completeSeeded(latest: { question: string; reply: string } | null): boolean {
+    const t = this.museChat.at(-1);
+    if (!latest || !latest.reply || !t || t.who !== 'muse' || !t.seeded || t.text) return false;
+    if (this.museTurn('you', t.ask)?.text !== museDisplay(latest.question, '').question) return false;
+    t.text = museDisplay(latest.question, latest.reply).reply; t.seeded = false;
+    this.composeMuse();
+    if (this.screen.kind === 'muse' && this.museIsNewest(t.ask)) this.museReveal('muse', t.ask);
+    return true;
+  }
   /** What the Muse tile shows: the latest exchange of this session, or null (then the tile uses what the relay last said). */
   museTileView(): { question: string; reply: string; waiting: boolean } | null {
     const m = [...this.museChat].reverse().find(t => t.who === 'muse');
@@ -617,7 +634,8 @@ export class HomeModel {
     if (this.museChat.length) { this.composeMuse(); return false; }
     if (latest && (latest.question || latest.reply)) {
       const ask = ++this.museAskSeq;
-      this.museChat.push({ who: 'you', text: museDisplay(latest.question, '').question, ask }, { who: 'muse', text: museDisplay(latest.question, latest.reply).reply, ask });
+      const text = museDisplay(latest.question, latest.reply).reply;
+      this.museChat.push({ who: 'you', text: museDisplay(latest.question, '').question, ask }, { who: 'muse', text, ask, ...(text ? {} : { seeded: true }) });
       this.museNote = null;
       this.museRevealed.add(ask);
       this.composeMuse();
@@ -633,6 +651,8 @@ export class HomeModel {
   private lastSelectAt = -Infinity;
   private lastDownAt = -Infinity;
   /** On the Muse chat a Back that follows a Down within 0.6 s while there is more below is the second half of a quick double-press: it scrolls on instead of leaving. */
+  /** The converted Back: scroll one step on without counting as a new Down (the window must not renew, or a long reply could never be left). */
+  scrollMuseOn(): void { this.scroll = Math.min(this.museMaxScroll(), this.scroll + 3); }
   backIsScroll(nowMs: number): boolean { return this.screen.kind === 'muse' && nowMs - this.lastDownAt < 600 && this.scroll < this.museMaxScroll(); }
   /** The listening was left by a press at the glasses' own request (Back from listen): return to where the listening began, same as the press would. */
   abandonListen(): boolean {

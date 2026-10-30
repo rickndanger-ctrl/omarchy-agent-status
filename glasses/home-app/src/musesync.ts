@@ -12,7 +12,12 @@ export function applyMuseLatest(model: HomeModel, tile: MuseCache, stamp: number
   const real = latest !== null && Boolean(latest.question || latest.reply);
   // A real exchange (or a question still waiting for its reply) is ordered by when its read began; a failed or empty one never advances the order.
   if (real && !tile.takeRead(read)) return false;
-  if (!model.museIsEmpty()) { model.restoreMuse(); return false; }
+  if (!model.museIsEmpty()) {
+    // The one thing /latest may still do: finish a seeded "thinking" turn when it now has the same question with a reply.
+    if (real && model.completeSeeded(latest)) { tile.fetchDone(stamp!, latest!); return true; }
+    model.restoreMuse();
+    return false;
+  }
   const tileHas = tile.get() !== null && tile.get() !== MUSE_UNREACHABLE && Boolean(tile.get()!.question || tile.get()!.reply);
   model.setMuse(latest);
   if (real) tile.fetchDone(stamp!, latest!);
