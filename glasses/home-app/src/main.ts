@@ -313,7 +313,7 @@ let justAdded: { title: string; at: number } | null = null;
 const tileCtx = (): TileContext => ({
   // The tiles see a filtered copy of the chat list; model.data itself stays whole so pop-ups are unaffected.
   data: model.data && model.data.messages ? { ...model.data, messages: tileChats(model.data.messages, tiles.getLayout(), Date.now(), model.hideOldTexts) } : model.data,
-  now: Date.now(), battery: model.battery, hub: picker.state(),
+  now: Date.now(), battery: model.battery, hub: picker.state(), sent: pane => model.sentTo(pane, Date.now()),
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,
   muse: () => museTile.get(),
@@ -698,7 +698,8 @@ async function run(action: Action): Promise<void> {
     } else if (action.kind === 'prompt') {
       const r = await api<{ ok: boolean }>('prompt', { method: 'POST', body: JSON.stringify(action) });
       diag('prompt', `${action.machine} ${action.pane === 'orchestrator' ? 'orchestrator' : action.window ? 'window' : 'tmux'} ok=${r.ok}`);
-      model.promptDone(r.ok, Boolean(action.key), Date.now());
+      model.promptDone(r.ok, Boolean(action.key), Date.now(), action.pane);
+      setTimeout(() => paint(), 3100); // the tile's note ends by itself
       for (const wait of [500, 1500, 3000]) setTimeout(() => void refreshTerminal(), wait);
     } else if (action.kind === 'startMic') {
       if (getConv()?.isListening()) { model.setTranscript(null, Date.now()); model.showFlash('Stop listening first', Date.now()); paint(); return; }

@@ -594,3 +594,16 @@ test('without Studio Routing there is no studio row', () => {
   m.update(base({ sessions: [], studio: null }));
   assert.doesNotMatch(m.render(NOW), /Studio/);
 });
+
+test('promptDone for a tile: the orchestrator pane says sent to Claude for 3 s, other panes Sent', () => {
+  const m = new HomeModel();
+  m.update(tmuxed());
+  m.promptDone(true, false, NOW, 'orchestrator');
+  assert.equal(m.sentTo('orchestrator', NOW + 1000), 'sent to Claude');
+  assert.equal(m.sentTo('orchestrator', NOW + 3500), null);
+  assert.equal(m.sentTo('%3', NOW + 1000), null);
+  m.promptDone(true, false, NOW, '%3');
+  assert.equal(m.sentTo('%3', NOW + 1000), 'Sent');
+  m.promptDone(false, false, NOW, 'orchestrator');
+  assert.equal(m.sentTo('orchestrator', NOW + 1000), 'Could not send to that agent');
+});

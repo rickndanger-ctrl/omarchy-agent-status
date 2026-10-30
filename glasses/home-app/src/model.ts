@@ -406,10 +406,15 @@ export class HomeModel {
   abandonTalk(): void { this.talk = null; }
 
   /** The prompt went out (or not): the header says Sent. */
-  promptDone(ok: boolean, stopped: boolean, nowMs: number): void {
-    const orch = this.session()?.pane === 'orchestrator';
-    this.showFlash(ok ? (stopped ? 'Stopped' : orch ? 'sent to Claude' : 'Sent') : 'Could not send to that agent', nowMs);
+  promptDone(ok: boolean, stopped: boolean, nowMs: number, pane?: string): void {
+    const orch = (pane ?? this.session()?.pane) === 'orchestrator';
+    const text = ok ? (stopped ? 'Stopped' : orch ? 'sent to Claude' : 'Sent') : 'Could not send to that agent';
+    this.showFlash(text, nowMs);
+    this.sentNote = { pane: pane ?? this.session()?.pane ?? '', text, until: nowMs + 3000 };
   }
+  private sentNote: { pane: string; text: string; until: number } | null = null;
+  /** For ~3 s after a prompt went to the agent in `pane`: what to say on its tile (the Home row says it in the header). */
+  sentTo(pane: string, nowMs: number): string | null { return this.sentNote && this.sentNote.pane === pane && nowMs < this.sentNote.until ? this.sentNote.text : null; }
 
   /** Speech-to-text result for the listen screen; empty or null means nothing usable. */
   setTranscript(text: string | null, nowMs: number): void {
