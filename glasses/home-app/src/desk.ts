@@ -1,6 +1,6 @@
 // The Desk (test): a 3x3 grid of apps, a taskbar line, and a head pointer. Loaded with import() only when it is opened
 // (main.ts never imports this file at startup), so a problem in here cannot stop Home from starting.
-import { Pointer, ImuStats, DEFAULT_POINTER, type PointerConfig, type Sample } from './deskpointer';
+import { Pointer, ImuStats, DEFAULT_POINTER, gravity, tilt, type PointerConfig, type Sample } from './deskpointer';
 
 export type DeskAppId = 'muse' | 'messages' | 'agents' | 'reminders' | 'clock' | 'listen' | 'studio' | 'settings' | 'tiles';
 export const DESK_APPS: { id: DeskAppId; label: string }[] = [
@@ -12,16 +12,18 @@ const COLS = 3;
 const MENU_CHOICES = ['Open', 'Minimize', 'Close', 'Back'] as const;
 export const DOUBLE_DOWN_MS = 400;
 export const IMU_DIAG_MS = 10_000;
+export const TILT_DIAG_MS = 30_000;
+export const TILT_DIAG_EVERY_MS = 500;
 export const IMU_PACE = 100;
 
-/** ?imu=fake (simulator runs): a scripted head, a leg every 2 s: right, down, left, up. Each leg turns over 0.5 s, then holds. */
+/** ?imu=fake (simulator runs): a scripted head tilting 14 degrees right, back, down, back, left, back, up, back; 1 s each (gravity in g). */
 export function fakePose(ms: number): Sample {
-  const legs: Sample[] = [{ x: 0, y: 0, z: 0 }, { x: 20, y: 0, z: 0 }, { x: 20, y: -20, z: 0 }, { x: 0, y: -20, z: 0 }];
-  const leg = Math.floor(ms / 2000) % 4;
-  const from = legs[(leg + 3) % 4];
+  const legs: [number, number][] = [[14, 0], [0, 0], [0, 14], [0, 0], [-14, 0], [0, 0], [0, -14], [0, 0]];
+  const leg = Math.floor(ms / 1000) % legs.length;
+  const from = legs[(leg + legs.length - 1) % legs.length];
   const to = legs[leg];
-  const k = Math.min(1, (ms % 2000) / 500);
-  return { x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k, z: 0 };
+  const k = Math.min(1, (ms % 1000) / 300);
+  return gravity(from[0] + (to[0] - from[0]) * k, from[1] + (to[1] - from[1]) * k);
 }
 const urlFlagFake = () => { try { return new URLSearchParams(globalThis.location?.search ?? '').get('imu') === 'fake'; } catch { return false; } };
 
@@ -52,6 +54,8 @@ export class Desk {
   private moveFrom = -1;
   private moveStart = 0;
   private notice = '';
+  private tiltFrom = 0;
+  private tiltNext = 0;
   private failedLogged = false;
   private failed = false;
 
@@ -107,6 +111,9 @@ export class Desk {
     return null;
   }
 
+  /** Phone switches (Desk: swap axes / invert X / invert Y), applied at once. */
+  setPointerOptions(o: { swapAxes?: boolean; invertX?: boolean; invertY?: boolean }): void { this.pointer.setOptions(o); }
+
   /** A short message in the title line until the next press. */
   note(text: string): void { this.notice = text; }
 
@@ -121,6 +128,8 @@ export class Desk {
     this.pointer.recenter();
     this.stats = new ImuStats();
     this.statsDone = false;
+    this.tiltFrom = this.host.now();
+    this.tiltNext = this.tiltFrom;
     this.painted = this.cursor;
     this.failed = false;
     await this.startImu();
@@ -162,6 +171,11 @@ export class Desk {
     if (this.stats && !this.statsDone) {
       this.stats.add(t, s);
       if (t - this.stats.startedAt >= IMU_DIAG_MS) { this.statsDone = true; this.host.diag('desk.imu', this.stats.line(t, IMU_PACE)); }
+    }
+    if (t >= this.tiltNext && t - this.tiltFrom <= TILT_DIAG_MS) {
+      this.tiltNext = t + TILT_DIAG_EVERY_MS;
+      const a = tilt(s);
+      this.host.diag('desk.tilt', `roll=${a.roll.toFixed(1)} pitch=${a.pitch.toFixed(1)} raw=${s.x.toFixed(2)},${s.y.toFixed(2)},${s.z.toFixed(2)}`);
     }
     if (this.menu !== null) return;
     const move = this.pointer.sample(t, s);

@@ -144,6 +144,9 @@ $('app').innerHTML = `
   <p id="status" class="status"></p>
   <label class="row"><input type="checkbox" id="hide-old"> Hide messages older than 24 h</label>
   <label class="row"><input type="checkbox" id="hide-done"> Hide finished agents</label>
+  <label class="row"><input type="checkbox" id="desk-swap"> Desk: swap axes</label>
+  <label class="row"><input type="checkbox" id="desk-invx"> Desk: invert X</label>
+  <label class="row"><input type="checkbox" id="desk-invy"> Desk: invert Y</label>
   <pre id="glass" class="glass"></pre>
   <div class="pad">
     <button data-input="up">▲ Swipe up</button>
@@ -380,6 +383,12 @@ $<HTMLInputElement>('hide-done').checked = model.hideDone;
 $<HTMLInputElement>('hide-done').onchange = () => { setHideDone(model, store, $<HTMLInputElement>('hide-done').checked); paint(); };
 $<HTMLInputElement>('hide-old').checked = model.hideOldTexts;
 $<HTMLInputElement>('hide-old').onchange = () => setHideOldTexts($<HTMLInputElement>('hide-old').checked);
+/** The Desk's head-pointer switches (phone page): saved like the other settings and applied at once. */
+const deskOptions = () => ({ swapAxes: store.get('home.deskSwap') === '1', invertX: store.get('home.deskInvX') === '1', invertY: store.get('home.deskInvY') === '1' });
+for (const [id, key] of [['desk-swap', 'home.deskSwap'], ['desk-invx', 'home.deskInvX'], ['desk-invy', 'home.deskInvY']] as const) {
+  $<HTMLInputElement>(id).checked = store.get(key) === '1';
+  $<HTMLInputElement>(id).onchange = () => { store.set(key, $<HTMLInputElement>(id).checked ? '1' : '0'); desk?.setPointerOptions(deskOptions()); diag('desk.options', JSON.stringify(deskOptions())); };
+}
 function syncStartInTiles(): void { $<HTMLInputElement>('start-tiles').checked = tilesOn; }
 $<HTMLInputElement>('start-tiles').onchange = () => {
   tilesOn = $<HTMLInputElement>('start-tiles').checked;
@@ -481,6 +490,7 @@ async function openDesk(): Promise<void> {
     if (!desk) {
       const mod = await import('./desk');
       desk = new mod.Desk({ imu: open => glasses.imu(open), paint: () => paint(), settled: () => glasses.settled(), diag: (n, d) => diag(n, d), now: () => Date.now() });
+      desk.setPointerOptions(deskOptions());
     }
   } catch (error) {
     diag('desk.load-failed', error instanceof Error ? error.message : String(error));
