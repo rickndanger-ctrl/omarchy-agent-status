@@ -61,3 +61,8 @@ export class HubPicker {
     return this.down ? { name: null, down: true } : { name: this.names.get(this.cur) ?? null, down: false };
   }
 }
+
+/** The hubs a request may try: all of them in order, or only the current one for a request that must never be sent twice (an ask to Muse). */
+export function hubsToTry<T>(hubs: T[], once: boolean): T[] {
+  return once ? hubs.slice(0, 1) : hubs;
+}

@@ -661,3 +661,23 @@ test('status waiting: the Muse screen and the tile say "Muse is busy, waiting…
   assert.equal(plainMuseError('no Muse is ready right now'), 'no Muse is ready right now');
   assert.equal(plainMuseError('HTTP 502'), 'Muse is not reachable right now');
 });
+
+import { hubsToTry } from '../src/hubpick';
+
+test('an ask to Muse is tried on the current hub only (no failover to a second hub = no second job); other requests keep all hubs', () => {
+  assert.deepEqual(hubsToTry(['a', 'b', 'c'], true), ['a']);
+  assert.deepEqual(hubsToTry(['a', 'b', 'c'], false), ['a', 'b', 'c']);
+  assert.deepEqual(hubsToTry([], true), []);
+});
+
+test('a lost job (hub restarted) answers status error at once: the poll loop ends and the plain reason is shown', async () => {
+  let polls = 0;
+  const seen: string[] = [];
+  const finished = await pollMuseJob(async () => { polls++; return { status: 'error', question: '', reply: '', error: 'Muse job was lost (hub restarted)' }; }, async () => {}, (job, done) => seen.push(`${job.status}:${done}`), 215);
+  assert.equal(finished, true);
+  assert.equal(polls, 1, 'not 215 polls / 150 s');
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const ask = m.beginMuseAsk('q');
+  m.setMuseProblem('q', 'Muse job was lost (hub restarted)', ask);
+  assert.match(m.render(NOW), /Muse didn't get it: Muse job was lost \(hub restarted\)\./);
+});

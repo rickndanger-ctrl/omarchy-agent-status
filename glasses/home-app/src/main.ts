@@ -4,7 +4,7 @@ import { ShownWatch } from './shownwatch';
 import { applyMuseLatest } from './musesync';
 import { plainMuseError, pollMuseJob, MUSE_POLLS, MUSE_DEADLINE_MS, type MuseJob } from './musepoll';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
-import { HubPicker } from './hubpick';
+import { HubPicker, hubsToTry } from './hubpick';
 import { LayoutLoader } from './layoutcache';
 import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
@@ -245,9 +245,9 @@ function diag(name: string, detail: string | number | boolean = ''): void {
 class HttpError extends Error {}
 
 /** Calls the current hub; if it can't be reached at all, the next hub takes over (and stays current). */
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
+async function api<T>(path: string, init?: RequestInit, once = false): Promise<T> {
   let lastError: unknown = new Error('no hub reachable');
-  for (const hub of hubs()) {
+  for (const hub of hubsToTry(hubs(), once)) {
     let res: Response;
     try {
       res = await fetch(new URL(`api/${path}`, hub), {
@@ -764,8 +764,9 @@ async function run(action: Action): Promise<void> {
       museTile.askStart(action.text);
       paint();
       const askedAt = Date.now();
+      const askKey = `${askedAt.toString(36)}-${Math.random().toString(36).slice(2, 10)}`; // the hub ignores a repeat of the same ask
       const ask = action.ask ?? model.beginMuseAsk(action.text); // the newest ask owns the Muse screen and tile (conversation asks too)
-      const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text }) }).catch(e => ({ error: String(e.message ?? e) }));
+      const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text, clientId: askKey }) }, true).catch(e => ({ error: String(e.message ?? e) }));
       if (asked.error) asked.error = plainMuseError(asked.error);
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
       if (!asked.id) { const newest = model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay', ask); if (newest) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); } paint(); return; }

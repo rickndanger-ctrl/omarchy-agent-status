@@ -793,22 +793,22 @@ function museReply(raw, id) {
 }
 
 // `trace` (optional) reports what happened: `attempted` = the question was handed to a relay's /ask (it may have arrived even if the call then failed:
-// never send it again), `reason` = why nobody took it.
-async function askMuse(text, start, trace = {}) {
-  let busy = false, down = false, unreachable = false
-  for (const [i, muse] of MUSES.entries()) {
-    if (i < start) continue
-    let health
-    try { health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 }) } catch { unreachable = true; continue }
-    if (!health.ok) { down = true; continue }
-    if (!health.composer || health.busy) { busy = true; continue }
+// it is never handed to another relay), `reason` = why nobody took it. Relays are checked in parallel with a short timeout; nothing is sent after `deadline`.
+async function askMuse(text, start, trace = {}, deadline = Infinity) {
+  const wanted = MUSES.map((muse, i) => ({ muse, i })).filter(x => x.i >= start)
+  const checks = await Promise.all(wanted.map(async ({ muse, i }) => {
+    try { return { muse, i, health: await call(`${muse.url}/selftest`, muse.token, { timeout: 2000 }) } } catch { return { muse, i, health: null } }
+  }))
+  const ready = checks.find(c => c.health?.ok && c.health.composer && !c.health.busy)
+  if (ready && Date.now() < deadline) {
     trace.attempted = true
     try {
-      const r = await call(`${muse.url}/ask`, muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
-      return { id: `${i}-${r.id}`, muse: muse.name }
-    } catch { /* the call failed after the question may have been sent: not asked again, the next Muse is tried as before */ }
+      const r = await call(`${ready.muse.url}/ask`, ready.muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
+      return { id: `${ready.i}-${r.id}`, muse: ready.muse.name }
+    } catch { return null } // the call failed after the question may have been sent: it stops here, no other relay is asked
   }
-  trace.reason = busy ? 'Muse is updating or busy' : down ? 'Muse not running' : unreachable ? 'no Muse reachable' : 'no Muse is ready right now'
+  trace.reason = checks.some(c => c.health && c.health.ok && (!c.health.composer || c.health.busy)) || ready ? 'Muse is updating or busy'
+    : checks.some(c => c.health && !c.health.ok) ? 'Muse not running' : checks.length && checks.every(c => !c.health) ? 'no Muse reachable' : 'no Muse is ready right now'
   return null
 }
 // A question is accepted at once ("waiting") and handed to the first Muse that is ready: the hub checks every 2 s for up to 20 s and sends it ONCE.
@@ -816,21 +816,31 @@ async function askMuse(text, start, trace = {}) {
 const MUSE_WAIT_MS = Number(process.env.HUD_MUSE_WAIT_MS) || 20_000
 const MUSE_WAIT_STEP_MS = Number(process.env.HUD_MUSE_WAIT_STEP_MS) || 2000
 const museWaits = new Map() // 'w-…' id → { text, state: 'waiting'|'sent'|'failed', reason }
+const museErrorLogged = new Set()
+const museClientIds = new Map() // the app's own id for an ask → the job id (a repeated request is the same ask)
+// What a relay's job error means to the owner: never its raw text.
+export function plainMuseJobError(status, error) {
+  if (status === 'timeout') return 'Muse took too long'
+  const e = String(error ?? '')
+  if (/not running|not open|no window|windowed|composer|updating|busy/i.test(e)) return 'Muse is updating or busy'
+  return 'Muse ran into a problem'
+}
 async function museWait(id, job) {
   const started = Date.now()
+  const deadline = started + MUSE_WAIT_MS
   for (;;) {
     const trace = {}
-    const r = await askMuse(job.text, 0, trace)
+    const r = await askMuse(job.text, 0, trace, deadline)
     const ms = Date.now() - started
     if (r) {
       museMoved.set(id, r.id)
       setTimeout(() => museMoved.delete(id), 10 * 60_000).unref()
       job.state = 'sent'
-      console.log(`muse.wait ${ms} sent via ${r.muse}`)
+      console.log(`muse.wait ${ms} sent via ${MUSES[Number(r.id.split('-')[0])]?.name}`)
       return
     }
     const reason = trace.attempted ? 'Muse did not confirm the question' : trace.reason
-    if (trace.attempted || ms + MUSE_WAIT_STEP_MS > MUSE_WAIT_MS) {
+    if (trace.attempted || Date.now() + MUSE_WAIT_STEP_MS > deadline) {
       job.state = 'failed'; job.reason = reason
       console.log(`muse.wait ${ms} ${reason}`)
       return
@@ -840,7 +850,6 @@ async function museWait(id, job) {
 }
 // Glasses id → id of the same question re-asked on a later Muse.
 const museMoved = new Map()
-const museMoving = new Set() // ids being handed on right now (the glasses poll fast)
 
 async function call(url, token, options = {}) {
   const res = await fetch(url, {
@@ -1907,11 +1916,15 @@ async function handle(req, res) {
     }
     if (req.method === 'POST' && p === '/api/muse/ask') {
       // The Muse relay's own /ask, exactly as Ask Muse uses it; the relay runs one question at a time.
-      const text = String((await readBody(req)).text ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 1000)
+      const asked = await readBody(req)
+      const text = String(asked.text ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 1000)
       if (DEMO) return send(res, 200, { id: 'demo' })
       if (MODE !== 'hub' || !MUSES.length || !text) return send(res, 400, { error: 'cannot ask Muse' })
       // Accepted at once; the first Muse that is ready gets the question, once (see museWait).
+      const clientId = String(asked.clientId ?? '').slice(0, 64)
+      if (clientId && museClientIds.has(clientId)) return send(res, 200, { id: museClientIds.get(clientId), muse: 'waiting', status: 'waiting' }) // a repeated request is the same ask
       const id = `w-${randomBytes(6).toString('hex')}`
+      if (clientId) { museClientIds.set(clientId, id); setTimeout(() => museClientIds.delete(clientId), 30 * 60_000).unref() }
       const job = { text, state: 'waiting', reason: '' }
       museWaits.set(id, job)
       setTimeout(() => museWaits.delete(id), 30 * 60_000).unref()
@@ -1925,27 +1938,18 @@ async function handle(req, res) {
       if (DEMO) return send(res, 200, { status: 'done', question: 'demo question', reply: 'Here is what Muse would say.' })
       if (id.startsWith('w-')) {
         const wait = museWaits.get(id)
-        if (!wait) return send(res, 400, { error: 'bad id' })
+        if (!wait) return send(res, 200, { status: 'error', question: '', reply: '', error: 'Muse job was lost (hub restarted)' })
         return send(res, 200, wait.state === 'failed' ? { status: 'error', question: clip(wait.text, 300), reply: '', error: wait.reason } : { status: 'waiting', question: clip(wait.text, 300), reply: '', error: '' })
       }
       const [, index, job] = id.match(/^(\d+)-(\w{1,40})$/) ?? []
       const muse = MUSES[Number(index)]
       if (MODE !== 'hub' || !muse || !job) return send(res, 400, { error: 'bad id' })
       const r = await call(`${muse.url}/reply/${job}`, muse.token, { timeout: 6000 })
-      // musectl failed before anything was typed (Muse windowed, box not
-      // clickable…): the question never reached this Muse, so hand it to the
-      // next one that is ready. The glasses keep polling the same id.
-      if (r.status === 'error' && /^Command failed/.test(String(r.error ?? '')) && r.question) {
-        if (museMoving.has(id)) return send(res, 200, { status: 'sending', question: clip(r.question, 300), reply: '', error: '' })
-        museMoving.add(id)
-        const next = await askMuse(String(r.question), Number(index) + 1).finally(() => museMoving.delete(id))
-        if (next) {
-          museMoved.set(id, next.id)
-          setTimeout(() => museMoved.delete(id), 10 * 60_000).unref()
-          return send(res, 200, { status: 'sending', question: clip(r.question, 300), reply: '', error: '' })
-        }
-      }
-      return send(res, 200, { status: String(r.status ?? ''), question: clip(r.question, 300), reply: museReply(r.reply, id).slice(0, 2000), error: clip(r.error, 120) })
+      // A relay's own error text is never passed on (nor logged): the owner gets a plain reason.
+      const bad = r.status === 'error' || r.status === 'timeout' || Boolean(r.error)
+      const plainError = bad ? plainMuseJobError(r.status, r.error) : ''
+      if (plainError && !museErrorLogged.has(id)) { museErrorLogged.add(id); console.log(`muse.error ${plainError}`) }
+      return send(res, 200, { status: String(r.status ?? ''), question: clip(r.question, 300), reply: museReply(r.reply, id).slice(0, 2000), error: plainError })
     }
     if (req.method === 'GET' && p === '/api/muse') {
       if (DEMO) return send(res, 200, { question: 'What is on my calendar today?', reply: 'You have a dentist appointment at 3 PM and dinner with Alex at 7.' })

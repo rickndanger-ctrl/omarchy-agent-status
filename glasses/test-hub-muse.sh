@@ -31,8 +31,9 @@ const [port, dir] = process.argv.slice(2)
 const read = n => readFileSync(`${dir}/${n}.txt`, 'utf8')
 http.createServer((req, res) => {
   const send = body => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(body)) }
-  if (req.url === '/selftest') return send({ ok: true, composer: existsSync(`${dir}/ready`) })
-  if (req.url === '/ask' && req.method === 'POST') { let b = ''; req.on('data', c => { b += c }); req.on('end', () => { appendFileSync(`${dir}/asks.log`, b + '\n'); send({ id: 'job1' }) }); return }
+  if (req.url === '/selftest') { const slow = existsSync(`${dir}/slow`); setTimeout(() => send({ ok: !existsSync(`${dir}/notrunning`), composer: existsSync(`${dir}/ready`) }), slow ? 1500 : 0); return }
+  if (req.url === '/ask' && req.method === 'POST') { let b = ''; req.on('data', c => { b += c }); req.on('end', () => { appendFileSync(`${dir}/asks.log`, b + '\n'); if (b.includes('boom')) { res.statusCode = 500; res.end('{}'); return } send({ id: 'job1' }) }); return }
+  if (req.url === '/reply/cmdfail') return send({ status: 'error', question: 'q', reply: '', error: 'Command failed: /usr/local/bin/musectl type --secret-path /Users/x' })
   if (req.url === '/reply/job1') return send({ status: 'done', question: 'asked once', reply: 'Answered once.' })
   if (req.url === '/latest') return send({ question: 'Can you hear me?', reply: read('polluted') })
   if (req.url === '/reply/polluted') return send({ status: 'done', question: 'Can you hear me?', reply: read('polluted') })
@@ -113,6 +114,47 @@ getr http://127.0.0.1:5383 "$WID2"
 check "never ready: the job ends in an error with a plain reason" "d['status']=='error' and d['error']=='Muse is updating or busy' and 'server said' not in d['error']"
 [ "$(asks "$work/relayB")" = 0 ] && ok "and ZERO /ask calls reached the relay" || bad "asks reached a relay that was never ready"
 grep -q '^muse.wait [0-9]* Muse is updating or busy' "$work/hubB.log" && ok "logged: $(grep -m1 '^muse.wait' "$work/hubB.log")" || bad "muse.wait failure not logged"
+
+# ---- review: one question reaches a relay in every case ----
+mkdir -p "$work/relayD1" "$work/relayD2" "$work/relayE"
+cp "$work/polluted.txt" "$work/clean.txt" "$work/relayD1/"; cp "$work/polluted.txt" "$work/clean.txt" "$work/relayD2/"; cp "$work/polluted.txt" "$work/clean.txt" "$work/relayE/"
+touch "$work/relayD1/ready" "$work/relayD2/ready"
+node "$work/fake-muse.mjs" 5378 "$work/relayD1" & pids+=($!)
+node "$work/fake-muse.mjs" 5377 "$work/relayD2" & pids+=($!)
+printf '{"muse":[{"name":"d1","url":"http://127.0.0.1:5378","tokenFile":"%s"},{"name":"d2","url":"http://127.0.0.1:5377","tokenFile":"%s"}]}\n' "$work/relay.token" "$work/relay.token" > "$work/hubD.json"
+HUD_MUSE_WAIT_MS=3000 HUD_MUSE_WAIT_STEP_MS=300 HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hubD.json" node "$here/hud-server.mjs" --mode hub --port 5376 --machine "Wait D" >"$work/hubD.log" 2>&1 & pids+=($!)
+for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:5376/api/health" && break; sleep 0.2; done
+postj() { curl -s -m 5 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$2" "$1/api/muse/ask" > "$work/out"; }
+postj http://127.0.0.1:5376 '{"text":"boom","clientId":"c1"}'
+sleep 1.5
+n1=$(asks "$work/relayD1"); n2=$(asks "$work/relayD2")
+[ "$n1" = 1 ] && [ "$n2" = 0 ] && ok "(1) an /ask that fails is never passed to the next ready relay (d1 $n1, d2 $n2)" || bad "(1) d1 $n1 d2 $n2"
+WIDB=$(python3 -c "import json; print(json.load(open('$work/out'))['id'])")
+getr http://127.0.0.1:5376 "$WIDB"
+check "and the owner reads a plain line" "d['status']=='error' and d['error']=='Muse did not confirm the question'"
+postj http://127.0.0.1:5376 '{"text":"hello","clientId":"c2"}'; ID1=$(python3 -c "import json; print(json.load(open('$work/out'))['id'])")
+postj http://127.0.0.1:5376 '{"text":"hello","clientId":"c2"}'; ID2=$(python3 -c "import json; print(json.load(open('$work/out'))['id'])")
+sleep 1
+[ "$ID1" = "$ID2" ] && [ "$(asks "$work/relayD1")" = 2 ] && ok "(3) a repeated request with the same client id is the same ask: one more /ask in total, one id" || bad "(3) $ID1 $ID2 asks=$(asks "$work/relayD1")"
+# (6) a relay job error is never passed on raw
+getr http://127.0.0.1:5376 "0-cmdfail"
+check "(2)(6) a relay's raw job error ('Command failed …') becomes a plain reason" "d['status']=='error' and d['error']=='Muse ran into a problem' and 'Command' not in json.dumps(d) and '/Users' not in json.dumps(d)"
+[ "$(asks "$work/relayD2")" = 0 ] && ok "(2) and no other relay was asked because of it" || bad "(2) relay d2 was asked"
+grep -q '^muse.error Muse ran into a problem$' "$work/hubD.log" && ! grep -q 'Command failed' "$work/hubD.log" && ok "(6) the log has only the plain reason" || bad "(6) log: $(grep muse.error "$work/hubD.log")"
+# (4) slow selftest: nothing is sent after the deadline
+touch "$work/relayE/ready" "$work/relayE/slow"
+printf '{"muse":[{"name":"e","url":"http://127.0.0.1:5375","tokenFile":"%s"}]}\n' "$work/relay.token" > "$work/hubE.json"
+node "$work/fake-muse.mjs" 5375 "$work/relayE" & pids+=($!)
+HUD_MUSE_WAIT_MS=600 HUD_MUSE_WAIT_STEP_MS=200 HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hubE.json" node "$here/hud-server.mjs" --mode hub --port 5374 --machine "Wait E" >"$work/hubE.log" 2>&1 & pids+=($!)
+for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:5374/api/health" && break; sleep 0.2; done
+postj http://127.0.0.1:5374 '{"text":"late","clientId":"c3"}'; WIDE=$(python3 -c "import json; print(json.load(open('$work/out'))['id'])")
+sleep 3.5
+getr http://127.0.0.1:5374 "$WIDE"
+check "(4) a relay whose selftest answers after the deadline (and after the 2 s check timeout) gets nothing: error, no send" "d['status']=='error'"
+[ "$(asks "$work/relayE")" = 0 ] && ok "(4) zero /ask calls" || bad "(4) asks reached the slow relay"
+# (5) hub restart: the old waiting id is lost, said plainly and at once
+getr http://127.0.0.1:5374 "w-doesnotexist"
+check "(5) an unknown waiting id (hub restarted) is an error at once" "d['status']=='error' and d['error']=='Muse job was lost (hub restarted)'"
 printf '{"muse":[{"name":"gone","url":"http://127.0.0.1:5379","tokenFile":"%s"}]}\n' "$work/relay.token" > "$work/hubC.json"
 HUD_MUSE_WAIT_MS=1200 HUD_MUSE_WAIT_STEP_MS=400 HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hubC.json" node "$here/hud-server.mjs" --mode hub --port 5382 --machine "Wait C" >"$work/hubC.log" 2>&1 & pids+=($!)
 for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:5382/api/health" && break; sleep 0.2; done
