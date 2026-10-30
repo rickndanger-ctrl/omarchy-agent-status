@@ -586,3 +586,26 @@ test('an EMPTY successful /latest is treated like a failed read: it never replac
   assert.doesNotMatch(m.render(NOW), /No Muse conversation/);
   assert.deepEqual(tile.get(), { question: 'q', reply: 'THE ANSWER' });
 });
+
+test('a question-only /latest (asked from another client): newest question + "thinking", the loaded answer moves below under earlier; the tile keeps its last real answer', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'old q', reply: 'OLD ANSWER' }, tile.startRead()), true);
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead()), true);
+  let text = m.render(NOW);
+  assert.match(text, /You: asked elsewhere/);
+  assert.match(text, /Muse is thinking…/);
+  assert.deepEqual(tile.get(), { question: 'old q', reply: 'OLD ANSWER' }, 'the tile keeps its last real answer');
+  for (let i = 0; i < 2; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /earlier|OLD ANSWER/, 'the previous answer is below, not dropped');
+  // the same pending read again changes nothing; the reply arriving replaces the thinking head
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead()), true);
+  m.goTo('muse');
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: 'NEW ANSWER' }, tile.startRead()), true);
+  assert.match(m.render(NOW), /Muse: NEW ANSWER/);
+  assert.deepEqual(tile.get(), { question: 'asked elsewhere', reply: 'NEW ANSWER' });
+  // a tile with nothing yet shows the pending question
+  const fresh = new MuseCache(); const fm = new HomeModel(); fm.update(data); fm.goTo('muse');
+  applyMuseLatest(fm, fresh, fresh.fetchStart(), { question: 'only q', reply: '' }, fresh.startRead());
+  assert.deepEqual(fresh.get(), { question: 'only q', reply: '' });
+});

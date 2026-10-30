@@ -577,6 +577,15 @@ export class HomeModel {
   }
   /** Muse's screen already holds an answer (or an ask's failure note): an unreachable relay must not replace it. */
   museHasAnswer(): boolean { return this.museHead !== null && this.museHeadReply; }
+  /** The relay's latest is a question with no reply yet (asked from another client): it is the newest, "thinking"; the answer shown so far moves below. */
+  showMusePending(question: string): void {
+    const head = [...wrap(`You: ${question}`), '', 'Muse is thinking…'];
+    if (this.museHead && this.museHead.join('\n') === head.join('\n')) { this.composeMuse(); return; }
+    if (this.museHead && this.museHeadReply) this.museEarlier = [{ ask: -2, lines: this.museHead }, ...this.museEarlier.filter(e => e.ask !== -2 && e.lines.join('\n') !== this.museHead!.join('\n'))].slice(0, 3);
+    this.museHead = head; this.museHeadReply = false; this.museHeadFinal = false;
+    this.composeMuse();
+    if (this.screen.kind === 'muse') this.scroll = 0;
+  }
   /** Put the ask-in-progress back on screen (the Muse screen was opened or reloaded while an ask is under way: nothing is fetched then). */
   restoreMuse(): void { if (this.museHead) this.composeMuse(); }
   /** The relay's latest exchange. Returns whether it took the screen: it does not once this session holds a final answer for its newest ask (it is added below, if it is something new). */
