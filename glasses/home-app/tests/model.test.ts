@@ -907,3 +907,18 @@ test('a Muse read (tile refresh every 1.2 s) never moves the scroll of a chat or
   w.setMuse({ question: 'q', reply: 'reloaded answer' });
   assert.match(w.render(NOW), /Muse: reloaded answer/);
 });
+
+test('Muse open and scrolled: the same /latest arriving again keeps the place; a different one goes to the top', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  m.goTo('muse');
+  const latest = { question: 'q', reply: Array.from({ length: 30 }, (_, i) => `answer line ${i}`).join('\n') };
+  m.setMuse(latest);
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
+  const scrolled = m.render(NOW);
+  assert.doesNotMatch(scrolled, /answer line 0\b/);
+  m.setMuse({ ...latest }); // the tile's timed read lands: the same reply
+  assert.equal(m.render(NOW), scrolled, 'still where the owner scrolled to');
+  m.setMuse({ question: 'q', reply: 'a different, newer reply' });
+  assert.match(m.render(NOW), /Muse: a different, newer reply/);
+});

@@ -589,10 +589,14 @@ export class HomeModel {
       return false;
     }
     // The scrollback of earlier answers stays: reopening Muse must not lose it.
-    this.museHeadReply = latest !== null && Boolean(latest.question || latest.reply);
-    this.museHead = latest === null ? ["Couldn't reach Muse."] : this.museHeadReply ? this.museAnswerView(latest.question, latest.reply) : ['No Muse conversation yet.'];
+    const reply = latest !== null && Boolean(latest.question || latest.reply);
+    const head = latest === null ? ["Couldn't reach Muse."] : reply ? this.museAnswerView(latest.question, latest.reply) : ['No Muse conversation yet.'];
+    const same = this.museHead !== null && this.museHead.join('\n') === head.join('\n');
+    this.museHeadReply = reply;
+    this.museHead = head;
     this.composeMuse();
-    if (this.screen.kind === 'muse') this.scroll = 0;
+    // The same reply read again (the tile's timed read landing after Muse was opened and scrolled) keeps the owner's place.
+    if (this.screen.kind === 'muse' && !same) this.scroll = 0;
     return true;
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }
