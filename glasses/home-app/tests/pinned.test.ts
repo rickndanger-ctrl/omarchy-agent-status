@@ -183,3 +183,43 @@ test('the default pins are the home-agents sessions (claude / codex on the Minis
   assert.equal(m.pinSession(pins[4])?.tmux, 'claude', 'Neo\'s screen session named claude');
   assert.equal(m.pinSession(pins[0]), undefined);
 });
+
+test('orchestrator pin: first on Home, then the six Mac pins and Dell window, then the normal rows, All agents last; it pages cleanly', () => {
+  const orchPin: Pin = { label: 'Claude · Orchestrator', machine: 'Laptop', agent: 'claude', session: 'orchestrator' };
+  const pins = [orchPin, ...PINS.slice(0, 6), { ...PINS[6], label: 'Claude · Dell window' }];
+  const orch = sess('Laptop', 'claude', 'working', { name: 'Orchestrator', session: 'orchestrator', page: 'Orchestrator', pane: 'orchestrator', tmux: 'orchestrator' });
+  const m = new HomeModel();
+  m.update(data({ pinned: pins, machines: [...data().machines, { name: 'Laptop', online: true }], sessions: [...data().sessions, orch] }));
+  const seen: string[] = [];
+  for (let i = 0; i < 24; i++) {
+    const rows = lines(m);
+    assert.ok(rows.length <= 10, `${rows.length} lines at step ${i}`);
+    for (const l of rows) assert.ok(l.length <= WIDTH, l);
+    const cur = rows.find(l => l.startsWith('>'));
+    if (cur && seen.at(-1) !== cur) seen.push(cur.slice(2));
+    m.input('down', NOW);
+  }
+  const names = seen.map(l => l.replace(/^\S+ /, '').split(' · ').slice(0, 2).join(' · '));
+  assert.deepEqual(names.slice(0, 8), pins.map(p => p.label));
+  assert.match(seen[0], /^• Claude · Orchestrator · busy/);
+  assert.match(seen.at(-1)!, /^All agents/);
+});
+
+test('orchestrator: select starts the mic, the heard text goes to the hub as a prompt, the header says sent to Claude; no Stop (Esc)', () => {
+  const orch = sess('Laptop', 'claude', 'idle', { name: 'Orchestrator', session: 'orchestrator', page: 'Orchestrator', pane: 'orchestrator', tmux: 'orchestrator' });
+  const m = new HomeModel();
+  m.update(data({ voice: true, pinned: [{ label: 'Claude · Orchestrator', machine: 'Laptop', agent: 'claude', session: 'orchestrator' }], machines: [{ name: 'Laptop', online: true }], sessions: [orch] }));
+  m.input('select', NOW);
+  assert.equal(m.screenKind, 'agent');
+  assert.deepEqual(m.terminalTarget(), { machine: 'Laptop', pane: 'orchestrator', key: 'Laptop/orchestrator' });
+  m.setTerminal('Laptop/orchestrator', ['Done: the build passes.']);
+  assert.deepEqual(m.input('select', NOW), { kind: 'startMic' });
+  m.input('select', NOW);
+  m.setTranscript('start the release', NOW);
+  assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Laptop', pane: 'orchestrator', text: 'start the release' });
+  m.promptDone(true, false, NOW);
+  assert.match(m.render(NOW), /^sent to Claude\n/);
+  m.input('down', NOW);
+  assert.match(m.render(NOW), /> Speak\n  Back\n  Continue/);
+  assert.doesNotMatch(m.render(NOW), /Stop \(Esc\)/);
+});

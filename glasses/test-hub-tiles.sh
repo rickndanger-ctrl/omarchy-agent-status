@@ -11,6 +11,7 @@ BARE_PORT=${BARE_PORT:-5393}
 DOWN_PORT=${DOWN_PORT:-5394}
 PEER_A_PORT=${PEER_A_PORT:-5395}
 PEER_B_PORT=${PEER_B_PORT:-5396}
+ORCH_PORT=${ORCH_PORT:-5398}
 RELAY="http://127.0.0.1:$RELAY_PORT"
 HUB="http://127.0.0.1:$HUB_PORT"
 BARE="http://127.0.0.1:$BARE_PORT"
@@ -154,7 +155,7 @@ check "GET /api/layout reads back what was saved" 200 "d['pages'][4]['left']=='u
 if [ -f "$HOME/.config/agent-glasses/layout.json" ]; then ok "layout.json is written under the config folder"; else bad "layout.json is written under the config folder"; fi
 
 req GET "$HUB" /api/pinned
-check "GET /api/pinned with no pinned.json returns the 7 default pins (the home-agents sessions; Dell is the tile)" 200 "len(d['pins'])==7 and d['pins'][0]=={'label':'Claude · Mini 1','machine':'Mini 1','agent':'claude','session':'claude'} and [x['session'] for x in d['pins'][:6]]==['claude','codex']*3 and [x['machine'] for x in d['pins'][:6]]==['Mini 1','Mini 1','Mini 2','Mini 2','Neo','Neo'] and d['pins'][6]=={'label':'Claude · Dell','machine':'Dell','agent':'claude','session':'tile'}"
+check "GET /api/pinned with no pinned.json returns the 7 default pins (the home-agents sessions; Dell is the tile)" 200 "len(d['pins'])==7 and d['pins'][0]=={'label':'Claude · Mini 1','machine':'Mini 1','agent':'claude','session':'claude'} and [x['session'] for x in d['pins'][:6]]==['claude','codex']*3 and [x['machine'] for x in d['pins'][:6]]==['Mini 1','Mini 1','Mini 2','Mini 2','Neo','Neo'] and d['pins'][6]=={'label':'Claude · Dell window','machine':'Dell','agent':'claude','session':'tile'}"
 req PUT "$HUB" /api/pinned '{"pins":[{"label":"x","machine":"Mini 1","agent":"claude"}]}'
 check "PUT /api/pinned rejects a pin with no session" 400
 req PUT "$HUB" /api/pinned '{"pins":[{"label":"x","machine":"Mini 1","agent":"claude","session":7}]}'
@@ -291,6 +292,55 @@ req GET "http://127.0.0.1:$SCREEN_PORT" /api/home
 check "a GNU screen session '1234.claude (Detached)' becomes a session with tmux=claude" 200 "any(s.get('tmux')=='claude' and s['agent']=='claude' and s['pane']=='screen:1234.claude' for s in d['sessions'])"
 check "a tmux pane carries its session name" 200 "any(s.get('tmux')=='codex' and s['agent']=='codex' and s['pane']=='%3' for s in d['sessions'])"
 check "a tmux session name with a space is kept whole" 200 "any(s.get('tmux')=='two words' and s['pane']=='%4' for s in d['sessions'])"
+
+echo "Orchestrator pin (fake HOME and a fixture transcript; never the real ~/.claude)"
+ORCH_HOME="$work/homeO"
+ORCH_SESSION=11111111-2222-3333-4444-555555555555
+mkdir -p "$ORCH_HOME/.config/agent-glasses" "$ORCH_HOME/.claude/projects/-fixture"
+python3 - "$ORCH_HOME/.claude/projects/-fixture/$ORCH_SESSION.jsonl" <<'PY'
+import json, sys
+rows = [{"type": "user", "message": {"role": "user", "content": "hi"}}]
+rows.append({"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 300000}]}})  # pushes the early reply out of the 256 KB tail
+rows.append({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "SECRET-THOUGHT"}, {"type": "text", "text": "Release is ready.\nkey=abcd1234efgh and Bearer abcdefghijklmnop1234 and sk-abcdefghijklmnop and ghp_abcdefghijklmnopqrstu"}, {"type": "tool_use", "name": "Bash", "input": {"command": "TOOLUSE-CMD"}}]}})
+rows.append({"type": "user", "message": {"content": [{"type": "tool_result", "content": "TOOLRESULT-OUT"}]}})
+rows.append({"type": "assistant", "message": {"content": [{"type": "text", "text": "hex 0123456789abcdef0123456789abcdef01 b64 QWxhZGRpbjpvcGVuIHNlc2FtZVRoaXNJc0xvbmc9 done."}]}})
+open(sys.argv[1], "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
+PY
+printf '{"orchestrator":{"session":"%s","dir":"~/.claude/projects/-fixture"}}\n' "$ORCH_SESSION" > "$work/hub-orch.json"
+HOME="$ORCH_HOME" HUD_TOKEN_FILE="$work/hud.token" HUD_HUB_CONFIG="$work/hub-orch.json" node "$here/hud-server.mjs" --mode hub --port "$ORCH_PORT" --machine "Laptop" >"$work/orch.log" 2>&1 & pids+=($!)
+for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$ORCH_PORT/api/health" && break; sleep 0.2; done
+OH="http://127.0.0.1:$ORCH_PORT"
+req GET "$OH" /api/home
+check "/api/home lists the orchestrator as a Claude session on the laptop (working: the file was just written)" 200 "any(s.get('pane')=='orchestrator' and s['tmux']=='orchestrator' and s['machine']=='Laptop' and s['agent']=='claude' and s['state']=='working' for s in d['sessions'])"
+req GET "$OH" /api/pinned
+check "the default pins start with Claude · Orchestrator, end with 'Claude · Dell window'" 200 "d['pins'][0]=={'label':'Claude · Orchestrator','machine':'Laptop','agent':'claude','session':'orchestrator'} and d['pins'][-1]['label']=='Claude · Dell window' and len(d['pins'])==8"
+req GET "$OH" "/api/terminal?machine=Laptop&pane=orchestrator"
+check "terminal: the last assistant text only (no thinking, tool_use or tool_result), the early reply cut with the tail" 200 "'Release is ready.' in ' '.join(d['lines']) and 'done.' in ' '.join(d['lines']) and not re.search('SECRET-THOUGHT|TOOLUSE-CMD|TOOLRESULT-OUT', ' '.join(d['lines'])) and len(' '.join(d['lines']))<2000"
+check "terminal: key=/Bearer/sk-/ghp_/hex/base64 values are redacted" 200 "not re.search('abcd1234efgh|abcdefghijklmnop|0123456789abcdef0123|QWxhZGRpbjpvcGVu', ' '.join(d['lines'])) and ' '.join(d['lines']).count('[secret]')>=5"
+sleep 0.1
+touch -d '2 minutes ago' "$ORCH_HOME/.claude/projects/-fixture/$ORCH_SESSION.jsonl"
+req GET "$OH" /api/home
+check "idle when the file has not grown for 20 s" 200 "any(s.get('pane')=='orchestrator' and s['state']=='idle' for s in d['sessions'])"
+req POST "$OH" /api/prompt '{"machine":"Laptop","pane":"orchestrator","text":"start the release"}'
+check "prompt on the orchestrator is accepted" 200 "d['ok']==True"
+req POST "$OH" /api/prompt "{\"machine\":\"Laptop\",\"pane\":\"orchestrator\",\"text\":\"$(python3 -c "print('y'*3000)")\"}"
+INBOX="$ORCH_HOME/.config/agent-glasses/orchestrator-inbox.jsonl"
+if python3 - "$INBOX" <<'PY'
+import json, os, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+ok = len(rows) == 2 and rows[0]['text'] == 'start the release' and rows[0]['from'] == 'glasses' and isinstance(rows[0]['at'], int) and len(rows[1]['text']) == 2000
+ok = ok and oct(os.stat(sys.argv[1]).st_mode & 0o777) == '0o600'
+sys.exit(0 if ok else 1)
+PY
+then ok "inbox: one JSON line {at, text, from:'glasses'} per message, text capped at 2000, file mode 0600"; else bad "inbox lines"; fi
+req POST "$OH" /api/prompt '{"machine":"Laptop","pane":"orchestrator","key":"Escape"}'
+check "no Escape key for the orchestrator" 200 "d['ok']==False"
+rm "$ORCH_HOME/.claude/projects/-fixture/$ORCH_SESSION.jsonl"
+req GET "$OH" /api/home
+check "missing transcript = not running (no session listed)" 200 "not any(s.get('pane')=='orchestrator' for s in d['sessions'])"
+req GET "$OH" "/api/terminal?machine=Laptop&pane=orchestrator"
+check "missing transcript: terminal is 404" 404
+if [ ! -e "$HOME/.config/agent-glasses/orchestrator-inbox.jsonl" ]; then ok "the real inbox was not touched"; else bad "the real inbox was touched"; fi
 
 echo "Two hubs keeping one layout"
 PA="http://127.0.0.1:$PEER_A_PORT"

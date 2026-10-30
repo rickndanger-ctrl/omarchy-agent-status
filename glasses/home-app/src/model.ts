@@ -400,7 +400,8 @@ export class HomeModel {
 
   /** The prompt went out (or not): the header says Sent. */
   promptDone(ok: boolean, stopped: boolean, nowMs: number): void {
-    this.showFlash(ok ? (stopped ? 'Stopped' : 'Sent') : 'Could not send to that agent', nowMs);
+    const orch = this.session()?.pane === 'orchestrator';
+    this.showFlash(ok ? (stopped ? 'Stopped' : orch ? 'sent to Claude' : 'Sent') : 'Could not send to that agent', nowMs);
   }
 
   /** Speech-to-text result for the listen screen; empty or null means nothing usable. */
@@ -630,7 +631,7 @@ export class HomeModel {
   private replyChoices(x: Session | undefined): string[] {
     if (!x) return [];
     // "Back" first: swiping down lands here, and a stray tap must not send anything.
-    const replies = talkable(x) ? (x.appThread ? QUICK_REPLIES.filter(r => r !== 'Stop (Esc)') : QUICK_REPLIES) : [];
+    const replies = talkable(x) ? (x.appThread || x.pane === 'orchestrator' ? QUICK_REPLIES.filter(r => r !== 'Stop (Esc)') : QUICK_REPLIES) : [];
     return [...(replies.length ? ['Speak'] : []), 'Back', ...replies, ...(x.workspace ? [`Show on screen (workspace ${x.workspace})`] : [])];
   }
 

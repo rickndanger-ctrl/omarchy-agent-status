@@ -39,7 +39,7 @@
 import http from 'node:http'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { homedir, hostname } from 'node:os'
@@ -127,6 +127,64 @@ const NODES = (HUB.nodes || []).map(n => ({
   url: String(n.url).replace(/\/$/, ''),
   token: n.tokenFile ? tokenFrom(n.tokenFile) : TOKEN,
 }))
+// ---- orchestrator pin: the Claude session on this computer that the glasses read and write to (hub.json "orchestrator": {session, dir}) ----
+// READ: the tail of its transcript (assistant text only, secrets redacted). WRITE: one JSON line in an inbox file the session picks up.
+const expandHome = p => (String(p).startsWith('~') ? path.join(HOME, String(p).slice(1)) : String(p))
+const ORCH = MODE === 'hub' && HUB.orchestrator && /^[\w.-]+$/.test(String(HUB.orchestrator.session || '')) && HUB.orchestrator.dir
+  ? { session: String(HUB.orchestrator.session), dir: expandHome(HUB.orchestrator.dir) } : null
+const ORCH_PANE = 'orchestrator' // the pane name the glasses use for it; a tmux pane id (%3) can never collide
+const ORCH_FILE = () => path.join(ORCH.dir, `${ORCH.session}.jsonl`)
+const ORCH_INBOX = () => path.join(CONFIG_DIR, 'orchestrator-inbox.jsonl')
+const ORCH_TAIL = 256 * 1024
+const ORCH_WORKING_MS = 20_000
+// Anything token-like is blanked before it leaves the hub.
+export function redact(text) {
+  return String(text)
+    .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, '[secret]')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{16,}/g, '[secret]')
+    .replace(/\bxox[a-z]-[A-Za-z0-9-]{8,}/g, '[secret]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/=-]{8,}/gi, 'Bearer [secret]')
+    .replace(/\b((?:api[_-]?key|token|secret|password|passwd|key)\s*[=:]\s*)["']?[^\s"',;]{4,}["']?/gi, '$1[secret]')
+    .replace(/\b[0-9a-fA-F]{32,}\b/g, '[secret]')
+    .replace(/[A-Za-z0-9+\/_-]{32,}={0,2}/g, m => (/[A-Z]/.test(m) && /[a-z]/.test(m) && /\d/.test(m) ? '[secret]' : m))
+}
+function orchState() {
+  if (!ORCH) return null
+  try {
+    const st = statSync(ORCH_FILE())
+    return { state: Date.now() - st.mtimeMs < ORCH_WORKING_MS ? 'working' : 'idle', at: st.mtimeMs / 1000 }
+  } catch { return null }
+}
+async function orchestratorView() {
+  if (!ORCH) return null
+  let fh
+  try {
+    const { open } = await import('node:fs/promises')
+    fh = await open(ORCH_FILE(), 'r')
+    const { size } = await fh.stat()
+    const start = Math.max(0, size - ORCH_TAIL)
+    const buf = Buffer.alloc(size - start)
+    await fh.read(buf, 0, buf.length, start)
+    let rows = buf.toString('utf8').split('\n')
+    if (start > 0) rows = rows.slice(1) // the first line is cut
+    const replies = []
+    for (const row of rows) {
+      let e
+      try { e = JSON.parse(row) } catch { continue }
+      if (e?.type !== 'assistant' || !Array.isArray(e.message?.content)) continue
+      const text = e.message.content.filter(c => c?.type === 'text' && typeof c.text === 'string').map(c => c.text.trim()).filter(Boolean).join('\n')
+      if (text) replies.push(text)
+    }
+    return replies.slice(-4).flatMap((t, i) => [...(i ? [''] : []), ...redact(t).split('\n')])
+  } catch { return null } finally { await fh?.close() }
+}
+function orchestratorSend(text) {
+  const clean = String(text ?? '').slice(0, 2000)
+  if (!ORCH || !clean.trim()) return false
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
+  appendFileSync(ORCH_INBOX(), JSON.stringify({ at: Date.now(), text: clean, from: 'glasses' }) + '\n', { mode: 0o600 })
+  return true
+}
 const RELAY_TOKEN = HUB.messagesTokenFile ? tokenFrom(HUB.messagesTokenFile) : readJson(path.join(HOME, '.messages-relay/config.json'))?.token || ''
 // Muse relays in order of preference (hub.json "muse"), else the single local museUrl.
 const MUSES = (HUB.muse ?? (HUB.museUrl ? [{ name: 'local', url: HUB.museUrl }] : [])).map(m => ({
@@ -766,7 +824,9 @@ async function remindersSummary() {
 async function home() {
   const views = [await nodeView(), ...(MODE === 'hub' ? await remoteViews() : [])]
   const priority = { attention: 5, error: 4, working: 3, done: 2, idle: 1.5, stopped: 1 }
-  const sessions = views.flatMap(v => v.sessions).sort((a, b) => (priority[b.state] || 0) - (priority[a.state] || 0) || b.at - a.at)
+  const orch = orchState()
+  const orchSession = orch ? [{ agent: 'claude', name: 'Orchestrator', session: 'orchestrator', state: orch.state, page: 'Orchestrator', at: orch.at, workspace: '', machine: MACHINE, pane: ORCH_PANE, tmux: ORCH_PANE }] : []
+  const sessions = [...views.flatMap(v => v.sessions), ...orchSession].sort((a, b) => (priority[b.state] || 0) - (priority[a.state] || 0) || b.at - a.at)
   return {
     now: Date.now(),
     mode: MODE,
@@ -921,6 +981,7 @@ async function prompt(machine, pane, text, key, window, appThread) {
     if (!node) return false
     return !!(await call(`${node.url}/api/prompt`, node.token, { method: 'POST', body: JSON.stringify({ machine, pane, text, key, window, appThread }), timeout: 25_000 })).ok
   }
+  if (pane === ORCH_PANE && ORCH) return key ? false : orchestratorSend(text)
   if (DEMO) return true
   if (appThread) {
     if (key || !/^[\w-]{8,64}$/.test(appThread)) return false
@@ -1369,10 +1430,11 @@ const pin = (label, machine, agent, session) => ({ label, machine, agent, sessio
 // The sessions are the ones com.rick.home-agents already keeps: tmux 'claude'/'codex' on the Minis, screen 'claude'/'codex' on Neo.
 // Dell has no tmux: its Claude is the laptop window the Tiles 'agent:Dell/claude' tile follows (session 'tile', resolved by the app like that tile).
 const DEFAULT_PINS = [
+  ...(ORCH ? [pin('Claude · Orchestrator', MACHINE, 'claude', ORCH_PANE)] : []),
   pin('Claude · Mini 1', 'Mini 1', 'claude', 'claude'), pin('Codex · Mini 1', 'Mini 1', 'codex', 'codex'),
   pin('Claude · Mini 2', 'Mini 2', 'claude', 'claude'), pin('Codex · Mini 2', 'Mini 2', 'codex', 'codex'),
   pin('Claude · Neo', 'Neo', 'claude', 'claude'), pin('Codex · Neo', 'Neo', 'codex', 'codex'),
-  pin('Claude · Dell', 'Dell', 'claude', 'tile'),
+  pin('Claude · Dell window', 'Dell', 'claude', 'tile'),
 ]
 // A pin list from a request or from disk: up to PIN_MAX pins of non-empty strings, or null.
 function checkPins(raw) {
@@ -1611,6 +1673,7 @@ async function handle(req, res) {
         if (!node) return send(res, 404, { error: 'unknown computer' })
         return send(res, 200, await call(`${node.url}/api/terminal?${url.searchParams}`, node.token, { timeout: 6000 }))
       }
+      if (pane === ORCH_PANE && ORCH) { const lines = await orchestratorView(); return lines ? send(res, 200, { lines }) : send(res, 404, { error: 'agent not found' }) }
       if (DEMO) return send(res, 200, { lines: ['You: run the tests', 'Running the test suite now.', '[Bash] npm test', 'All 15 tests pass.'] })
       const appThread = url.searchParams.get('appThread') || ''
       const stamps = url.searchParams.get('stamps') === '1'
