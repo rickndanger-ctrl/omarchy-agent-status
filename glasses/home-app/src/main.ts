@@ -125,6 +125,7 @@ const glasses = new Glasses({
   onImu: sample => desk?.imuSample(sample),
   onImuOff: () => desk?.imuLost(),
   onFrame: what => diag('frame', `${model.screenKind} ${what}`),
+  onDrawn: text => { if (museShown && text.includes(museShown.needle)) { diag('muse.shown', Date.now() - museShown.since); museShown = null; } },
   onSlowRender: ms => diag('render.slow', `${ms} ms on ${model.screenKind}`),
   onAudio: pcm => {
     const c = getConv();
@@ -580,6 +581,10 @@ function deskInput(input: Input): void {
 }
 
 let prevKind = model.screenKind;
+/** Set around the paint of a Muse answer the owner is waiting for: that frame skips the write pacing. */
+let urgentPaint = false;
+/** The final Muse reply wanted on the glasses: when a frame containing `needle` is drawn, log how long after the ask. */
+let museShown: { needle: string; since: number } | null = null;
 /** Display off (Quick settings): a blank page until any press or remote action. */
 let blank = false;
 function wake(): void { blank = false; diag('display', 'on'); paint(); }
@@ -612,7 +617,7 @@ function paint(): void {
     preview = Array.from({ length: Math.max(l.length, r.length) }, (_, i) => (l[i] ?? '').padEnd(28) + '│ ' + (r[i] ?? '')).join('\n');
   } else {
     preview = model.render(Date.now());
-    glasses.setText(preview);
+    glasses.setText(preview, urgentPaint);
   }
   $('glass').textContent = preview;
   $('status').textContent = status;
@@ -750,6 +755,7 @@ async function run(action: Action): Promise<void> {
     } else if (action.kind === 'askMuse') {
       museTile.askStart(action.text);
       paint();
+      const askedAt = Date.now();
       const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text }) }).catch(e => ({ error: String(e.message ?? e) }));
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
       if (!asked.id) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay'); paint(); return; }
@@ -758,9 +764,20 @@ async function run(action: Action): Promise<void> {
         await new Promise(r => setTimeout(r, 700));
         const job = await api<{ status: string; question: string; reply: string; error?: string }>(`muse/reply?id=${encodeURIComponent(asked.id)}`).catch(() => null);
         if (!job) continue;
+        const finished = ['done', 'error', 'timeout'].includes(job.status);
         if (job.reply) { model.setMuseAnswer(job.question, job.reply); museTile.askReply(job.question, job.reply); }
-        paint();
-        if (['done', 'error', 'timeout'].includes(job.status)) {
+        // A partial reply is only drawn when the glasses are idle: a write in flight would hold the final one back behind it.
+        if (finished || !glasses.busy()) {
+          if (finished && job.reply) {
+            const first = job.reply.trim().split('\n')[0].slice(0, 12);
+            museShown = { needle: first, since: askedAt };
+            urgentPaint = true;
+            try { paint(); } finally { urgentPaint = false; }
+            // Already on the glasses (the text did not change since the last frame)? Then it is shown now.
+            if (glasses.upToDate()) { diag('muse.shown', Date.now() - askedAt); museShown = null; }
+          } else paint();
+        }
+        if (finished) {
           diag('muse.reply', `${job.status} ${job.error ?? ''}`);
           if (!job.reply) {
             const why = job.error || (job.status === 'timeout' ? 'Muse took too long' : 'unknown error');

@@ -40,6 +40,8 @@ export interface GlassesOptions {
   hungWriteMs?: number;
   /** A render reached the glasses (what: rebuild, text, left or right). */
   onFrame?: (what: string) => void;
+  /** The text of a full-screen frame that was actually drawn (the Even app took the write), not just asked for. */
+  onDrawn?: (text: string) => void;
   /** A head-motion sample (only while imu(true) is on). */
   onImu?: (sample: { x: number; y: number; z: number }) => void;
   /** Head tracking was switched off by the transport (left the front, app exit, reconnect): the owner of the pointer must stop too. */
@@ -115,6 +117,7 @@ export class Glasses {
   private brightness = MAX_TEXT_BRIGHTNESS;
   /** The faint outline of an unlit tile (0..15 grey levels). The SDK offers no way to change a border without rebuilding the page. */
   private outline = DEFAULT_OUTLINE;
+  private urgent = false;
   private settleWaiters = new SettleWaiters();
   /** Microphone on/off run one after another, so a stop can never overtake a start. */
   private micChain = new Serial();
@@ -129,6 +132,11 @@ export class Glasses {
     this.shown = null; // a brightness change needs the page rebuilt
     this.scheduleRender();
   }
+
+  /** A write is in flight or waiting to go (a new frame would queue behind it). */
+  busy(): boolean { return this.renderBusy || this.live.size > 0; }
+  /** The glasses already show exactly what was last asked for. */
+  upToDate(): boolean { return this.pending() === null; }
 
   /** Tile outline brightness (phone slider); the page is rebuilt to draw it. */
   setOutline(level: number): void {
@@ -291,8 +299,9 @@ export class Glasses {
     }
   }
 
-  setText(content: string): void {
+  setText(content: string, urgent = false): void {
     this.want = { kind: 'single', text: glassesSafe(content).slice(0, 950) || ' ' };
+    if (urgent) this.urgent = true; // the next write skips the 450 ms pacing (an answer the owner is waiting for)
     this.unblockFor(this.want);
     this.scheduleRender();
   }
@@ -448,7 +457,7 @@ export class Glasses {
     if (why && this.pending() !== null && why !== this.heldWhy) this.options.onLifecycle?.(`frame held: ${why}`);
     this.heldWhy = why;
     if (!this.connected || !this.foreground || this.renderBlocked || this.renderBusy || this.live.size > 0 || this.renderTimer !== undefined || this.pending() === null) return;
-    const wait = Math.max(0, MIN_RENDER_INTERVAL_MS - (performance.now() - this.lastRenderAt));
+    const wait = this.urgent ? 0 : Math.max(0, MIN_RENDER_INTERVAL_MS - (performance.now() - this.lastRenderAt));
     this.renderTimer = setTimeout(() => { this.renderTimer = undefined; void this.flushRender(); }, wait);
   }
 
@@ -464,6 +473,7 @@ export class Glasses {
     const want = this.want;
     const epoch = this.epoch;
     this.renderBusy = true;
+    this.urgent = false;
     this.lastRenderAt = performance.now();
     try {
       let accepted: boolean;
@@ -484,6 +494,7 @@ export class Glasses {
       if (took > 2000) this.options.onSlowRender?.(Math.round(took));
       if (!accepted) throw new Error('The Even app returned false for the text update.');
       this.options.onFrame?.(todo);
+      if (want.kind === 'single') this.options.onDrawn?.(want.text);
       if (todo === 'rebuild' || want.kind === 'single') this.shown = want;
       else if (this.shown?.kind === 'tiles') this.shown = { ...this.shown, [todo]: want[todo as 'left' | 'right'] };
     } catch (error) {

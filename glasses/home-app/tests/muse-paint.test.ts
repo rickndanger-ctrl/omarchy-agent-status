@@ -266,3 +266,38 @@ test('a forgotten (hung) write that lands later may have overwritten the resent 
   assert.ok(lifecycle.includes('frame held: late write, resent'), lifecycle.join('|'));
   g.dispose();
 });
+
+test('the final Muse reply is drawn within 0.5 s of done even with a 150 ms render, partial replies in flight, refreshes and presses queued; onDrawn reports it', async () => {
+  const frames: { at: number; text: string }[] = [];
+  const t0 = Date.now();
+  const model = new HomeModel(); model.update(data); model.goTo('muse');
+  const drawn: { at: number; text: string }[] = [];
+  const g = new Glasses({
+    onInput: () => {}, onMenu: () => {}, onStatus: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {},
+    onDrawn: text => drawn.push({ at: Date.now() - t0, text }),
+    bridge: async () => bridge(frames, t0, 150),
+  }, GLASSES_MENU);
+  await g.connect();
+  const paint = (urgent = false) => g.setText(model.render(NOW), urgent);
+  paint();
+  await g.settled(2000);
+  // Muse typing: a partial every 700 ms, drawn only when the glasses are idle (as main.ts does), plus refresh-style repaints.
+  const partials = ['Yes, I can', 'Yes, I can hear you. The connection', 'Yes, I can hear you. The connection looks good'];
+  for (const p of partials) {
+    await sleep(700);
+    model.setMuseAnswer('hear me?', p);
+    if (!g.busy()) paint();
+    paint(); // a refresh while a write may be in flight: only the newest text is ever sent
+  }
+  await sleep(60); // done arrives right after a partial was written (inside the 450 ms pacing window)
+  const final = 'Yes, I can hear you. The connection looks good and everything is coming through fine.';
+  model.setMuseAnswer('hear me?', final);
+  const doneAt = Date.now() - t0;
+  paint(true); // main.ts: the final reply is urgent
+  await g.settled(2000);
+  const last = drawn.filter(d => d.text.includes('coming through fine')).at(0);
+  assert.ok(last, `the final reply was drawn (${JSON.stringify(drawn.map(d => d.at))})`);
+  assert.ok(last!.at - doneAt <= 500, `drawn ${last!.at - doneAt} ms after done`);
+  assert.equal(g.upToDate(), true);
+  g.dispose();
+});

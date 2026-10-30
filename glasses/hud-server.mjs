@@ -46,6 +46,7 @@ import { homedir, hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { helpers, think, THINK_BACKENDS } from './think.mjs'
+import { sanitizeMuseReply } from './muse-clean.mjs'
 import { createConversations, CONVERSATION_MAX_BYTES } from './conversation.mjs'
 
 const run = promisify(execFile)
@@ -780,6 +781,17 @@ async function studioSummary() {
 
 // Hands a question to the first Muse, from index `start` on, that is up and
 // whose text box is ready. Returns {id, muse} or null.
+// Every reply taken from a relay goes through this before it is served: the answer only, the cut logged once per reply.
+const museTrimLogged = new Set()
+function museReply(raw, id) {
+  const { text, trimmed } = sanitizeMuseReply(raw)
+  if (trimmed > 0) {
+    const key = `${id}:${trimmed}`
+    if (!museTrimLogged.has(key)) { museTrimLogged.add(key); if (museTrimLogged.size > 200) museTrimLogged.clear(); console.log(`muse.trimmed ${trimmed} chars`) }
+  }
+  return text
+}
+
 async function askMuse(text, start) {
   for (const [i, muse] of MUSES.entries()) {
     if (i < start) continue
@@ -1891,7 +1903,7 @@ async function handle(req, res) {
           return send(res, 200, { status: 'sending', question: clip(r.question, 300), reply: '', error: '' })
         }
       }
-      return send(res, 200, { status: String(r.status ?? ''), question: clip(r.question, 300), reply: String(r.reply ?? '').slice(0, 2000), error: clip(r.error, 120) })
+      return send(res, 200, { status: String(r.status ?? ''), question: clip(r.question, 300), reply: museReply(r.reply, id).slice(0, 2000), error: clip(r.error, 120) })
     }
     if (req.method === 'GET' && p === '/api/muse') {
       if (DEMO) return send(res, 200, { question: 'What is on my calendar today?', reply: 'You have a dentist appointment at 3 PM and dinner with Alex at 7.' })
@@ -1903,7 +1915,7 @@ async function handle(req, res) {
         if (latest) break
       }
       if (!latest) return send(res, 502, { error: 'no Muse reachable' })
-      return send(res, 200, { question: clip(latest.question, 300), reply: String(latest.reply || '').slice(0, 900) })
+      return send(res, 200, { question: clip(latest.question, 300), reply: museReply(latest.reply, 'latest').slice(0, 900) })
     }
     if (req.method === 'GET' && p === '/api/layout') return send(res, 200, loadLayout())
     if (req.method === 'PUT' && p === '/api/layout') {
