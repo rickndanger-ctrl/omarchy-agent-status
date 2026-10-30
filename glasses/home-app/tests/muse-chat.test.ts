@@ -115,7 +115,7 @@ test('the relay /latest only SEEDS an empty session: its one exchange; once a ch
   const p = open(); const t3 = new MuseCache();
   applyMuseLatest(p, t3, t3.fetchStart(), { question: 'asked elsewhere', reply: '' }, t3.startRead());
   assert.match(screen(p).join('\n'), /You: asked elsewhere/);
-  assert.match(screen(p).join('\n'), /Muse is thinking…/);
+  assert.match(screen(p).join('\n'), /asked on another device/);
 });
 
 test('Remote on the Muse chat: a quick Back after a Down while there is more below keeps scrolling; at the end it goes back', async () => {
@@ -166,14 +166,14 @@ test('two overlapping requests each carry the hub that answered THEM (no shared 
 test('review (1): a question seeded as "thinking" by /latest is completed by a later /latest with the same question + a reply, and only that', () => {
   const m = open(); const tile = new MuseCache();
   applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead());
-  assert.match(screen(m).join('\n'), /Muse is thinking…/);
+  assert.match(screen(m).join('\n'), /asked on another device/);
   // a different question or an empty reply does not complete it
   assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'something else', reply: 'WRONG' }, tile.startRead()), false);
   assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead()), false);
   assert.doesNotMatch(screen(m).join('\n'), /WRONG/);
   assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: 'The real answer.' }, tile.startRead()), true);
   assert.match(screen(m).join('\n'), /Muse: The real answer\./);
-  assert.doesNotMatch(screen(m).join('\n'), /thinking/);
+  assert.doesNotMatch(screen(m).join('\n'), /thinking|another device/);
   assert.deepEqual(tile.get(), { question: 'asked elsewhere', reply: 'The real answer.' });
   // once completed (or after our own ask) later reads change nothing
   assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: 'A different later text' }, tile.startRead()), false);
@@ -224,4 +224,26 @@ test('review (3): the Back-after-Down rule is for the phone remote only, and a c
   now += 300;
   await handle('back', 'remote'); // 700 ms after the real Down: the window has NOT been renewed by the converted Backs, so this leaves
   assert.equal(backs, 1, 'a long reply can be left by double-tapping');
+});
+
+test('a question seeded without a reply says it was asked on another device (no timer, no pretend thinking); reopening completes it', () => {
+  const m = open(); const tile = new MuseCache();
+  applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead());
+  const text = screen(m).join(' ');
+  assert.match(text, /Muse: \(asked on another device; reopen to see the answer\)/);
+  assert.doesNotMatch(text, /thinking/);
+  const view = m.museTileView()!;
+  assert.equal(view.elsewhere, true);
+  const w = widgetFor('muse');
+  const ctx = () => ({ data, now: NOW, terminal: () => null, chat: () => null, muse: () => m.museTileView(), museWaiting: () => false, museElsewhere: () => m.museTileView()?.elsewhere ?? false, reminders: () => [], url: () => null }) as never;
+  assert.deepEqual(w.body(ctx(), 40), ['You: asked elsewhere', 'Muse: (asked on another device; reopen', 'to see the answer)']);
+  // our own ask is still 'thinking'
+  const own = open(); own.beginMuseAsk('mine', NOW);
+  assert.match(screen(own).join(' '), /Muse is thinking…/);
+  assert.equal(own.museTileView()!.elsewhere, false);
+  // reopening reads /latest as today and completes it
+  m.goTo('muse');
+  applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: 'Now the answer.' }, tile.startRead());
+  assert.match(screen(m).join(' '), /Muse: Now the answer\./);
+  assert.equal(m.museTileView()!.elsewhere, false);
 });

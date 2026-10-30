@@ -102,6 +102,8 @@ const MAX_LINES = 10;
 const LIST_ROWS = 7;
 const BODY_LINES = 6;
 const MUSE_BODY = 7; // the Muse chat has no blank line under its title: one more line of conversation
+/** A question that /latest showed without a reply (asked from another device): nothing re-reads /latest by itself, so it does not pretend to be thinking. */
+export const MUSE_ELSEWHERE = '(asked on another device; reopen to see the answer)';
 const MUSE_SESSION_MS = 30 * 60_000; // a new ask after this long without Muse starts a fresh chat
 const IGNORE_BACK_MS = 500; // a Back this soon after the press that started the listening is ignored
 const TERM_LINES = 9; // the agent page is a full-screen terminal: one header line + 9 lines of tail = the 10 lines the glasses fit
@@ -544,7 +546,7 @@ export class HomeModel {
     for (const t of this.museChat) {
       this.museStarts.set(`${t.who}:${t.ask}`, lines.length);
       if (t.who === 'you') lines.push(clip(`You: ${t.text}`));
-      else lines.push(...wrap(t.problem ? t.text : `Muse: ${t.text || (t.waiting ? 'Muse is busy, waiting…' : 'Muse is thinking…')}`));
+      else lines.push(...wrap(t.problem ? t.text : `Muse: ${t.text || (t.seeded ? MUSE_ELSEWHERE : t.waiting ? 'Muse is busy, waiting…' : 'Muse is thinking…')}`));
     }
     this.museLines = lines;
   }
@@ -622,10 +624,10 @@ export class HomeModel {
     return true;
   }
   /** What the Muse tile shows: the latest exchange of this session, or null (then the tile uses what the relay last said). */
-  museTileView(): { question: string; reply: string; waiting: boolean } | null {
+  museTileView(): { question: string; reply: string; waiting: boolean; elsewhere: boolean } | null {
     const m = [...this.museChat].reverse().find(t => t.who === 'muse');
     if (!m) return null;
-    return { question: this.museTurn('you', m.ask)?.text ?? '', reply: m.text, waiting: Boolean(m.waiting) };
+    return { question: this.museTurn('you', m.ask)?.text ?? '', reply: m.text, waiting: Boolean(m.waiting), elsewhere: Boolean(m.seeded && !m.text) };
   }
   /** Put the chat back on the screen (the screen was cleared on opening). */
   restoreMuse(): void { this.composeMuse(); }

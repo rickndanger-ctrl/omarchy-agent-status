@@ -5,7 +5,7 @@
 // CONTRACT (set by the architect; changing a type here is a breaking change: tell the
 // architect first). The implementation below the line is the main session's.
 import { MUSE_UNREACHABLE } from './musecache';
-import { clip, clock, conversationLines, museDisplay, recentChats, sessionKey, studioText, STATE_WORD, wrap } from './model';
+import { clip, clock, conversationLines, MUSE_ELSEWHERE, museDisplay, recentChats, sessionKey, studioText, STATE_WORD, wrap } from './model';
 import type { Action, Chat, HomeData, Input, Session } from './model';
 import { clockTime, mmss } from './conversation';
 import type { ConvView } from './conversation';
@@ -63,6 +63,8 @@ export interface TileContext {
   muse(): { question: string; reply: string } | null;
   /** The Muse tile's ask is waiting for a busy Muse. Optional. */
   museWaiting?(): boolean;
+  /** The latest exchange was asked on another device and has no reply yet. Optional. */
+  museElsewhere?(): boolean;
   reminders(): Reminder[] | null;
   url(endpoint: string): UrlTile | null;
   /** The Conversation tile's state. Optional: without it the tile says it is not available. */
@@ -255,7 +257,7 @@ function museWidget(): Widget {
       // The latest reply of this session ("Muse: …") under one line of the question; swipe scrolls on.
       const m = museDisplay(raw.question, raw.reply);
       const question = m.question ? [clip(`You: ${m.question}`, width)] : [];
-      return [...question, ...wrap(`Muse: ${m.reply || (ctx.museWaiting?.() ? 'Muse is busy, waiting…' : 'Muse is thinking…')}`, width)];
+      return [...question, ...wrap(`Muse: ${m.reply || (ctx.museElsewhere?.() ? MUSE_ELSEWHERE : ctx.museWaiting?.() ? 'Muse is busy, waiting…' : 'Muse is thinking…')}`, width)];
     },
     actions: ctx => [...(ctx.muse() === MUSE_UNREACHABLE ? [{ id: 'retry', label: 'Retry' }] : []), { id: 'ask', label: 'Ask Muse' }],
     act: actionId => {

@@ -325,6 +325,7 @@ const tileCtx = (): TileContext => ({
   // The tile reads the same chat as the Muse screen: every reply of this session is on it. Before any ask it shows what the relay last said.
   muse: () => model.museTileView() ?? museTile.get(),
   museWaiting: () => model.museTileView()?.waiting ?? museTile.isWaiting,
+  museElsewhere: () => model.museTileView()?.elsewhere ?? false,
   // For ~5 s after a voice add the Reminders tile shows "Added: <title>" at the top, from the add result (no extra fetch).
   reminders: () => (tileData.reminders && justAdded && Date.now() - justAdded.at < 5000
     ? [{ id: 'just-added', title: justAdded.title, due: null, list: '', added: justAdded.at }, ...tileData.reminders]
