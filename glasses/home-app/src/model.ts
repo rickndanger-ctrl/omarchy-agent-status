@@ -88,7 +88,7 @@ type StartRef = { machine: string; agent: string; folder: string };
 type ChatRef = { id: number; name: string };
 
 // A header is a title or divider line; the cursor skips it.
-interface Row { text: string; open?: Screen; header?: boolean }
+interface Row { text: string; open?: Screen; header?: boolean; id?: string }
 const RULE = '─'.repeat(26);
 const title = (text: string): Row => ({ text, header: true });
 
@@ -243,7 +243,8 @@ function screenId(s: Screen): string {
   if (s.kind === 'workspaces') return `workspaces:${s.machine ?? ''}`;
   return s.kind;
 }
-function rowId(r: Row): string { return r.open ? JSON.stringify(r.open) : `text:${r.text}`; }
+// A row is followed by a stable id (a chat's id, a workspace's computer + number), never by text that changes (names, markers, ages).
+function rowId(r: Row): string { return r.id ?? (r.open?.kind === 'chat' ? `chat:${r.open.id}` : r.open ? JSON.stringify(r.open) : `text:${r.text}`); }
 
 export class HomeModel {
   data: HomeData | null = null;
@@ -558,6 +559,7 @@ export class HomeModel {
   /** Go back to a screen you were on: same highlighted item and scroll as when you left it. */
   private goBack(screen: Screen): void {
     this.go(screen);
+    if (screen.kind === 'muse') return; // Muse always opens from the top, as it did before
     const spot = this.spots.get(screenId(screen));
     if (!spot) return;
     this.cursor = spot.cursor;
@@ -568,7 +570,7 @@ export class HomeModel {
 
   private remember(): void {
     const s = this.screen;
-    if (['alert', 'approval', 'listen', 'confirm'].includes(s.kind)) return;
+    if (['alert', 'approval', 'listen', 'confirm', 'muse'].includes(s.kind)) return;
     this.spots.set(screenId(s), { cursor: this.cursor, row: this.selectedRow(), scroll: this.scroll, termScroll: this.termScroll });
   }
 
@@ -716,7 +718,7 @@ export class HomeModel {
     return (this.data?.desktops ?? []).filter(desk => !only || desk.machine === only).flatMap(desk => desk.workspaces.map(w => ({
       machine: desk.machine,
       id: w.id,
-      row: { text: clip(`${desk.machine} ${w.id}${w.id === desk.active ? ' (here)' : ''} · ${w.windows[0] ?? ''}${w.windows.length > 1 ? ` +${w.windows.length - 1}` : ''}`, WIDTH - 2) },
+      row: { id: `ws:${desk.machine}:${w.id}`, text: clip(`${desk.machine} ${w.id}${w.id === desk.active ? ' (here)' : ''} · ${w.windows[0] ?? ''}${w.windows.length > 1 ? ` +${w.windows.length - 1}` : ''}`, WIDTH - 2) },
     })));
   }
 
@@ -756,7 +758,13 @@ export class HomeModel {
     if (s.kind !== 'settings') this.settingsFrom = ['home', 'agents', 'messages', 'needs', 'studio', 'workspaces', 'chat', 'agent'].includes(s.kind) ? s : null;
     this.go({ kind: 'settings' });
   }
-  private leaveSettings(): void { const from = this.settingsFrom; this.settingsFrom = null; this.goBack(from ?? { kind: 'home' }); }
+  private leaveSettings(): void {
+    const from = this.settingsFrom;
+    this.settingsFrom = null;
+    // The page it was opened on may be gone by now (the agent ended, the chat dropped off the list): its list, else Home.
+    const gone = from && ((from.kind === 'agent' && !this.data?.sessions.some(x => sessionKey(x) === from.key)) || (from.kind === 'chat' && !this.data?.messages?.some(c => c.id === from.id)));
+    this.goBack(!from ? { kind: 'home' } : gone ? { kind: from.kind === 'agent' ? 'agents' : 'messages' } : from);
+  }
 
   private session(): Session | undefined {
     const s = this.screen;

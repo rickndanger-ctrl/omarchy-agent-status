@@ -618,7 +618,7 @@ test('a pop-up and Later return you to the same highlighted row', () => {
   assert.match(m.render(NOW), /> Muse/);
   m.update(withChat({ now: NOW + 5000, sessions: [{ ...tmuxed().sessions[0], state: 'done' }] }));
   assert.equal(m.screenKind, 'alert');
-  m.input('back', NOW); // Later
+  m.input('back', NOW); // leave the pop-up
   assert.equal(m.screenKind, 'home');
   assert.match(m.render(NOW), /> Muse/);
 });
@@ -745,4 +745,65 @@ test('Quick settings: Back (double-tap or the Back row) returns to the Home row 
   m.openSettings();
   m.input('back', NOW);
   assert.equal(m.screenKind, 'home');
+});
+
+test('keep-place review: Muse is never restored by Back (a pop-up Later reopens it from the top, as in 0.4.20)', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  m.goTo('muse');
+  m.setMuse({ question: 'q', reply: Array.from({ length: 40 }, (_, i) => `answer line ${i}`).join('\n') });
+  m.input('down', NOW);
+  m.input('down', NOW);
+  const scrolled = m.render(NOW);
+  assert.doesNotMatch(scrolled, /answer line 0\b/, 'scrolled down');
+  m.update(withChat({ pending: [pending] }));
+  assert.equal(m.screenKind, 'approval');
+  m.input('back', NOW); // leave the pop-up
+  assert.equal(m.screenKind, 'muse');
+  assert.match(m.render(NOW), /answer line 0\b|You: q/, 'Muse is back at the top');
+});
+
+test('keep-place review: Settings Back to an agent or chat that is gone lands on its list, else Home', () => {
+  const m = new HomeModel();
+  m.update(tmuxed());
+  openAgent(m);
+  m.openSettings();
+  m.update(tmuxed({ sessions: [] }));
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'agents', 'the agent ended');
+  const c = new HomeModel();
+  openChat(c);
+  c.openSettings();
+  c.update(withChat({ messages: [] }));
+  c.input('back', NOW);
+  assert.equal(c.screenKind, 'messages', 'the chat dropped off the list');
+  const ok = new HomeModel();
+  ok.update(tmuxed());
+  openAgent(ok);
+  ok.openSettings();
+  ok.input('back', NOW);
+  assert.equal(ok.screenKind, 'agent', 'still there: back on it');
+});
+
+test('keep-place review: the highlight follows a chat by its id (a new snippet or a renamed contact) and a workspace by computer + number', () => {
+  const chats = (name: string, snippet: string) => [
+    { id: 7, name: 'Mom', unread: false, when: NOW / 1000 - 60, snippet: 'Running late', fromMe: false },
+    { id: 8, name, unread: false, when: NOW / 1000 - 120, snippet, fromMe: false },
+  ];
+  const m = new HomeModel();
+  m.update(withChat({ messages: chats('Dad', 'old words') }));
+  m.goTo('messages');
+  m.input('down', NOW);
+  assert.match(m.render(NOW), /> .*Dad/);
+  m.update(withChat({ messages: chats('Daddy', 'brand new words') }));
+  assert.match(m.render(NOW), /> .*Daddy/, 'same chat id, still highlighted');
+  // workspaces: the "(here)" marker and the window title change, the row stays
+  const desk = (active: number, title: string) => ({ desktops: [{ machine: 'Mini 1', active, workspaces: [{ id: 1, windows: ['a'] }, { id: 2, windows: [title] }] }] });
+  const w = new HomeModel();
+  w.update(withChat(desk(1, 'term one')));
+  (w as unknown as { go(s: unknown): void }).go({ kind: 'workspaces', machine: 'Mini 1' });
+  w.input('down', NOW);
+  assert.match(w.render(NOW), /> Mini 1 2 /);
+  w.update(withChat(desk(2, 'a different title')));
+  assert.match(w.render(NOW), /> Mini 1 2 \(here\) · a different title/, 'workspace 2 stays highlighted');
 });
