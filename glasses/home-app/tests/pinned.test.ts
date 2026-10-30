@@ -259,3 +259,26 @@ test('the Dell window pin and the Tiles Claude (Dell) tile pick the window, neve
   // a fallback for a gone pinned ref does not land on it either
   assert.notEqual(findSession({ ...d, sessions: [orch, tm] }, 'Dell/gone-pane', NOW).session?.pane, 'orchestrator');
 });
+
+test('the highlight stays on a pin row when it goes offline -> live while a row above is added', () => {
+  const pinsTwo: Pin[] = [PINS[0], PINS[1], PINS[2]];
+  const off = data({ pinned: pinsTwo, machines: [{ name: 'Mini 1', online: false }, { name: 'Mini 2', online: true }, { name: 'Neo', online: true }, { name: 'Dell', online: true }], sessions: [sess('Mini 1', 'codex', 'idle'), sess('Mini 2', 'claude', 'working')] });
+  const m = new HomeModel();
+  m.update(off);
+  m.input('down', NOW);
+  m.input('down', NOW);
+  const cur = () => m.render(NOW).split('\n').find(l => l.startsWith('>'));
+  assert.match(cur()!, /Claude · Mini 2/);
+  // Mini 1 comes back (its rows change text and become openable) and a pin row is added above
+  const added: Pin = { label: 'Codex · Neo', machine: 'Neo', agent: 'codex', session: 'g2-codex' };
+  m.update({ ...off, pinned: [added, ...pinsTwo], machines: off.machines.map(x => ({ ...x, online: true })), sessions: [sess('Mini 1', 'claude', 'working'), sess('Mini 1', 'codex', 'idle'), sess('Mini 2', 'claude', 'idle')] });
+  assert.match(cur()!, /Claude · Mini 2 · ready/, 'still on the Mini 2 pin although its state, the rows above it and Mini 1 changed');
+  // offline -> live on the highlighted row itself
+  const m2 = new HomeModel();
+  m2.update({ ...off, machines: off.machines.map(x => (x.name === 'Mini 2' ? { ...x, online: false } : x)) });
+  m2.input('down', NOW);
+  m2.input('down', NOW);
+  assert.match(m2.render(NOW).split('\n').find(l => l.startsWith('>'))!, /Claude · Mini 2 · offline/);
+  m2.update({ ...off, pinned: [added, ...pinsTwo] });
+  assert.match(m2.render(NOW).split('\n').find(l => l.startsWith('>'))!, /Claude · Mini 2 · busy/);
+});

@@ -618,24 +618,24 @@ export class HomeModel {
         const live = x && machineUp ? x : undefined;
         // A computer that is down is offline; a computer that is up with no such session says the agent is not running.
         const word = live ? STATE_WORD[live.state] ?? live.state : machineUp ? 'not running' : pin.session === 'orchestrator' ? 'laptop offline' : 'offline';
-        rows.push({ text: clip(`${live ? MARK[live.state] ?? '-' : '·'} ${pin.label} · ${word}`, WIDTH - 2), ...(live ? { open: { kind: 'agent' as const, key: sessionKey(live) } } : {}) });
+        rows.push({ id: `pin:${pin.machine}:${pin.agent}:${pin.session}`, text: clip(`${live ? MARK[live.state] ?? '-' : '·'} ${pin.label} · ${word}`, WIDTH - 2), ...(live ? { open: { kind: 'agent' as const, key: sessionKey(live) } } : {}) });
       }
-    } else rows.push({ text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
+    } else rows.push({ id: 'home:agents', text: clip(`Agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
     if (d.messages) {
       const chats = recentChats(d.messages, nowMs, this.hideOldTexts);
       const unread = chats.filter(c => c.unread).length;
       const top = chats[0];
       const latest = top ? `${top.fromMe ? 'You' : top.name}: ${top.snippet}` : 'no recent texts';
-      rows.push({ text: clip(`Messages${unread ? ` · ${unread} new` : ''} · ${latest}`, WIDTH - 2), open: { kind: 'messages' } });
+      rows.push({ id: 'home:messages', text: clip(`Messages${unread ? ` · ${unread} new` : ''} · ${latest}`, WIDTH - 2), open: { kind: 'messages' } });
     }
     if (d.muse) rows.push({ text: 'Muse · latest reply', open: { kind: 'muse' } });
     rows.push({ text: 'Listen · Conversation', open: { kind: 'conversation' } });
     rows.push({ text: 'Settings · display, brightness', open: { kind: 'settings' } });
     if (d.studio) {
       const busy = d.studio.machines.filter(m => m.busy);
-      rows.push({ text: clip(`Studio · ${busy.length ? `${busy.length} working · ${busy[0].name}: ${busy[0].line}` : 'standing by'}`, WIDTH - 2), open: { kind: 'studio' } });
+      rows.push({ id: 'home:studio', text: clip(`Studio · ${busy.length ? `${busy.length} working · ${busy[0].name}: ${busy[0].line}` : 'standing by'}`, WIDTH - 2), open: { kind: 'studio' } });
     }
-    if (waiting) rows.push({ text: clip(`! Needs you · ${waiting}${d.pending.length ? ` (${d.pending.length} approval${d.pending.length === 1 ? '' : 's'})` : ''}`, WIDTH - 2), open: { kind: 'needs' } });
+    if (waiting) rows.push({ id: 'home:needs', text: clip(`! Needs you · ${waiting}${d.pending.length ? ` (${d.pending.length} approval${d.pending.length === 1 ? '' : 's'})` : ''}`, WIDTH - 2), open: { kind: 'needs' } });
     rows.push({ text: 'Tiles · 5 pages of apps', open: { kind: 'tiles' } });
     rows.push({ text: 'Desk (test) · 3×3 apps, head pointer', open: { kind: 'desk' } });
     if (pins.length) rows.push({ text: clip(`All agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
