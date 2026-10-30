@@ -5,7 +5,7 @@
 // CONTRACT (set by the architect; changing a type here is a breaking change: tell the
 // architect first). The implementation below the line is the main session's.
 import { MUSE_UNREACHABLE } from './musecache';
-import { clip, clock, conversationLines, MUSE_ELSEWHERE, museDisplay, recentChats, sessionKey, studioText, STATE_WORD, wrap } from './model';
+import { clip, clock, conversationLines, museDisplay, recentChats, sessionKey, studioText, STATE_WORD, wrap } from './model';
 import type { Action, Chat, HomeData, Input, Session } from './model';
 import { clockTime, mmss } from './conversation';
 import type { ConvView } from './conversation';
@@ -61,10 +61,6 @@ export interface TileContext {
   terminal(key: string): string[] | null;
   chat(id: number): string[] | null;
   muse(): { question: string; reply: string } | null;
-  /** The Muse tile's ask is waiting for a busy Muse. Optional. */
-  museWaiting?(): boolean;
-  /** The latest exchange was asked on another device and has no reply yet. Optional. */
-  museElsewhere?(): boolean;
   reminders(): Reminder[] | null;
   url(endpoint: string): UrlTile | null;
   /** The Conversation tile's state. Optional: without it the tile says it is not available. */
@@ -88,7 +84,7 @@ export type TileNeed =
 export type OpenTarget =
   | { kind: 'agent'; key: string; then?: 'listen' | 'reply' }
   | { kind: 'chat'; id: number; name: string; then?: 'listen' | 'textReply' }
-  | { kind: 'muse'; then?: 'listen' }
+  | { kind: 'muse'; then?: 'listen'; fromTile?: true }
   | { kind: 'messages' } | { kind: 'needs' } | { kind: 'studio' } | { kind: 'home' }
   | { kind: 'reminderAdd' };
 
@@ -254,15 +250,16 @@ function museWidget(): Widget {
       const raw = ctx.muse();
       if (!raw) return ['Loading…'];
       if (raw === MUSE_UNREACHABLE) return ["Muse: can't reach"];
-      // The latest reply of this session ("Muse: …") under one line of the question; swipe scrolls on.
+      // The question (at most two lines), a blank, then the answer from its start; swipe scrolls on.
       const m = museDisplay(raw.question, raw.reply);
-      const question = m.question ? [clip(`You: ${m.question}`, width)] : [];
-      return [...question, ...wrap(`Muse: ${m.reply || (ctx.museElsewhere?.() ? MUSE_ELSEWHERE : ctx.museWaiting?.() ? 'Muse is busy, waiting…' : 'Muse is thinking…')}`, width)];
+      const q = wrap(`You: ${m.question}`, width);
+      const question = q.length > 2 ? [q[0], `${q[1].slice(0, width - 1)}…`] : q;
+      return [...question, '', ...(m.reply ? wrap(m.reply, width) : ['Muse is thinking…'])];
     },
     actions: ctx => [...(ctx.muse() === MUSE_UNREACHABLE ? [{ id: 'retry', label: 'Retry' }] : []), { id: 'ask', label: 'Ask Muse' }],
     act: actionId => {
       if (actionId === 'retry') return { kind: 'action', action: { kind: 'loadMuse' } };
-      if (actionId === 'ask') return { kind: 'open', target: { kind: 'muse', then: 'listen' } };
+      if (actionId === 'ask') return { kind: 'open', target: { kind: 'muse', then: 'listen', fromTile: true } };
       return actionId === FULL ? { kind: 'open', target: { kind: 'muse' } } : null;
     },
     needs: () => [{ kind: 'muse' }],

@@ -39,8 +39,8 @@ export interface FlowHost {
   backToDesk?(): void;
 }
 
-export function makeHandle(host: FlowHost): (input: Input, source?: 'touch' | 'remote') => void | Promise<void> {
-  const handle = (input: Input, source?: 'touch' | 'remote'): void | Promise<void> => {
+export function makeHandle(host: FlowHost): (input: Input) => void | Promise<void> {
+  const handle = (input: Input): void | Promise<void> => {
     if (host.isBlank()) { host.wake(); return; }
     if (host.showingDesk?.()) { host.deskInput?.(input); return; }
     if (host.showingTiles()) {
@@ -55,8 +55,6 @@ export function makeHandle(host: FlowHost): (input: Input, source?: 'touch' | 'r
       // A Conversation start/stop must finish before the next press (a stop must not overtake its start).
       return result?.kind === 'conversation' ? job : undefined;
     }
-    // Muse chat, phone remote only: the 'back' of a quick double-press of Down, while there is more below, keeps scrolling (it does not renew the window).
-    if (input === 'back' && source === 'remote' && host.model.backIsScroll(host.now())) { host.model.scrollMuseOn(); host.paint(); return; }
     if (host.inOpenedScreen() && input === 'back' && TOP_SCREENS.includes(host.model.screenKind)) {
       host.backToTiles();
       return;
@@ -131,4 +129,9 @@ export function runSettingsAction(h: SettingsHost, action: NonNullable<ReturnTyp
     case 'settingsBack': h.returnToTiles(); return { handled: true };
     default: return { handled: false };
   }
+}
+
+/** The phone remote's volume-up ("settings") is ignored while you are reading or talking to Muse: scrolling must never open Quick settings over it. */
+export function remoteSettingsIgnored(screen: string): boolean {
+  return screen === 'muse' || screen === 'listen' || screen === 'confirm';
 }

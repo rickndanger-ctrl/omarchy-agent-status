@@ -62,6 +62,8 @@ const TILE_W = 288;
 /** What the glasses should show: one full-screen text block, or two tiles. `key` is page + focus: a change rebuilds the page. */
 type Frame = { kind: 'single'; text: string } | { kind: 'tiles'; key: string; focus: TilesFrame['focus']; left: string; right: string };
 // Each redraw is a Bluetooth write; too many in a row delays taps and swipes coming back.
+/** A full-screen text frame is cut to this many characters (the SDK's startup page takes 1000; 950 keeps clear of the edge). */
+export const TEXT_SAFE_MAX = 950;
 const MIN_RENDER_INTERVAL_MS = 450;
 /** After a failed update the glasses are tried again after this long, without waiting for a touch. */
 const RENDER_RETRY_MS = 1500;
@@ -118,6 +120,7 @@ export class Glasses {
   /** The faint outline of an unlit tile (0..15 grey levels). The SDK offers no way to change a border without rebuilding the page. */
   private outline = DEFAULT_OUTLINE;
   private urgent = false;
+  private lastCutLogged = 0;
   private settleWaiters = new SettleWaiters();
   /** Microphone on/off run one after another, so a stop can never overtake a start. */
   private micChain = new Serial();
@@ -133,6 +136,11 @@ export class Glasses {
     this.scheduleRender();
   }
 
+  /** The next frame is sent as a full page rebuild, not a text update (the page may have been left in a state where updates are not drawn). */
+  forceRebuild(): void { this.rebuildSeq++; this.scheduleRender(); }
+  /** forceRebuild() calls so far / the last one a drawn rebuild covered. A write already in flight when it is called cannot satisfy it (that frame was sent before). */
+  private rebuildSeq = 0;
+  private rebuildDone = 0;
   /** A write is in flight or waiting to go (a new frame would queue behind it). */
   busy(): boolean { return this.renderBusy || this.live.size > 0; }
   /** The glasses already show exactly what was last asked for. */
@@ -302,7 +310,9 @@ export class Glasses {
   }
 
   setText(content: string, urgent = false): void {
-    this.want = { kind: 'single', text: glassesSafe(content).slice(0, 950) || ' ' };
+    const safe = glassesSafe(content);
+    if (safe.length > TEXT_SAFE_MAX && this.lastCutLogged !== safe.length) { this.lastCutLogged = safe.length; this.options.onLifecycle?.(`frame cut ${safe.length} -> ${TEXT_SAFE_MAX} chars`); }
+    this.want = { kind: 'single', text: safe.slice(0, TEXT_SAFE_MAX) || ' ' };
     if (urgent) {
       this.urgent = true; // the next write skips the 450 ms pacing (an answer the owner is waiting for)
       if (this.renderTimer !== undefined) { clearTimeout(this.renderTimer); this.renderTimer = undefined; } // and does not wait for one already scheduled
@@ -361,6 +371,7 @@ export class Glasses {
   private pending(): 'rebuild' | 'left' | 'right' | 'text' | null {
     const want = this.want;
     const shown = this.shown;
+    if (this.rebuildDone < this.rebuildSeq) return 'rebuild';
     if (!shown || shown.kind !== want.kind) return 'rebuild';
     if (want.kind === 'single') return shown.kind === 'single' && shown.text !== want.text ? 'text' : null;
     if (shown.kind !== 'tiles') return 'rebuild';
@@ -477,6 +488,7 @@ export class Glasses {
     if (todo === null) return;
     const want = this.want;
     const epoch = this.epoch;
+    const rebuildAsked = this.rebuildSeq;
     this.renderBusy = true;
     this.urgent = false;
     this.lastRenderAt = performance.now();
@@ -500,12 +512,14 @@ export class Glasses {
       if (!accepted) throw new Error('The Even app returned false for the text update.');
       this.options.onFrame?.(todo);
       if (want.kind === 'single') this.options.onDrawn?.(want.text);
+      if (todo === 'rebuild') this.rebuildDone = Math.max(this.rebuildDone, rebuildAsked);
       if (todo === 'rebuild' || want.kind === 'single') this.shown = want;
       else if (this.shown?.kind === 'tiles') this.shown = { ...this.shown, [todo]: want[todo as 'left' | 'right'] };
     } catch (error) {
       if (epoch === this.epoch) {
         this.renderBlocked = true;
         this.failedWant = want;
+        this.options.onLifecycle?.(`frame failed ${reason(error)}`);
         this.options.onStatus(`Glasses text update failed: ${reason(error)}`);
         // Nothing may be left waiting for a touch: try again by itself (a newer setText also unblocks it at once).
         clearTimeout(this.retryTimer);

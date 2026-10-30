@@ -2,15 +2,15 @@ import './style.css';
 import { Glasses, DEFAULT_OUTLINE } from './glasses';
 import { ShownWatch } from './shownwatch';
 import { applyMuseLatest } from './musesync';
-import { plainMuseError, pollMuseJob, MUSE_POLLS, MUSE_DEADLINE_MS, type MuseJob } from './musepoll';
+import { pollMuseJob, MUSE_POLLS, MUSE_DEADLINE_MS, type MuseJob } from './musepoll';
 import { HomeModel, age, recentChats, recentMessages, type Action, type ChatMessage, type HomeData, type Input } from './model';
-import { HubPicker, hubsToTry, firstAnswer, NoHubAnswered } from './hubpick';
+import { HubPicker } from './hubpick';
 import { LayoutLoader } from './layoutcache';
 import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
 import { TerminalCache } from './terminalcache';
 import { InputQueue, type InputSource } from './inputqueue';
-import { makeHandle, TOP_SCREENS, runConversationEffect, startConversation, openSettings, runSettingsAction } from './inputflow';
+import { remoteSettingsIgnored, makeHandle, TOP_SCREENS, runConversationEffect, startConversation, openSettings, runSettingsAction } from './inputflow';
 import { MENU, GLASSES_MENU, INTERNAL_MENU, setHideDone } from './menu';
 import { Latest } from './latest';
 import { ConversationSession, ConvHttpError, CONV_BACKENDS, asBackend, type Conversation, type ConvHub } from './conversation';
@@ -56,7 +56,12 @@ let foreground = true;
 // The phone remote: while Home is in front, one long-poll to the current hub brings the phone's buttons; each one goes through handle() like a gesture.
 const remote = new RemoteInput({
   hub: () => base, token: () => token, active: () => foreground,
-  apply: input => (input === 'settings' ? inputQueue.pushMenu(INTERNAL_MENU.settings, 'remote') : handle(input, 'remote')),
+  apply: input => {
+    if (input !== 'settings') return handle(input, 'remote');
+    const screen = showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind;
+    if (remoteSettingsIgnored(screen)) { diag('input.ignored', `settings on ${screen}`); return; }
+    inputQueue.pushMenu(INTERNAL_MENU.settings, 'remote');
+  },
 });
 
 function savedOutline(): number { const n = Number(store.get('home.outline')); return n >= 1 && n <= 15 ? Math.round(n) : DEFAULT_OUTLINE; }
@@ -245,36 +250,34 @@ function diag(name: string, detail: string | number | boolean = ''): void {
 class HttpError extends Error {}
 
 /** Calls the current hub; if it can't be reached at all, the next hub takes over (and stays current). */
-async function apiFrom<T>(path: string, init?: RequestInit, once = false, only?: string): Promise<{ hub: string; body: T }> {
-  try {
-    const { hub, value } = await firstAnswer<Promise<T>>(hubsToTry(hubs(), once, only), async hub => {
-      let res: Response;
-      try {
-        res = await fetch(new URL(`api/${path}`, hub), {
-          ...init,
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(8000),
-        });
-      } catch (error) {
-        return { skip: error };
-      }
-      // Tailscale answers 502/503/504 itself when the hub program behind it is down (no JSON body).
-      // Home's own errors are JSON, so only the bare gateway errors count as "this hub is down".
-      if (res.status >= 502 && res.status <= 504 && !(res.headers.get('content-type') ?? '').includes('json')) return { skip: new Error(`hub down (${res.status})`) };
-      if (adopt(hub)) diag('hub.switch', new URL(hub).hostname);
-      void learnName(hub);
-      if (res.status === 401) throw new HttpError('wrong token');
-      if (!res.ok) throw new HttpError(`server said ${res.status}`);
-      return { value: res.json() as Promise<T> };
-    });
-    return { hub, body: await value };
-  } catch (error) {
-    if (error instanceof NoHubAnswered) picker.allFailed();
-    throw error instanceof NoHubAnswered ? error.last : error;
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  let lastError: unknown = new Error('no hub reachable');
+  for (const hub of hubs()) {
+    let res: Response;
+    try {
+      res = await fetch(new URL(`api/${path}`, hub), {
+        ...init,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      });
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+    // Tailscale answers 502/503/504 itself when the hub program behind it is down (no JSON body).
+    // Home's own errors are JSON, so only the bare gateway errors count as "this hub is down".
+    if (res.status >= 502 && res.status <= 504 && !(res.headers.get('content-type') ?? '').includes('json')) {
+      lastError = new Error(`hub down (${res.status})`);
+      continue;
+    }
+    if (adopt(hub)) diag('hub.switch', new URL(hub).hostname);
+    void learnName(hub);
+    if (res.status === 401) throw new HttpError('wrong token');
+    if (!res.ok) throw new HttpError(`server said ${res.status}`);
+    return res.json() as Promise<T>;
   }
-}
-async function api<T>(path: string, init?: RequestInit, once = false, only?: string): Promise<T> {
-  return (await apiFrom<T>(path, init, once, only)).body;
+  picker.allFailed();
+  throw lastError;
 }
 
 /** The hubs say their own name in /api/health ("machine"); the clock tile shows "via <name>". Asked once per hub. */
@@ -322,10 +325,7 @@ const tileCtx = (): TileContext => ({
   now: Date.now(), battery: model.battery, hub: picker.state(), sent: pane => model.sentTo(pane, Date.now()),
   terminal: key => tileData.terminals.get(key) ?? null,
   chat: id => tileData.chats.get(id) ?? null,
-  // The tile reads the same chat as the Muse screen: every reply of this session is on it. Before any ask it shows what the relay last said.
-  muse: () => model.museTileView() ?? museTile.get(),
-  museWaiting: () => model.museTileView()?.waiting ?? museTile.isWaiting,
-  museElsewhere: () => model.museTileView()?.elsewhere ?? false,
+  muse: () => museTile.get(),
   // For ~5 s after a voice add the Reminders tile shows "Added: <title>" at the top, from the add result (no extra fetch).
   reminders: () => (tileData.reminders && justAdded && Date.now() - justAdded.at < 5000
     ? [{ id: 'just-added', title: justAdded.title, due: null, list: '', added: justAdded.at }, ...tileData.reminders]
@@ -612,6 +612,7 @@ function paint(): void {
   if (recording !== null && !(model.micWanted() && foreground && !showingDesk())) void run({ kind: 'cancelMic' });
   // A reminder that was added or cancelled (or whose voice failed) ends on Home: that is back in Tiles.
   if (fromTiles && model.screenKind === 'home' && (prevKind === 'listen' || prevKind === 'confirm')) fromTiles = false;
+  const enteredVoiceScreen = prevKind !== model.screenKind && ['listen', 'confirm', 'muse'].includes(model.screenKind);
   prevKind = model.screenKind;
   let preview: string;
   if (blank) {
@@ -628,6 +629,8 @@ function paint(): void {
     preview = Array.from({ length: Math.max(l.length, r.length) }, (_, i) => (l[i] ?? '').padEnd(28) + '│ ' + (r[i] ?? '')).join('\n');
   } else {
     preview = model.render(Date.now());
+    // The Muse screen and the steps into it are drawn as a full page rebuild, not a text update (updates over a page left by the microphone were not drawn).
+    if (enteredVoiceScreen || urgentPaint) glasses.forceRebuild();
     glasses.setText(preview, urgentPaint);
   }
   $('glass').textContent = preview;
@@ -664,7 +667,6 @@ async function poll(): Promise<void> {
     const fresh = await api<HomeData>('home');
     homeLoaded = true;
     inputQueue.pushExternal('poll', () => { model.update(fresh); buildEditor(); paint(); });
-    startSimAsks();
     // No weather yet? Try sharing the location again (at most every 2 minutes).
     if (!fresh.weather && Date.now() - lastLocationTry > 120_000) void shareLocation();
   } catch (error) {
@@ -693,28 +695,6 @@ async function refreshTerminal(): Promise<void> {
     // The same text as last time changes nothing on the glasses: no update, no repaint.
     if (terminalCache.shouldApply(target.key, lines, model.hasTerminal(target.key))) inputQueue.pushExternal('terminal', () => { if (model.setTerminal(target.key, lines)) terminalCache.record(target.key, lines); paint(); });
   }
-}
-
-/**
- * Simulator only: ?museasks=3 types 3 asks ("Sim question one/two/three") through the real askMuse path, one after the reply of the previous.
- * Off without the flag.
- */
-const SIM_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
-let simAsksStarted = false;
-function startSimAsks(): void {
-  const n = (() => { try { return Math.min(9, Math.max(0, Number(new URLSearchParams(globalThis.location?.search ?? '').get('museasks')) || 0)); } catch { return 0; } })();
-  if (!n || simAsksStarted) return;
-  simAsksStarted = true;
-  void (async () => {
-    model.goTo('muse');
-    paint();
-    for (let i = 0; i < n; i++) {
-      const text = `Sim question ${SIM_WORDS[i]}`;
-      const ask = model.beginMuseAsk(text);
-      paint();
-      await run({ kind: 'askMuse', text, ask });
-    }
-  })();
 }
 
 /** Only the newest chat load / microphone start counts: an older answer arriving late is ignored. */
@@ -788,23 +768,20 @@ async function run(action: Action): Promise<void> {
       const fresh = await api<{ messages: Parameters<HomeModel['setChat']>[0] }>(`messages?chat=${action.chat}`).catch(() => null);
       if (fresh && chatLoads.isLatest(req)) model.setChat(fresh.messages, Date.now(), action.chat);
     } else if (action.kind === 'askMuse') {
+      // Asked from the Muse TILE: back to Tiles, the answer lands in the tile (never the full-screen Muse view after it).
+      if (action.fromTile && tilesActive) { fromTiles = false; void refreshTiles(); }
       museTile.askStart(action.text);
       paint();
       const askedAt = Date.now();
-      const askKey = `${askedAt.toString(36)}-${Math.random().toString(36).slice(2, 10)}`; // the hub ignores a repeat of the same ask
       const ask = action.ask ?? model.beginMuseAsk(action.text); // the newest ask owns the Muse screen and tile (conversation asks too)
-      const asked: { id?: string; error?: string; hub?: string } = await apiFrom<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text, clientId: askKey }) }, true).then(r => ({ ...r.body, hub: r.hub })).catch(e => ({ error: String(e.message ?? e) }));
-      if (asked.error) asked.error = plainMuseError(asked.error);
-      const acceptedBy = asked.hub; // this job lives on this hub: its polls never go to another one
+      const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text }) }).catch(e => ({ error: String(e.message ?? e) }));
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
       if (!asked.id) { const newest = model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay', ask); if (newest) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); } paint(); return; }
       // Muse answers in a few seconds; long answers take longer. Check every 0.7 s for up to 2.5 minutes.
       const ended = await pollMuseJob(
-        () => api<MuseJob>(`muse/reply?id=${encodeURIComponent(asked.id!)}`, undefined, false, acceptedBy).catch(() => null), // unreachable: keep waiting until the deadline
+        () => api<MuseJob>(`muse/reply?id=${encodeURIComponent(asked.id!)}`).catch(() => null),
         () => new Promise<void>(r => setTimeout(r, 700)),
         (job, finished) => {
-        const waiting = job.status === 'waiting';
-        if (model.museIsNewest(ask)) { museTile.setWaiting(waiting); if (!job.reply) model.setMuseWaiting(ask, waiting); }
         const newest = job.reply ? model.setMuseAnswer(job.question, job.reply, ask) : model.museIsNewest(ask);
         if (job.reply && newest) museTile.askReply(job.question, job.reply);
         // A partial reply is only drawn when the glasses are idle: a write in flight would hold the final one back behind it.
@@ -916,7 +893,7 @@ function screenGeneration(): number {
 /** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
 const inputQueue = new InputQueue({
   apply: applyInput,
-  menu: id => menu(id),
+  menu: (id, source) => menu(id, source),
   foreground: () => foreground,
   generation: screenGeneration,
   screen: () => (showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind),
@@ -925,16 +902,20 @@ const inputQueue = new InputQueue({
   cancelRemoteUp: () => { if (showingDesk()) deskArrivals.shift(); },
   settled: capMs => glasses.settled(capMs),
   log: (name, detail) => diag(name, detail),
+  trace: (name, detail) => diag(name, detail),
 });
 function handle(input: Input, source: InputSource = 'touch'): void {
   if (showingDesk()) deskArrivals.push(Date.now());
   inputQueue.push(input, source);
 }
 
-async function menu(id: number): Promise<void> {
+async function menu(id: number, source: InputSource = 'touch'): Promise<void> {
   diag('menu', id);
   if (blank) { wake(); return; } // the wake press is not passed on
   if (id === INTERNAL_MENU.settings) {
+    // The remote's volume-up is judged when ITS turn runs (a press queued before it may have opened Muse by now), not when it arrived.
+    const screen = showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind;
+    if (source === 'remote' && remoteSettingsIgnored(screen)) { diag('input.ignored', `settings on ${screen}`); return; }
     if (showingDesk()) { deskMode = 'app'; deskApp = 'settings'; desk!.leave(); }
     openSettings(settingsHost);
     return;

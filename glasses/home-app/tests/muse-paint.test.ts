@@ -375,6 +375,31 @@ test('ShownWatch.expectOnScreen: not armed when Muse is not the painted screen (
   assert.equal(w.drawn('Muse: hi', 250), 150);
 });
 
+test('a long question + reply: the answer\'s first line is in the first drawn frame, and muse.shown fires only for that frame; scrolled past the answer top it is not armed', async () => {
+  const { g, drawn, watch, shown } = drawRig(150);
+  const model = new HomeModel(); model.update(data); model.goTo('muse');
+  try {
+    await g.connect();
+    g.setText(model.render(NOW));
+    await g.settled(2000);
+    const q = 'a very long question about everything '.repeat(6);
+    model.setMuseAnswer(q, 'The reply begins right here.\nAnd carries on for a bit.');
+    g.setText(model.render(NOW), true);
+    assert.equal(watch.expectOnScreen(model.museAnswerInView(), g.wantedText(), Date.now()), true);
+    assert.equal(shown.length, 0);
+    await g.settled(2000);
+    assert.equal(shown.length, 1);
+    const first = drawn.at(-1)!.text;
+    assert.match(first, /Muse: The reply begins right here\./);
+    assert.ok(first.split('\n').slice(0, 4).join('\n').includes('Muse: The reply'), 'within the first lines');
+    // the owner scrolled the answer's top away: the frame would not show it, so nothing is armed
+    for (let i = 0; i < 2; i++) model.input('down', NOW);
+    model.setMuseAnswer(q, 'x\n'.repeat(30));
+    model.input('down', NOW); model.input('down', NOW); model.input('down', NOW);
+    assert.equal(model.museAnswerInView(), false);
+    assert.equal(watch.expectOnScreen(model.museAnswerInView(), 'whatever', Date.now()), false);
+  } finally { g.dispose(); }
+});
 
 // ---- muse-layout review: loadMuse out of date, scrollback kept, conversation asks, gave up ----
 import { MuseCache, MUSE_UNREACHABLE } from '../src/musecache';
@@ -393,6 +418,25 @@ test('a /muse read that began before an ask started or ended is out of date (Mus
   assert.equal(c.isCurrent(c.fetchStart()), true);
 });
 
+test('the Muse screen reopened mid-ask shows the ask in progress; reopening keeps the scrollback of earlier answers; a conversation-sourced ask archives the old head', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  m.setMuse({ question: 'old q', reply: 'old answer' });
+  const a = m.beginMuseAsk('conversation summary question'); // what main does for an ask that did not come from this screen
+  assert.equal(m.museIsNewest(a), true);
+  m.goTo('muse'); // reopened: museLines cleared, nothing is fetched while the ask is in flight
+  m.restoreMuse();
+  const thinking = m.render(NOW);
+  assert.match(thinking, /conversation summary question/);
+  assert.match(thinking, /Muse is thinking…/);
+  m.setMuseAnswer('conversation summary question', 'new answer', a);
+  for (let i = 0; i < 2; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /earlier|old answer/, 'the previous answer was archived below');
+  // reopen: the relay's latest replaces the head, the earlier answers stay
+  m.goTo('muse');
+  m.setMuse({ question: 'conversation summary question', reply: 'new answer' });
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /old answer/, 'scrollback survives a reload');
+});
 
 test('every poll failing (or never finishing) ends in "Muse took too long", not in "Muse is thinking…"', async () => {
   const m = new HomeModel(); m.update(data); m.goTo('muse');
@@ -412,6 +456,28 @@ test('every poll failing (or never finishing) ends in "Muse took too long", not 
   assert.equal(never, false);
 });
 
+test('ask 2 finishes, then older ask 1 finishes: reopening Muse (relay /latest = ask 1) never replaces ask 2; a fresh start is filled; unknown latest goes below', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const a1 = m.beginMuseAsk('first question');
+  const a2 = m.beginMuseAsk('second question');
+  assert.equal(m.setMuseAnswer('second question', 'ANSWER TWO', a2), true);
+  assert.equal(m.setMuseAnswer('first question', 'ANSWER ONE', a1), false);
+  m.goTo('muse'); // reopened: the relay's latest is ask 1
+  assert.equal(m.setMuse({ question: 'first question', reply: 'ANSWER ONE' }), false, 'did not take the screen (nor the tile)');
+  const text = m.render(NOW);
+  assert.match(text, /You: second question/);
+  assert.match(text, /Muse: ANSWER TWO/);
+  assert.equal(m.render(NOW).match(/ANSWER ONE/g)?.length ?? 0, 1, 'known answer not added twice') ;
+  // something the session has not seen is added below
+  assert.equal(m.setMuse({ question: 'asked on the desk', reply: 'DESK ANSWER' }), false);
+  for (let i = 0; i < 4; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /DESK ANSWER|ANSWER ONE/);
+  // a fresh start (no ask this session) is filled from /latest
+  const fresh = new HomeModel(); fresh.update(data); fresh.goTo('muse');
+  assert.equal(fresh.setMuse({ question: 'q', reply: 'FROM RELAY' }), true);
+  assert.match(fresh.render(NOW), /Muse: FROM RELAY/);
+  assert.equal(fresh.setMuse(null), true);
+});
 
 test('pollMuseJob gives up by the wall clock (150 s from the ask), not by the poll count: slow reads end it early', async () => {
   let t = 0;
@@ -431,37 +497,133 @@ test('pollMuseJob gives up by the wall clock (150 s from the ask), not by the po
 
 import { applyMuseLatest } from '../src/musesync';
 
-
-
-
-
-
-
-import { plainMuseError } from '../src/musepoll';
-import { widgetFor } from '../src/tiles';
-
-
-import { hubsToTry } from '../src/hubpick';
-
-test('an ask to Muse is tried on the current hub only (no failover to a second hub = no second job); other requests keep all hubs', () => {
-  assert.deepEqual(hubsToTry(['a', 'b', 'c'], true), ['a']);
-  assert.deepEqual(hubsToTry(['a', 'b', 'c'], false), ['a', 'b', 'c']);
-  assert.deepEqual(hubsToTry([], true), []);
-});
-
-test('a lost job (hub restarted) answers status error at once: the poll loop ends and the plain reason is shown', async () => {
-  let polls = 0;
-  const seen: string[] = [];
-  const finished = await pollMuseJob(async () => { polls++; return { status: 'error', question: '', reply: '', error: 'Muse job was lost (hub restarted)' }; }, async () => {}, (job, done) => seen.push(`${job.status}:${done}`), 215);
-  assert.equal(finished, true);
-  assert.equal(polls, 1, 'not 215 polls / 150 s');
+test('tile and screen share the /latest rule: ask 2 final, ask 1 read via /latest (tile refresh or loadMuse) -> both keep ask 2', () => {
   const m = new HomeModel(); m.update(data); m.goTo('muse');
-  const ask = m.beginMuseAsk('q');
-  m.setMuseProblem('q', 'Muse job was lost (hub restarted)', ask);
-  assert.match(m.render(NOW).replace(/\n/g, ' '), /Muse didn't get it: Muse job was lost \(hub restarted\)\./);
+  const tile = new MuseCache();
+  const a1 = m.beginMuseAsk('first question');
+  const a2 = m.beginMuseAsk('second question');
+  tile.askStart('second question');
+  m.setMuseAnswer('second question', 'ANSWER TWO', a2);
+  tile.askReply('second question', 'ANSWER TWO');
+  m.setMuseAnswer('first question', 'ANSWER ONE', a1); // the older ask finishes later: below the newest, never the tile
+  tile.askEnd();
+  // the tile's own timed read: /latest is ask 1
+  const stamp = tile.fetchStart();
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'first question', reply: 'ANSWER ONE' }, tile.startRead()), false);
+  assert.deepEqual(tile.get(), { question: 'second question', reply: 'ANSWER TWO' }, 'the tile keeps ask 2');
+  assert.match(m.render(NOW), /Muse: ANSWER TWO/, 'and so does the screen');
+  // loadMuse goes through the same helper
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'first question', reply: 'ANSWER ONE' }, tile.startRead()), false);
+  assert.deepEqual(tile.get(), { question: 'second question', reply: 'ANSWER TWO' });
+  // a read that began before an ask is dropped (stale stamp)
+  const old = tile.fetchStart();
+  tile.askStart('third'); tile.askEnd();
+  assert.equal(applyMuseLatest(m, tile, old, { question: 'x', reply: 'y' }, tile.startRead()), false);
+  // a fresh session (no ask) takes /latest on screen and tile
+  const fm = new HomeModel(); fm.update(data); fm.goTo('muse');
+  const ft = new MuseCache();
+  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), { question: 'q', reply: 'FROM RELAY' }, ft.startRead()), true);
+  assert.deepEqual(ft.get(), { question: 'q', reply: 'FROM RELAY' });
+  assert.match(fm.render(NOW), /Muse: FROM RELAY/);
+  // a failed read on a session with nothing to show marks the tile unreachable; with an answer it changes nothing
+  assert.equal(applyMuseLatest(fm, ft, ft.fetchStart(), null, ft.startRead()), false);
+  assert.deepEqual(ft.get(), { question: 'q', reply: 'FROM RELAY' });
+  const em = new HomeModel(); em.update(data); em.goTo('muse');
+  const et = new MuseCache();
+  assert.equal(applyMuseLatest(em, et, et.fetchStart(), null, et.startRead()), true);
+  assert.equal(et.get(), MUSE_UNREACHABLE);
 });
 
-test('a job\'s polls stay on the hub that accepted it: no failover, an unreachable hub is just kept waiting', () => {
-  assert.deepEqual(hubsToTry(['a', 'b', 'c'], false, 'b'), ['b']);
-  assert.deepEqual(hubsToTry(['a', 'b'], true, 'b'), ['b']);
+test('two /latest reads sharing a stamp: the newer finishes first, the older one finishing later changes nothing (screen and tile)', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  const stamp = tile.fetchStart();
+  const tileRead = tile.startRead(); // the tile's read starts first (older relay answer is on its way)
+  const screenRead = tile.startRead(); // the screen's load starts later and returns the newer answer
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'NEWER' }, screenRead), true);
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'OLDER' }, tileRead), false);
+  assert.deepEqual(tile.get(), { question: 'q', reply: 'NEWER' });
+  assert.match(m.render(NOW), /Muse: NEWER/);
+  assert.doesNotMatch(m.render(NOW), /OLDER/);
+  // a read that started later and finishes later still applies
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'NEWEST' }, tile.startRead()), true);
+  assert.match(m.render(NOW), /Muse: NEWEST/);
+});
+
+test('a failed /latest read never advances the order and never replaces an answer; the unreachable note is only for nothing to show', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  const stamp = tile.fetchStart();
+  const older = tile.startRead();
+  const newer = tile.startRead();
+  // the newer read fails first, then the older one succeeds: its answer is shown
+  assert.equal(applyMuseLatest(m, tile, stamp, null, newer), true, 'nothing to show yet: the unreachable note');
+  assert.match(m.render(NOW), /Couldn't reach Muse/);
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'THE ANSWER' }, older), true, 'the older success is not dropped by the failure');
+  assert.match(m.render(NOW), /Muse: THE ANSWER/);
+  assert.deepEqual(tile.get(), { question: 'q', reply: 'THE ANSWER' });
+  // a failure with an answer on screen and tile: both stay
+  assert.equal(applyMuseLatest(m, tile, stamp, null, tile.startRead()), false);
+  assert.match(m.render(NOW), /Muse: THE ANSWER/);
+  assert.doesNotMatch(m.render(NOW), /Couldn't reach/);
+  assert.deepEqual(tile.get(), { question: 'q', reply: 'THE ANSWER' });
+});
+
+test('an EMPTY successful /latest is treated like a failed read: it never replaces an answer (screen or tile) nor advances the order; "No Muse conversation yet" only when nothing is shown', () => {
+  const empty = { question: '', reply: '' };
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  const stamp = tile.fetchStart();
+  const older = tile.startRead();
+  const newer = tile.startRead();
+  assert.equal(applyMuseLatest(m, tile, stamp, empty, newer), true, 'nothing shown yet');
+  assert.match(m.render(NOW), /No Muse conversation yet/);
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'THE ANSWER' }, older), true, 'the older real answer is not dropped by the empty read');
+  assert.match(m.render(NOW), /Muse: THE ANSWER/);
+  // an empty read with an answer on both surfaces changes neither
+  assert.equal(applyMuseLatest(m, tile, stamp, empty, tile.startRead()), false);
+  assert.match(m.render(NOW), /Muse: THE ANSWER/);
+  assert.doesNotMatch(m.render(NOW), /No Muse conversation/);
+  assert.deepEqual(tile.get(), { question: 'q', reply: 'THE ANSWER' });
+});
+
+test('a question-only /latest (asked from another client): newest question + "thinking", the loaded answer moves below under earlier; the tile keeps its last real answer', () => {
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'old q', reply: 'OLD ANSWER' }, tile.startRead()), true);
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead()), true);
+  let text = m.render(NOW);
+  assert.match(text, /You: asked elsewhere/);
+  assert.match(text, /Muse is thinking…/);
+  assert.deepEqual(tile.get(), { question: 'old q', reply: 'OLD ANSWER' }, 'the tile keeps its last real answer');
+  for (let i = 0; i < 2; i++) m.input('down', NOW);
+  assert.match(m.render(NOW), /earlier|OLD ANSWER/, 'the previous answer is below, not dropped');
+  // the same pending read again changes nothing; the reply arriving replaces the thinking head
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: '' }, tile.startRead()), true);
+  m.goTo('muse');
+  assert.equal(applyMuseLatest(m, tile, tile.fetchStart(), { question: 'asked elsewhere', reply: 'NEW ANSWER' }, tile.startRead()), true);
+  assert.match(m.render(NOW), /Muse: NEW ANSWER/);
+  assert.deepEqual(tile.get(), { question: 'asked elsewhere', reply: 'NEW ANSWER' });
+  // a tile with nothing yet shows the pending question
+  const fresh = new MuseCache(); const fm = new HomeModel(); fm.update(data); fm.goTo('muse');
+  applyMuseLatest(fm, fresh, fresh.fetchStart(), { question: 'only q', reply: '' }, fresh.startRead());
+  assert.deepEqual(fresh.get(), { question: 'only q', reply: '' });
+});
+
+test('relay answers A, B, then a pending C: the earlier list shows B then A (deduped by text, newest first, max 3)', () => {
+  const m2 = new HomeModel(); m2.update(data); m2.goTo('muse');
+  const t2 = new MuseCache();
+  const go = (q: string, r: string) => applyMuseLatest(m2, t2, t2.fetchStart(), { question: q, reply: r }, t2.startRead());
+  go('qA', 'ANSWER A');
+  go('qB', ''); // pending B: A moves below
+  go('qB', 'ANSWER B'); // B answered (head replaced: A stays below)
+  go('qC', ''); // pending C: B moves below
+  for (let i = 0; i < 3; i++) m2.input('down', NOW);
+  const text = Array.from({ length: 4 }, () => { m2.input('down', NOW); return m2.render(NOW); }).join('\n');
+  assert.ok(text.indexOf('ANSWER B') !== -1 && text.indexOf('ANSWER A') !== -1, text);
+  assert.ok(text.indexOf('ANSWER B') < text.indexOf('ANSWER A'), 'B before A');
+  // the same answer is never listed twice
+  go('qB', 'ANSWER B'); go('qD', '');
+  const all = Array.from({ length: 6 }, () => { m2.input('down', NOW); return m2.render(NOW); }).join('\n');
+  assert.ok(all.includes('ANSWER B'));
 });

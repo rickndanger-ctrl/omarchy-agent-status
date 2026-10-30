@@ -17,12 +17,14 @@ export const EXTERNAL_WAIT_MS = 300;
 /** A waiting update goes before the next press once it has waited this long, so a steady stream of presses cannot starve it (an alert). */
 export const EXTERNAL_MAX_DEFER_MS = 1000;
 export const REMOTE_HOLD_MS = 1500;
+/** One entry that has been the queue's turn this long is reported as stuck (everything behind it waits). */
+export const STUCK_MS = 5000;
 
 export interface QueueHost {
   /** Apply one press (the app's handle flow). May return a promise to be awaited (microphone changes). */
-  apply(input: Input, source?: InputSource): void | Promise<void>;
+  apply(input: Input): void | Promise<void>;
   /** Apply one long-press menu choice. May return a promise (Pause waits for the hub). */
-  menu(id: number): void | Promise<void>;
+  menu(id: number, source?: InputSource): void | Promise<void>;
   /** The screen the model is on, for the log. */
   screen(): string;
   /**
@@ -35,6 +37,8 @@ export interface QueueHost {
   /** Resolves when the glasses show what the model says (capped by the caller). */
   settled(capMs?: number): Promise<SettleResult>;
   log(name: string, detail: string): void;
+  /** Extra diagnostics (input.queued, input.stuck); optional so the log stays the log of what was applied. */
+  trace?(name: string, detail: string): void;
   /** Save the current position before a remote up; the returned function restores it. */
   captureRemoteUp?(): () => void;
   /** Desk up can open an app, so defer it until it cannot be part of a hold. */
@@ -56,7 +60,7 @@ export class InputQueue {
   private own = 0;
   private previousUp: Up | null = null;
 
-  constructor(private readonly host: QueueHost, private readonly max = MAX_QUEUED, private readonly maxTouch = MAX_TOUCH_QUEUED, private readonly applyWaitMs = APPLY_WAIT_MS) {}
+  constructor(private readonly host: QueueHost, private readonly max = MAX_QUEUED, private readonly maxTouch = MAX_TOUCH_QUEUED, private readonly applyWaitMs = APPLY_WAIT_MS, private readonly stuckMs = STUCK_MS) {}
 
   get length(): number { return this.pending.length; }
 
@@ -67,11 +71,13 @@ export class InputQueue {
     this.previousUp?.release?.();
     const up = input === 'up' && source === 'remote' ? { at: Date.now() } : undefined;
     this.previousUp = up ?? null;
+    this.host.trace?.('input.queued', `${input} from ${source}${this.running ? ` (${this.pending.length} waiting)` : ''}`);
     if (!this.add({ kind: 'input', input, source, stamp: this.unsolicited(), up })) this.previousUp = null;
   }
 
   pushMenu(id: number, source: InputSource = 'touch'): void {
     if (!this.host.foreground()) { this.host.log('input.ignored', `menu ${id} (not in front)`); return; }
+    this.host.trace?.('input.queued', `menu ${id} from ${source}`);
     const prev = this.previousUp;
     const up = source === 'remote' && id === INTERNAL_MENU.settings && prev && Date.now() - prev.at <= REMOTE_HOLD_MS ? prev : undefined;
     this.previousUp = null;
@@ -150,18 +156,20 @@ export class InputQueue {
           if (up.cancelled || up.discarded) { this.host.cancelRemoteUp?.(); continue; }
           if (!this.host.foreground() || next.stamp !== this.unsolicited()) continue;
         }
+        const turnStart = Date.now();
+        const stuck = next.kind === 'external' ? undefined : setTimeout(() => this.host.trace?.('input.stuck', `${Date.now() - turnStart} ms on ${label(next)} (${this.pending.length} waiting)`), this.stuckMs);
         const before = this.host.generation();
         const screenBefore = this.host.screen();
         let job: void | Promise<void> = undefined;
         try {
           if (next.kind === 'input') {
             if (next.up) next.up.undo = this.host.captureRemoteUp?.();
-            job = this.host.apply(next.input, next.source);
+            job = this.host.apply(next.input);
             if (next.up) next.up.generation = this.host.generation();
           }
           else if (next.kind === 'menu') {
             if (next.up?.undo && next.up.generation === this.host.generation()) next.up.undo();
-            job = this.host.menu(next.id);
+            job = this.host.menu(next.id, next.source);
           }
           else next.run();
         } catch (error) { this.host.log('input.error', error instanceof Error ? error.message : String(error)); }
@@ -181,7 +189,7 @@ export class InputQueue {
         // run until the glasses show this one's result.
         // An update only waits briefly, and not at all with something queued behind it: its frame is not worth a press's time.
         if (next.kind === 'external' && this.pending.length) continue;
-        const result = await this.host.settled(next.kind === 'external' ? EXTERNAL_WAIT_MS : undefined);
+        const result = await this.host.settled(next.kind === 'external' ? EXTERNAL_WAIT_MS : undefined).finally(() => clearTimeout(stuck));
         if (next.kind !== 'external') this.host.log(result === 'rendered' ? 'shown' : result === 'capped' ? 'settle-capped' : 'not-visible', this.host.screen());
         // Nothing can be seen: the rest of the presses would be blind. Forget them.
         if (result === 'not-visible') this.clear('not visible');

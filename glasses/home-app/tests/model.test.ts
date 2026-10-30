@@ -477,7 +477,7 @@ test('Muse: tap asks by voice, Send asks Muse and shows that it is thinking', ()
   m.input('select', NOW);
   m.setTranscript('what is on my calendar', NOW);
   assert.match(m.render(NOW), /^ASK MUSE\?/);
-  assert.deepEqual(m.input('select', NOW), { kind: 'askMuse', text: 'what is on my calendar', ask: 2 });
+  assert.deepEqual(m.input('select', NOW), { kind: 'askMuse', text: 'what is on my calendar', ask: 1 });
   assert.match(m.render(NOW), /Muse is thinking…/);
   m.setMuseAnswer('what is on my calendar', 'Dentist at 3.');
   assert.match(m.render(NOW), /Muse: Dentist at 3\./);
@@ -814,11 +814,76 @@ const longQ = 'x'.repeat(30) + ' ' + 'long question words '.repeat(9); // ~220 c
 const museAt = (m: HomeModel) => m.render(NOW).split('\n');
 const openMuse = (m: HomeModel) => { m.goTo('muse'); };
 
+test('Muse: a 223-char question and its reply: the first frame shows the question as ONE line and the answer from its top', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  openMuse(m);
+  assert.ok(longQ.length > 200);
+  m.setMuseAnswer(longQ, 'The answer starts here and goes on.\nSecond line.', undefined);
+  const rows = museAt(m);
+  assert.match(rows[2], /^You: /);
+  assert.ok(rows[2].endsWith('…') && rows[2].length <= 56, rows[2]);
+  assert.match(rows[3], /^Muse: The answer starts here/);
+  assert.ok(rows.length <= 10);
+  assert.equal(m.museAnswerInView(), true);
+});
 
+test('Muse: no reply yet shows the whole question as today; a partial then the final keeps the answer at the top', () => {
+  const m = new HomeModel();
+  m.update(withChat({ voice: true }));
+  openMuse(m);
+  m.setMuse(null);
+  m.input('select', NOW); // tap: ask by voice
+  m.input('select', NOW); // stop
+  m.setTranscript(longQ, NOW);
+  const act = m.input('select', NOW) as { kind: string; ask: number };
+  assert.equal(act.kind, 'askMuse');
+  const thinking = museAt(m).join('\n');
+  assert.match(thinking, /Muse is thinking…/);
+  assert.match(thinking, /^MUSE|You: x{30}/m);
+  m.setMuseAnswer(longQ, 'Partial answer begins', act.ask);
+  m.input('down', NOW); m.input('down', NOW); // the owner scrolled
+  m.setMuseAnswer(longQ, 'Partial answer begins and ends the final way.\n' + 'more text\n'.repeat(12), act.ask);
+  const rows = museAt(m);
+  assert.match(rows[3], /^Muse: Partial answer begins and ends/, 'each new reply resets to the answer top');
+  assert.equal(m.museAnswerInView(), true);
+  // scrolling goes down through the answer
+  m.input('down', NOW);
+  assert.doesNotMatch(museAt(m).join('\n'), /^Muse: Partial/m);
+  assert.match(museAt(m).join('\n'), /more text/);
+});
 
+test('Muse: two asks in flight: the newest question owns the screen; an older answer arriving later goes below it', () => {
+  const m = new HomeModel();
+  m.update(withChat({ voice: true }));
+  openMuse(m);
+  const ask = (q: string) => { m.input('select', NOW); m.input('select', NOW); m.setTranscript(q, NOW); return m.input('select', NOW) as { kind: string; ask: number }; };
+  const a1 = ask('first question');
+  const a2 = ask('second question');
+  assert.ok(a2.ask > a1.ask);
+  assert.equal(m.museIsNewest(a1.ask), false);
+  assert.equal(m.setMuseAnswer('first question', 'ANSWER ONE', a1.ask), false, 'the older ask does not take the screen');
+  let text = museAt(m).join('\n');
+  assert.match(text, /You: second question/);
+  assert.doesNotMatch(text.split('earlier')[0], /ANSWER ONE/, 'not above the newest');
+  assert.equal(m.setMuseAnswer('second question', 'ANSWER TWO', a2.ask), true);
+  text = museAt(m).join('\n');
+  assert.match(text, /Muse: ANSWER TWO/);
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
+  assert.match(museAt(m).join('\n'), /ANSWER ONE/, 'the older answer is reachable by scrolling down, under an "earlier" rule');
+});
 
+test('Muse: a failed ask puts the reason under a one-line question; an older failure goes below', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  openMuse(m);
+  assert.equal(m.setMuseProblem(longQ, 'no Muse is ready right now', undefined), true);
+  const rows = museAt(m);
+  assert.match(rows[2], /^You: .*…$/);
+  assert.match(rows[3], /^Muse didn't get it: no Muse is ready/);
+});
 
-test('a Muse read (tile refresh every 1.2 s) never moves the scroll of a chat or other page', () => {
+test('a Muse read (tile refresh every 1.2 s) never moves the scroll of a chat or other page; with Muse in front it still resets to the answer top', () => {
   const m = new HomeModel();
   openChat(m);
   m.setChat(Array.from({ length: 30 }, (_, i) => ({ from: 'Mom', fromMe: false, when: NOW / 1000 - 600 + i, text: `chat line ${i}` })).reverse(), NOW);
@@ -827,9 +892,33 @@ test('a Muse read (tile refresh every 1.2 s) never moves the scroll of a chat or
   assert.match(before, /chat line/);
   m.setMuse({ question: 'q', reply: 'a new latest answer' });
   m.setMuse(null);
-  const ask = m.beginMuseAsk('q2', NOW);
-  m.setMuseAnswer('q2', 'an answer from an ask', ask);
-  m.setMuseProblem('q3', 'no Muse', ask);
+  m.setMuseAnswer('q2', 'an answer from an ask');
+  m.setMuseProblem('q3', 'no Muse');
   assert.equal(m.render(NOW), before, 'the chat page did not jump');
+  // Muse in front: the answer top, as before
+  const w = new HomeModel();
+  w.update(withChat());
+  w.goTo('muse');
+  w.setMuse({ question: 'q', reply: Array.from({ length: 20 }, (_, i) => `answer line ${i}`).join('\n') });
+  w.input('down', NOW); w.input('down', NOW);
+  w.setMuseAnswer('q', 'a new answer\n' + 'x\n'.repeat(15));
+  assert.match(w.render(NOW), /Muse: a new answer/);
+  w.input('down', NOW);
+  w.setMuse({ question: 'q', reply: 'reloaded answer' });
+  assert.match(w.render(NOW), /Muse: reloaded answer/);
 });
 
+test('Muse open and scrolled: the same /latest arriving again keeps the place; a different one goes to the top', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  m.goTo('muse');
+  const latest = { question: 'q', reply: Array.from({ length: 30 }, (_, i) => `answer line ${i}`).join('\n') };
+  m.setMuse(latest);
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
+  const scrolled = m.render(NOW);
+  assert.doesNotMatch(scrolled, /answer line 0\b/);
+  m.setMuse({ ...latest }); // the tile's timed read lands: the same reply
+  assert.equal(m.render(NOW), scrolled, 'still where the owner scrolled to');
+  m.setMuse({ question: 'q', reply: 'a different, newer reply' });
+  assert.match(m.render(NOW), /Muse: a different, newer reply/);
+});

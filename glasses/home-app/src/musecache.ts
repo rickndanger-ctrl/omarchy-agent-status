@@ -8,13 +8,9 @@ export class MuseCache {
   private value: MuseValue | null = null;
   private stamp = 0;
   private asking = false;
-  private waiting = false;
 
   get(): MuseValue | null { return this.value; }
   get isAsking(): boolean { return this.asking; }
-  /** The relay is busy or updating and the hub is holding the question until a Muse is ready (the tile says so). */
-  get isWaiting(): boolean { return this.asking && this.waiting; }
-  setWaiting(on: boolean): void { this.waiting = on; }
 
   private fetchedOn = -1;
 
@@ -56,7 +52,7 @@ export class MuseCache {
   }
 
   /** The owner asked Muse: the tile shows "thinking" (an empty reply) until the answer arrives. */
-  askStart(question: string): void { this.waiting = false; this.asking = true; this.stamp++; this.value = { question, reply: '' }; }
+  askStart(question: string): void { this.asking = true; this.stamp++; this.value = { question, reply: '' }; }
   askReply(question: string, reply: string): void { this.stamp++; this.value = { question, reply }; }
-  askEnd(): void { this.waiting = false; this.asking = false; this.stamp++; }
+  askEnd(): void { this.asking = false; this.stamp++; }
 }

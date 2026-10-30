@@ -44,7 +44,7 @@ export type Action =
   | { kind: 'stopMic' }
   | { kind: 'cancelMic' }
   | { kind: 'sendText'; chat: number; name: string; text: string }
-  | { kind: 'askMuse'; text: string; ask?: number }
+  | { kind: 'askMuse'; text: string; ask?: number; fromTile?: true }
   | { kind: 'loadFolders'; machine: string }
   | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string }
   | { kind: 'openTiles' }
@@ -72,8 +72,8 @@ type Screen =
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
   | { kind: 'reply'; key: string }
-  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef }
-  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef }
+  | { kind: 'listen'; key: string; thinking: boolean; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef; tile?: true }
+  | { kind: 'confirm'; key: string; text: string; chat?: ChatRef; muse?: true; reminder?: true; start?: StartRef; tile?: true }
   | { kind: 'newAgent'; machine: string; agent?: string; folders?: string[] | null }
   | { kind: 'textReply'; id: number; name: string }
   | { kind: 'alert'; alert: Alert };
@@ -101,10 +101,6 @@ export const WIDTH = 56; // characters per line; the G2 font fits ~60 narrow cha
 const MAX_LINES = 10;
 const LIST_ROWS = 7;
 const BODY_LINES = 6;
-const MUSE_BODY = 7; // the Muse chat has no blank line under its title: one more line of conversation
-/** A question that /latest showed without a reply (asked from another device): nothing re-reads /latest by itself, so it does not pretend to be thinking. */
-export const MUSE_ELSEWHERE = '(asked on another device; reopen to see the answer)';
-const MUSE_SESSION_MS = 30 * 60_000; // a new ask after this long without Muse starts a fresh chat
 const IGNORE_BACK_MS = 500; // a Back this soon after the press that started the listening is ignored
 const TERM_LINES = 9; // the agent page is a full-screen terminal: one header line + 9 lines of tail = the 10 lines the glasses fit
 export const QUICK_TEXTS = ['On my way', "Can't talk right now", 'Call you soon', 'Sounds good', 'Yes', 'No'];
@@ -468,7 +464,7 @@ export class HomeModel {
       return;
     }
     if (s.kind !== 'listen') return;
-    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.reminder ? { reminder: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
+    if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.tile ? { tile: true as const } : {}), ...(s.reminder ? { reminder: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
     else {
       this.showFlash(text === null ? 'Voice failed. Try again' : "Didn't catch that", nowMs);
       this.go(s.reminder ? { kind: 'home' } : s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key });
@@ -482,7 +478,7 @@ export class HomeModel {
     if (this.screen.kind === 'listen') return;
     this.returnTo = null;
     this.go({ kind });
-    if (kind === 'muse') { this.museLines = null; this.composeMuse(); this.museRevealNewest(); }
+    if (kind === 'muse') this.museLines = null;
   }
   /**
    * Open a full screen from a Tiles action. Voice steps fall back to the quick-reply lists when the
@@ -496,10 +492,9 @@ export class HomeModel {
       return null;
     }
     if (target.kind === 'muse') {
-      this.museLines = null; this.composeMuse();
-      if (target.then === 'listen' && this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, muse: true }); return { kind: 'startMic' }; }
+      this.museLines = null;
+      if (target.then === 'listen' && this.data?.voice) { this.go({ kind: 'listen', key: '', thinking: false, muse: true, ...(target.fromTile ? { tile: true as const } : {}) }); return { kind: 'startMic' }; }
       this.go({ kind: 'muse' });
-      this.composeMuse(); this.museRevealNewest();
       return { kind: 'loadMuse' };
     }
     if (target.kind === 'chat') {
@@ -530,132 +525,100 @@ export class HomeModel {
     if (this.screen.kind === 'chat') this.scroll = Math.max(0, this.chatLines.length - BODY_LINES);
   }
   private chatAtBottom(): boolean { return this.scroll >= Math.max(0, (this.chatLines?.length ?? 0) - BODY_LINES); }
-  // ---- The Muse screen is a clean chat of THIS session: "You: …" / "Muse: …" turns in the order they happened. ----
-  // Session = since the app started; an ask after 30 minutes without Muse activity starts a fresh one. The relay's /latest only seeds an
-  // empty session with its one exchange; it never adds anything to a chat that has started. No lists, no history.
-  private museChat: { who: 'you' | 'muse'; text: string; ask: number; waiting?: boolean; problem?: boolean; seeded?: boolean }[] = [];
-  private museNote: string | null = null; // "Couldn't reach Muse." / "No Muse conversation yet." while there is no chat
+  // The Muse screen: the question as ONE line, then the answer from its top (a long question can no longer push the answer below the fold).
+  // Older answers (an earlier ask that finished, or one that answers after a newer ask began) stay reachable below the newest one.
+  private museHead: string[] | null = null;
+  private museHeadReply = false;
+  /** The head is this session's own final answer for the newest ask: the relay's /latest must never replace it. */
+  private museHeadFinal = false;
+  private museEarlier: { ask: number; lines: string[] }[] = [];
   private museAskSeq = 0;
-  private museLastAt = -Infinity;
-  private museStarts = new Map<string, number>(); // "you:3" / "muse:3" → first line of that turn in museLines
-  private museRevealed = new Set<number>(); // asks whose first reply text was already scrolled into view
-  private composeMuse(): void {
-    if (!this.museChat.length) { this.museLines = this.museNote ? [this.museNote] : this.museLines; return; }
-    const lines: string[] = [];
-    this.museStarts = new Map();
-    for (const t of this.museChat) {
-      this.museStarts.set(`${t.who}:${t.ask}`, lines.length);
-      if (t.who === 'you') lines.push(clip(`You: ${t.text}`));
-      else lines.push(...wrap(t.problem ? t.text : `Muse: ${t.text || (t.seeded ? MUSE_ELSEWHERE : t.waiting ? 'Muse is busy, waiting…' : 'Muse is thinking…')}`));
-    }
-    this.museLines = lines;
+  /** Answers that came from the relay (not from an ask of this session) get their own negative key, so two of them never replace each other. */
+  private museExtKey = 0;
+  private composeMuse(): void { this.museLines = this.museHead ? [...this.museHead, ...this.museEarlier.flatMap(e => ['', RULE.slice(0, 24) + ' earlier', ...e.lines])] : this.museLines; }
+  private museAnswerView(question: string, reply: string): string[] {
+    const m = museDisplay(question, reply);
+    return [clip(`You: ${m.question}`), ...wrap(`Muse: ${m.reply}`)];
   }
-  private museTurn(who: 'you' | 'muse', ask: number) { return this.museChat.find(t => t.who === who && t.ask === ask); }
-  private museMaxScroll(): number { return Math.max(0, (this.museLines?.length ?? 0) - MUSE_BODY); }
-  /** Bring a turn's first line to the top of the Muse view (only when the Muse screen is in front). */
-  private museReveal(who: 'you' | 'muse', ask: number): void {
-    if (this.screen.kind !== 'muse') return;
-    const at = this.museStarts.get(`${who}:${ask}`);
-    if (at !== undefined) this.scroll = Math.min(at, this.museMaxScroll());
-  }
-  /** A new ask (from this screen or not). Returns its number. 30 minutes since Muse was last used = a fresh session. */
-  beginMuseAsk(text: string, nowMs = Date.now()): number {
-    if (nowMs - this.museLastAt > MUSE_SESSION_MS) { this.museChat = []; this.museRevealed.clear(); }
-    this.museLastAt = nowMs;
-    const ask = ++this.museAskSeq;
-    this.museChat.push({ who: 'you', text: museDisplay(text, '').question, ask }, { who: 'muse', text: '', ask });
-    this.museNote = null;
-    this.composeMuse();
-    this.museReveal('you', ask);
-    return ask;
-  }
+  /** Is this ask the newest one? Only the newest ask's answer takes the screen. */
   museIsNewest(ask: number): boolean { return ask === this.museAskSeq; }
-  /** Opening Muse: the newest turn's reply (or the newest question while it is thinking) is in view. */
-  private museRevealNewest(): void {
-    const last = this.museChat.at(-1);
-    if (last) this.museReveal(last.who, last.ask);
-  }
-  /** The newest reply's first line is inside the window. */
-  museAnswerInView(): boolean {
-    if (this.screen.kind !== 'muse') return false;
-    const t = [...this.museChat].reverse().find(x => x.who === 'muse' && x.text);
-    const at = t ? this.museStarts.get(`muse:${t.ask}`) : undefined;
-    return at !== undefined && at >= this.scroll && at < this.scroll + MUSE_BODY;
-  }
-  /** An answer (partial or final) for an ask: it fills that ask's Muse turn in place. `ask` undefined: the newest turn (or a new exchange when there is none). Returns whether it is the newest ask. */
-  setMuseAnswer(question: string, reply: string, ask?: number): boolean {
-    const id = ask ?? (this.museChat.length ? this.museAskSeq : this.beginMuseAsk(question));
-    const turn = this.museTurn('muse', id);
-    if (!turn) return false;
-    const text = museDisplay(question, reply).reply;
-    turn.text = text; turn.waiting = false;
-    this.museLastAt = Date.now();
+  /** The answer's first line is inside the 6-line window (the question is one line, so scroll 0 or 1). */
+  museAnswerInView(): boolean { return this.screen.kind === 'muse' && this.museHeadReply && this.scroll <= 1; }
+  private museAsEarlier(ask: number, lines: string[]): void {
+    const at = this.museEarlier.findIndex(e => e.ask === ask);
+    if (at >= 0) this.museEarlier[at] = { ask, lines }; else this.museEarlier.unshift({ ask, lines });
+    this.museEarlier = this.museEarlier.slice(0, 3);
     this.composeMuse();
-    // Only the newest ask moves the view, and only when Muse is in front (a late answer to an older ask never does; opening Muse scrolls to the newest later).
-    if (text && this.screen.kind === 'muse' && this.museIsNewest(id) && !this.museRevealed.has(id)) { this.museRevealed.add(id); this.museReveal('muse', id); }
-    return this.museIsNewest(id);
+  }
+  /** Show a Muse answer from its top. `ask`: the ask it answers; an older ask than the newest goes below, without moving the screen. Returns whether it took the screen. */
+  setMuseAnswer(question: string, reply: string, ask?: number): boolean {
+    const lines = this.museAnswerView(question, reply);
+    if (ask !== undefined && !this.museIsNewest(ask)) { this.museAsEarlier(ask, lines); return false; }
+    this.museHead = lines; this.museHeadReply = true; this.museHeadFinal = ask !== undefined;
+    this.museEarlier = this.museEarlier.filter(e => e.ask !== ask);
+    this.composeMuse();
+    if (this.screen.kind === 'muse') this.scroll = 0; // only when Muse is in front: the scroll is shared with every other page
+    return true;
   }
   /** Muse didn't answer: say why, in the relay's own words. */
   setMuseProblem(question: string, reason: string, ask?: number): boolean {
-    const id = ask ?? (this.museChat.length ? this.museAskSeq : this.beginMuseAsk(question));
-    const turn = this.museTurn('muse', id);
-    if (!turn) return false;
-    turn.text = `Muse didn't get it: ${reason || 'no answer'}.`; turn.waiting = false; turn.problem = true;
+    const lines = [clip(`You: ${question}`), ...wrap(`Muse didn't get it: ${reason || 'no answer'}.`), '', 'Nothing was typed anywhere else.'];
+    if (ask !== undefined && !this.museIsNewest(ask)) { this.museAsEarlier(ask, lines); return false; }
+    this.museHead = lines; this.museHeadReply = true; this.museHeadFinal = ask !== undefined;
+    this.museEarlier = this.museEarlier.filter(e => e.ask !== ask);
     this.composeMuse();
-    if (this.screen.kind === 'muse' && this.museIsNewest(id) && !this.museRevealed.has(id)) { this.museRevealed.add(id); this.museReveal('muse', id); }
-    return this.museIsNewest(id);
-  }
-  /** The hub holds the question until a busy / updating Muse is ready: say so instead of "thinking" (and back to thinking once it was sent). */
-  setMuseWaiting(ask: number, waiting: boolean): void {
-    const turn = this.museTurn('muse', ask);
-    if (!turn || turn.text) return;
-    turn.waiting = waiting;
-    this.composeMuse();
-  }
-  museIsEmpty(): boolean { return this.museChat.length === 0; }
-  /** A turn that /latest seeded as "thinking" (a question asked from another client) is completed by a later /latest with the SAME question and a reply: nothing else is ever taken from /latest. */
-  completeSeeded(latest: { question: string; reply: string } | null): boolean {
-    const t = this.museChat.at(-1);
-    if (!latest || !latest.reply || !t || t.who !== 'muse' || !t.seeded || t.text) return false;
-    if (this.museTurn('you', t.ask)?.text !== museDisplay(latest.question, '').question) return false;
-    t.text = museDisplay(latest.question, latest.reply).reply; t.seeded = false;
-    this.composeMuse();
-    if (this.screen.kind === 'muse' && this.museIsNewest(t.ask)) this.museReveal('muse', t.ask);
+    if (this.screen.kind === 'muse') this.scroll = 0;
     return true;
   }
-  /** What the Muse tile shows: the latest exchange of this session, or null (then the tile uses what the relay last said). */
-  museTileView(): { question: string; reply: string; waiting: boolean; elsewhere: boolean } | null {
-    const m = [...this.museChat].reverse().find(t => t.who === 'muse');
-    if (!m) return null;
-    return { question: this.museTurn('you', m.ask)?.text ?? '', reply: m.text, waiting: Boolean(m.waiting), elsewhere: Boolean(m.seeded && !m.text) };
-  }
-  /** Put the chat back on the screen (the screen was cleared on opening). */
-  restoreMuse(): void { this.composeMuse(); }
-  /** The relay's latest seeds an EMPTY session with its one exchange (a question with no reply yet is a thinking turn); once a chat has started it changes nothing. Returns whether it was used. */
-  setMuse(latest: { question: string; reply: string } | null): boolean {
-    if (this.museChat.length) { this.composeMuse(); return false; }
-    if (latest && (latest.question || latest.reply)) {
-      const ask = ++this.museAskSeq;
-      const text = museDisplay(latest.question, latest.reply).reply;
-      this.museChat.push({ who: 'you', text: museDisplay(latest.question, '').question, ask }, { who: 'muse', text, ask, ...(text ? {} : { seeded: true }) });
-      this.museNote = null;
-      this.museRevealed.add(ask);
-      this.composeMuse();
-      if (this.screen.kind === 'muse') this.scroll = this.museMaxScroll(); // the latest reply on screen
-      return true;
-    }
-    this.museNote = latest === null ? "Couldn't reach Muse." : 'No Muse conversation yet.';
+  /** The ask is under way: its question (as today) and "thinking"; the answer shown so far moves below. */
+  beginMuseAsk(text: string): number {
+    if (this.museHead && this.museHeadReply) this.museEarlier = [{ ask: this.museAskSeq, lines: this.museHead }, ...this.museEarlier.filter(e => e.ask !== this.museAskSeq)].slice(0, 3);
+    const ask = ++this.museAskSeq;
+    this.museHead = [...wrap(`You: ${text}`), '', 'Muse is thinking…']; this.museHeadReply = false; this.museHeadFinal = false;
     this.composeMuse();
+    return ask;
+  }
+  /** Muse's screen already holds an answer (or an ask's failure note): an unreachable relay must not replace it. */
+  museHasAnswer(): boolean { return this.museHead !== null && this.museHeadReply; }
+  /** The relay's latest is a question with no reply yet (asked from another client): it is the newest, "thinking"; the answer shown so far moves below. */
+  showMusePending(question: string): void {
+    const head = [...wrap(`You: ${question}`), '', 'Muse is thinking…'];
+    if (this.museHead && this.museHead.join('\n') === head.join('\n')) { this.composeMuse(); return; }
+    if (this.museHead && this.museHeadReply) {
+      const text = this.museHead.join('\n');
+      this.museEarlier = [{ ask: --this.museExtKey, lines: this.museHead }, ...this.museEarlier.filter(e => e.lines.join('\n') !== text)].slice(0, 3);
+    }
+    this.museHead = head; this.museHeadReply = false; this.museHeadFinal = false;
+    this.composeMuse();
+    if (this.screen.kind === 'muse') this.scroll = 0;
+  }
+  /** Put the ask-in-progress back on screen (the Muse screen was opened or reloaded while an ask is under way: nothing is fetched then). */
+  restoreMuse(): void { if (this.museHead) this.composeMuse(); }
+  /** The relay's latest exchange. Returns whether it took the screen: it does not once this session holds a final answer for its newest ask (it is added below, if it is something new). */
+  setMuse(latest: { question: string; reply: string } | null): boolean {
+    if (this.museHeadFinal) {
+      if (latest && (latest.question || latest.reply)) {
+        const lines = this.museAnswerView(latest.question, latest.reply);
+        const known = [this.museHead ?? [], ...this.museEarlier.map(e => e.lines)].some(l => l.join('\n') === lines.join('\n'));
+        if (!known) this.museAsEarlier(--this.museExtKey, lines);
+      }
+      this.composeMuse(); // the screen was cleared on opening: put the head back
+      return false;
+    }
+    // The scrollback of earlier answers stays: reopening Muse must not lose it.
+    const reply = latest !== null && Boolean(latest.question || latest.reply);
+    const head = latest === null ? ["Couldn't reach Muse."] : reply ? this.museAnswerView(latest.question, latest.reply) : ['No Muse conversation yet.'];
+    const same = this.museHead !== null && this.museHead.join('\n') === head.join('\n');
+    this.museHeadReply = reply;
+    this.museHead = head;
+    this.composeMuse();
+    // The same reply read again (the tile's timed read landing after Muse was opened and scrolled) keeps the owner's place.
+    if (this.screen.kind === 'muse' && !same) this.scroll = 0;
     return true;
   }
   showFlash(text: string, nowMs: number): void { this.flash = { text, until: nowMs + 3000 }; }
 
   private lastSelectAt = -Infinity;
-  private lastDownAt = -Infinity;
-  /** On the Muse chat a Back that follows a Down within 0.6 s while there is more below is the second half of a quick double-press: it scrolls on instead of leaving. */
-  /** The converted Back: scroll one step on without counting as a new Down (the window must not renew, or a long reply could never be left). */
-  scrollMuseOn(): void { this.scroll = Math.min(this.museMaxScroll(), this.scroll + 3); }
-  backIsScroll(nowMs: number): boolean { return this.screen.kind === 'muse' && nowMs - this.lastDownAt < 600 && this.scroll < this.museMaxScroll(); }
   /** The listening was left by a press at the glasses' own request (Back from listen): return to where the listening began, same as the press would. */
   abandonListen(): boolean {
     const s = this.screen;
@@ -898,7 +861,6 @@ export class HomeModel {
     const s = this.screen;
     const selectedAt = this.lastSelectAt;
     if (input === 'select') this.lastSelectAt = nowMs;
-    if (input === 'down') this.lastDownAt = nowMs;
     if (s.kind === 'alert') {
       this.alerts = this.alerts.filter(a => a.id !== s.alert.id);
       if (input === 'back' || (input === 'select' && this.cursor === 1)) { this.finish(); return null; }
@@ -993,10 +955,10 @@ export class HomeModel {
     }
     if (s.kind === 'confirm' && s.muse && input === 'select') {
       const choice = CONFIRM_CHOICES[this.cursor];
-      if (choice === 'Talk again') { this.go({ kind: 'listen', key: '', thinking: false, muse: true }); return { kind: 'startMic' }; }
+      if (choice === 'Talk again') { this.go({ kind: 'listen', key: '', thinking: false, muse: true, ...(s.tile ? { tile: true as const } : {}) }); return { kind: 'startMic' }; }
       this.go({ kind: 'muse' });
       if (choice !== 'Send') return null;
-      return { kind: 'askMuse', text: s.text, ask: this.beginMuseAsk(s.text, nowMs) };
+      return { kind: 'askMuse', text: s.text, ask: this.beginMuseAsk(s.text), ...(s.tile ? { fromTile: true as const } : {}) };
     }
     if (s.kind === 'newAgent' && input === 'select') {
       if (!s.agent) {
@@ -1033,7 +995,8 @@ export class HomeModel {
       return null;
     }
     if (s.kind === 'muse') {
-      const max = this.museMaxScroll();
+      const lines = this.museLines ?? [];
+      const max = Math.max(0, lines.length - BODY_LINES);
       if (input === 'up') this.scroll = Math.max(0, this.scroll - 3);
       if (input === 'down') this.scroll = Math.min(max, this.scroll + 3);
       return null;
@@ -1108,7 +1071,7 @@ export class HomeModel {
     if (target.kind === 'approval') this.returnTo = s;
     this.go(target);
     if (target.kind === 'chat') { this.chatLines = null; return { kind: 'loadChat', id: target.id }; }
-    if (target.kind === 'muse') { this.museLines = null; this.composeMuse(); return { kind: 'loadMuse' }; }
+    if (target.kind === 'muse') { this.museLines = null; return { kind: 'loadMuse' }; }
     return null;
   }
 
@@ -1135,11 +1098,11 @@ export class HomeModel {
     return st ? studioText(st, nowMs) : null;
   }
 
-  private body(lines: string[] | null, loading: string, clamp = true, size = BODY_LINES): string[] {
+  private body(lines: string[] | null, loading: string, clamp = true): string[] {
     if (lines === null) return [loading];
-    if (clamp) this.scroll = Math.min(this.scroll, Math.max(0, lines.length - size)); // the text may have got shorter
-    const view = lines.slice(this.scroll, this.scroll + size);
-    if (this.scroll + size < lines.length) view.push('  ▼');
+    if (clamp) this.scroll = Math.min(this.scroll, Math.max(0, lines.length - BODY_LINES)); // the text may have got shorter
+    const view = lines.slice(this.scroll, this.scroll + BODY_LINES);
+    if (this.scroll + BODY_LINES < lines.length) view.push('  ▼');
     return view;
   }
 
@@ -1289,8 +1252,7 @@ export class HomeModel {
       lines.push(...this.body(this.studioLines(nowMs), 'Studio Routing is not running on the laptop.'), 'swipe: scroll');
     } else if (s.kind === 'muse') {
       lines[0] = 'HOME › MUSE';
-      lines.splice(1, 1); // no blank under the title: the chat gets the line
-      lines.push(...this.body(this.museLines, 'Reading Muse…', true, MUSE_BODY), this.data.voice ? 'tap: ask Muse by voice · swipe: scroll' : 'swipe: scroll');
+      lines.push(...this.body(this.museLines, 'Reading Muse…', false), this.data.voice ? 'tap: ask Muse by voice · swipe: scroll' : 'swipe: scroll');
     }
     // Short confirmations ("Sent", "Allowed", "… finished") replace the title on every page.
     if (this.flash.text && nowMs < this.flash.until) lines[0] = clip(this.flash.text);
