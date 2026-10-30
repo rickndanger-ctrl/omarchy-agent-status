@@ -748,7 +748,15 @@ export class HomeModel {
   brightness = 4;
   private settingsRows(): string[] { return ['Display off', `Brightness: ${this.brightness} of 4`, 'Close app', 'Back']; }
   /** The Quick settings screen: the phone remote's "settings" button and the Home row open it. */
-  openSettings(): void { this.returnTo = null; this.go({ kind: 'settings' }); }
+  /** Quick settings remember the page they were opened on; Back returns there (same row and scroll). Muse and the voice steps go to Home as before. */
+  private settingsFrom: Screen | null = null;
+  openSettings(): void {
+    this.returnTo = null;
+    const s = this.screen;
+    if (s.kind !== 'settings') this.settingsFrom = ['home', 'agents', 'messages', 'needs', 'studio', 'workspaces', 'chat', 'agent'].includes(s.kind) ? s : null;
+    this.go({ kind: 'settings' });
+  }
+  private leaveSettings(): void { const from = this.settingsFrom; this.settingsFrom = null; this.goBack(from ?? { kind: 'home' }); }
 
   private session(): Session | undefined {
     const s = this.screen;
@@ -798,6 +806,7 @@ export class HomeModel {
       else if (s.kind === 'confirm' && s.reminder) this.goBack({ kind: 'home' });
       else if ((s.kind === 'confirm' && s.start) || s.kind === 'newAgent') this.goBack({ kind: 'agents' });
       else if (s.kind === 'reply' || s.kind === 'confirm') this.goBack({ kind: 'agent', key: s.key });
+      else if (s.kind === 'settings') this.leaveSettings();
       else this.goBack({ kind: 'home' });
       return null;
     }
@@ -805,7 +814,7 @@ export class HomeModel {
       if (this.cursor === 0) return { kind: 'displayOff' };
       if (this.cursor === 1) { this.brightness = this.brightness >= 4 ? 1 : this.brightness + 1; return { kind: 'brightness', value: this.brightness }; }
       if (this.cursor === 2) return { kind: 'closeApp' };
-      this.goBack({ kind: 'home' });
+      this.leaveSettings();
       return { kind: 'settingsBack' };
     }
     if (s.kind === 'chat') {

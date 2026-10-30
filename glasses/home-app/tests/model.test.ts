@@ -715,3 +715,34 @@ test('a terminal that gets shorter while scrolled back still fills the screen', 
   assert.doesNotMatch(text, /22 newer/);
   assert.match(text, /out 0/);
 });
+
+test('Quick settings: Back (double-tap or the Back row) returns to the Home row you were on, and to the page you opened it from', () => {
+  const m = new HomeModel();
+  m.update(withChat());
+  const cur = () => m.render(NOW).split('\n').find(l => l.startsWith('>'));
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
+  const row3 = cur();
+  assert.ok(row3);
+  m.openSettings();
+  assert.equal(m.screenKind, 'settings');
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'home');
+  assert.equal(cur(), row3, 'double-tap Back');
+  m.openSettings();
+  for (let i = 0; i < 3; i++) m.input('down', NOW);
+  assert.deepEqual(m.input('select', NOW), { kind: 'settingsBack' }, 'the Back row');
+  assert.equal(cur(), row3);
+  // from the Agents page: back lands there, on the same row
+  m.goTo('agents');
+  m.input('down', NOW);
+  const onAgents = cur();
+  m.openSettings();
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'agents');
+  assert.equal(cur(), onAgents);
+  // Muse is left alone: Settings opened from Muse goes Home as before
+  m.goTo('muse');
+  m.openSettings();
+  m.input('back', NOW);
+  assert.equal(m.screenKind, 'home');
+});
