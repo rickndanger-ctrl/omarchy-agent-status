@@ -24,7 +24,7 @@ export interface QueueHost {
   /** Apply one press (the app's handle flow). May return a promise to be awaited (microphone changes). */
   apply(input: Input): void | Promise<void>;
   /** Apply one long-press menu choice. May return a promise (Pause waits for the hub). */
-  menu(id: number): void | Promise<void>;
+  menu(id: number, source?: InputSource): void | Promise<void>;
   /** The screen the model is on, for the log. */
   screen(): string;
   /**
@@ -169,7 +169,7 @@ export class InputQueue {
           }
           else if (next.kind === 'menu') {
             if (next.up?.undo && next.up.generation === this.host.generation()) next.up.undo();
-            job = this.host.menu(next.id);
+            job = this.host.menu(next.id, next.source);
           }
           else next.run();
         } catch (error) { this.host.log('input.error', error instanceof Error ? error.message : String(error)); }

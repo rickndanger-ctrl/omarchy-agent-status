@@ -85,3 +85,31 @@ test('a frame cut to the safe size and a failed write are logged', async () => {
     assert.ok(life.some(l => l.startsWith('frame failed ')), life.join(' | '));
   } finally { g.dispose(); }
 });
+
+test('the final answer arrives while a write is in flight: the forced rebuild is sticky, the NEXT draw is a rebuild carrying the answer', async () => {
+  const calls: { kind: string; text: string }[] = [];
+  const slow = (ms: number) => new Promise(r => setTimeout(r, ms));
+  const bridge = {
+    onEvenHubEvent: () => () => {}, onDeviceStatusChanged: () => () => {},
+    getDeviceInfo: async () => ({ status: { batteryLevel: 80, isWearing: true } }),
+    createStartUpPageContainer: async () => StartUpPageCreateResult.success,
+    rebuildPageContainer: async (c: { textObject?: { content?: string }[] }) => { await slow(30); calls.push({ kind: 'rebuild', text: c.textObject?.[0]?.content ?? '' }); return true; },
+    textContainerUpgrade: async (u: { content?: string }) => { await slow(250); calls.push({ kind: 'upgrade', text: u.content ?? '' }); return true; }, // a slow update
+    audioControl: async () => true, shutDownPageContainer: async () => true,
+  } as unknown as EvenAppBridge;
+  const g = new Glasses({ onInput: () => {}, onMenu: () => {}, onStatus: () => {}, onForeground: () => {}, onDevice: () => {}, onAudio: () => {}, bridge: async () => bridge }, GLASSES_MENU);
+  try {
+    await g.connect();
+    g.setText('first'); await g.settled(3000);
+    g.setText('partial answer'); // an update goes out (slow) ...
+    for (let i = 0; i < 200 && !g.busy(); i++) await slow(10); // until the (250 ms) write has started
+    assert.equal(g.busy(), true, 'a write is in flight');
+    g.forceRebuild(); g.setText('the final answer', true); // ... and the final answer lands meanwhile
+    await g.settled(5000);
+    const last = calls.at(-1)!;
+    assert.deepEqual(last, { kind: 'rebuild', text: 'the final answer' }, JSON.stringify(calls));
+    // the sticky request is satisfied by a rebuild started AFTER it: the next plain change is an update again
+    g.setText('later'); await g.settled(5000);
+    assert.equal(calls.at(-1)!.kind, 'upgrade');
+  } finally { g.dispose(); }
+});

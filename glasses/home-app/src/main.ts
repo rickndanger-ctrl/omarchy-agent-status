@@ -893,7 +893,7 @@ function screenGeneration(): number {
 /** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
 const inputQueue = new InputQueue({
   apply: applyInput,
-  menu: id => menu(id),
+  menu: (id, source) => menu(id, source),
   foreground: () => foreground,
   generation: screenGeneration,
   screen: () => (showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind),
@@ -909,10 +909,13 @@ function handle(input: Input, source: InputSource = 'touch'): void {
   inputQueue.push(input, source);
 }
 
-async function menu(id: number): Promise<void> {
+async function menu(id: number, source: InputSource = 'touch'): Promise<void> {
   diag('menu', id);
   if (blank) { wake(); return; } // the wake press is not passed on
   if (id === INTERNAL_MENU.settings) {
+    // The remote's volume-up is judged when ITS turn runs (a press queued before it may have opened Muse by now), not when it arrived.
+    const screen = showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind;
+    if (source === 'remote' && remoteSettingsIgnored(screen)) { diag('input.ignored', `settings on ${screen}`); return; }
     if (showingDesk()) { deskMode = 'app'; deskApp = 'settings'; desk!.leave(); }
     openSettings(settingsHost);
     return;

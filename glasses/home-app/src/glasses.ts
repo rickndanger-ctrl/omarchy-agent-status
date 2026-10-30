@@ -137,7 +137,10 @@ export class Glasses {
   }
 
   /** The next frame is sent as a full page rebuild, not a text update (the page may have been left in a state where updates are not drawn). */
-  forceRebuild(): void { this.shown = null; this.scheduleRender(); }
+  forceRebuild(): void { this.rebuildSeq++; this.scheduleRender(); }
+  /** forceRebuild() calls so far / the last one a drawn rebuild covered. A write already in flight when it is called cannot satisfy it (that frame was sent before). */
+  private rebuildSeq = 0;
+  private rebuildDone = 0;
   /** A write is in flight or waiting to go (a new frame would queue behind it). */
   busy(): boolean { return this.renderBusy || this.live.size > 0; }
   /** The glasses already show exactly what was last asked for. */
@@ -368,6 +371,7 @@ export class Glasses {
   private pending(): 'rebuild' | 'left' | 'right' | 'text' | null {
     const want = this.want;
     const shown = this.shown;
+    if (this.rebuildDone < this.rebuildSeq) return 'rebuild';
     if (!shown || shown.kind !== want.kind) return 'rebuild';
     if (want.kind === 'single') return shown.kind === 'single' && shown.text !== want.text ? 'text' : null;
     if (shown.kind !== 'tiles') return 'rebuild';
@@ -484,6 +488,7 @@ export class Glasses {
     if (todo === null) return;
     const want = this.want;
     const epoch = this.epoch;
+    const rebuildAsked = this.rebuildSeq;
     this.renderBusy = true;
     this.urgent = false;
     this.lastRenderAt = performance.now();
@@ -507,6 +512,7 @@ export class Glasses {
       if (!accepted) throw new Error('The Even app returned false for the text update.');
       this.options.onFrame?.(todo);
       if (want.kind === 'single') this.options.onDrawn?.(want.text);
+      if (todo === 'rebuild') this.rebuildDone = Math.max(this.rebuildDone, rebuildAsked);
       if (todo === 'rebuild' || want.kind === 'single') this.shown = want;
       else if (this.shown?.kind === 'tiles') this.shown = { ...this.shown, [todo]: want[todo as 'left' | 'right'] };
     } catch (error) {

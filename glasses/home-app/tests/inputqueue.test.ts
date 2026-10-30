@@ -410,3 +410,12 @@ test('diag: every press is logged as input.queued when it arrives, and one that 
   await new Promise(r => setTimeout(r, 200));
   assert.equal(log2.filter(l => l.startsWith('input.stuck')).length, 0);
 });
+
+test('a queued menu choice reaches the host with its source (the remote settings button is judged when its turn runs)', async () => {
+  const seen: string[] = [];
+  const q = new InputQueue({ apply: () => {}, menu: (id, source) => { seen.push(`${id} ${source}`); }, foreground: () => true, generation: () => 0, screen: () => 'home', settled: async () => 'rendered' as SettleResult, log: () => {} });
+  q.pushMenu(5, 'remote');
+  q.pushMenu(6, 'touch');
+  await new Promise(r => setTimeout(r, 100));
+  assert.deepEqual(seen, ['5 remote', '6 touch']);
+});
