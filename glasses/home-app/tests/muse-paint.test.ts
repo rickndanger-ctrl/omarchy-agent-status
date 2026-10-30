@@ -568,3 +568,21 @@ test('a failed /latest read never advances the order and never replaces an answe
   assert.doesNotMatch(m.render(NOW), /Couldn't reach/);
   assert.deepEqual(tile.get(), { question: 'q', reply: 'THE ANSWER' });
 });
+
+test('an EMPTY successful /latest is treated like a failed read: it never replaces an answer (screen or tile) nor advances the order; "No Muse conversation yet" only when nothing is shown', () => {
+  const empty = { question: '', reply: '' };
+  const m = new HomeModel(); m.update(data); m.goTo('muse');
+  const tile = new MuseCache();
+  const stamp = tile.fetchStart();
+  const older = tile.startRead();
+  const newer = tile.startRead();
+  assert.equal(applyMuseLatest(m, tile, stamp, empty, newer), true, 'nothing shown yet');
+  assert.match(m.render(NOW), /No Muse conversation yet/);
+  assert.equal(applyMuseLatest(m, tile, stamp, { question: 'q', reply: 'THE ANSWER' }, older), true, 'the older real answer is not dropped by the empty read');
+  assert.match(m.render(NOW), /Muse: THE ANSWER/);
+  // an empty read with an answer on both surfaces changes neither
+  assert.equal(applyMuseLatest(m, tile, stamp, empty, tile.startRead()), false);
+  assert.match(m.render(NOW), /Muse: THE ANSWER/);
+  assert.doesNotMatch(m.render(NOW), /No Muse conversation/);
+  assert.deepEqual(tile.get(), { question: 'q', reply: 'THE ANSWER' });
+});

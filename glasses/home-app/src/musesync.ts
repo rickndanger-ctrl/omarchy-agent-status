@@ -8,12 +8,12 @@ import { MUSE_UNREACHABLE, type MuseCache, type MuseValue } from './musecache';
  */
 export function applyMuseLatest(model: HomeModel, tile: MuseCache, stamp: number | null, latest: MuseValue | null, read: number): boolean {
   if (!tile.isCurrent(stamp)) { model.restoreMuse(); return false; }
-  // A failed read never advances the applied number and never replaces an answer: the unreachable note is only for a surface with nothing to show.
-  if (latest === null) {
-    const tileHas = tile.get() !== null && tile.get() !== MUSE_UNREACHABLE;
+  // A failed or EMPTY read never advances the applied number and never replaces an answer: the unreachable / "no conversation" note is only for a surface with nothing to show.
+  if (latest === null || (!latest.question && !latest.reply)) {
+    const tileHas = tile.get() !== null && tile.get() !== MUSE_UNREACHABLE && Boolean(tile.get()!.question || tile.get()!.reply);
     const screenHas = model.museHasAnswer();
-    if (screenHas) model.restoreMuse(); else model.setMuse(null);
-    if (!tileHas) tile.fetchFailed(stamp!);
+    if (screenHas) model.restoreMuse(); else model.setMuse(latest);
+    if (!tileHas) { if (latest) tile.fetchDone(stamp!, latest); else tile.fetchFailed(stamp!); }
     return !screenHas || !tileHas;
   }
   // Two reads can share a stamp: the one that started later wins, whichever finishes first.
