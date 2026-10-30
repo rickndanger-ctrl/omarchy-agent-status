@@ -374,3 +374,29 @@ test('ShownWatch.expectOnScreen: not armed when Muse is not the painted screen (
   assert.equal(w.expectOnScreen(true, 'Muse: hi', 100), true);
   assert.equal(w.drawn('Muse: hi', 250), 150);
 });
+
+test('a long question + reply: the answer\'s first line is in the first drawn frame, and muse.shown fires only for that frame; scrolled past the answer top it is not armed', async () => {
+  const { g, drawn, watch, shown } = drawRig(150);
+  const model = new HomeModel(); model.update(data); model.goTo('muse');
+  try {
+    await g.connect();
+    g.setText(model.render(NOW));
+    await g.settled(2000);
+    const q = 'a very long question about everything '.repeat(6);
+    model.setMuseAnswer(q, 'The reply begins right here.\nAnd carries on for a bit.');
+    g.setText(model.render(NOW), true);
+    assert.equal(watch.expectOnScreen(model.museAnswerInView(), g.wantedText(), Date.now()), true);
+    assert.equal(shown.length, 0);
+    await g.settled(2000);
+    assert.equal(shown.length, 1);
+    const first = drawn.at(-1)!.text;
+    assert.match(first, /Muse: The reply begins right here\./);
+    assert.ok(first.split('\n').slice(0, 4).join('\n').includes('Muse: The reply'), 'within the first lines');
+    // the owner scrolled the answer's top away: the frame would not show it, so nothing is armed
+    for (let i = 0; i < 2; i++) model.input('down', NOW);
+    model.setMuseAnswer(q, 'x\n'.repeat(30));
+    model.input('down', NOW); model.input('down', NOW); model.input('down', NOW);
+    assert.equal(model.museAnswerInView(), false);
+    assert.equal(watch.expectOnScreen(model.museAnswerInView(), 'whatever', Date.now()), false);
+  } finally { g.dispose(); }
+});

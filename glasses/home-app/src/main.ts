@@ -757,24 +757,27 @@ async function run(action: Action): Promise<void> {
       museTile.askStart(action.text);
       paint();
       const askedAt = Date.now();
+      const ask = action.ask ?? model.nextMuseAsk(); // the newest ask owns the Muse screen and tile
       const asked: { id?: string; error?: string } = await api<{ id?: string; error?: string }>('muse/ask', { method: 'POST', body: JSON.stringify({ text: action.text }) }).catch(e => ({ error: String(e.message ?? e) }));
       diag('muse.ask', asked.id ? 'queued' : asked.error ?? 'failed');
-      if (!asked.id) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay'); paint(); return; }
+      if (!asked.id) { const newest = model.setMuseProblem(action.text, asked.error ?? 'could not reach the Muse relay', ask); if (newest) { museTile.askReply(action.text, `Muse didn't get it: ${asked.error ?? 'could not reach the Muse relay'}.`); museTile.askEnd(); } paint(); return; }
       // Muse answers in a few seconds; long answers take longer. Check every 0.7 s for up to 2.5 minutes.
       for (let i = 0; i < 215; i++) {
         await new Promise(r => setTimeout(r, 700));
         const job = await api<{ status: string; question: string; reply: string; error?: string }>(`muse/reply?id=${encodeURIComponent(asked.id)}`).catch(() => null);
         if (!job) continue;
         const finished = ['done', 'error', 'timeout'].includes(job.status);
-        if (job.reply) { model.setMuseAnswer(job.question, job.reply); museTile.askReply(job.question, job.reply); }
+        const newest = job.reply ? model.setMuseAnswer(job.question, job.reply, ask) : model.museIsNewest(ask);
+        if (job.reply && newest) museTile.askReply(job.question, job.reply);
         // A partial reply is only drawn when the glasses are idle: a write in flight would hold the final one back behind it.
         if (finished || !glasses.busy()) {
-          if (finished && job.reply) {
+          if (finished && job.reply && newest) {
             urgentPaint = true;
             try { paint(); } finally { urgentPaint = false; }
             const wanted = glasses.wantedText();
             // Only when the Muse screen is what was painted: the owner may have gone elsewhere (another screen, Tiles, the Desk, display off).
-            if (!museShown.expectOnScreen(!blank && !showingDesk() && !showingTiles() && model.screenKind === 'muse', wanted, askedAt)) diag('muse.shown', 'not on screen');
+            // ...and the answer's first line is inside the frame (not scrolled out of the 6-line window).
+            if (!museShown.expectOnScreen(!blank && !showingDesk() && !showingTiles() && model.museAnswerInView(), wanted, askedAt)) diag('muse.shown', 'not on screen');
             // Already on the glasses (nothing changed and no older write in flight)? Then it is shown now.
             else if (glasses.upToDate()) { const ms = museShown.drawn(wanted!, Date.now()); if (ms !== null) diag('muse.shown', ms); }
           } else paint();
@@ -783,14 +786,13 @@ async function run(action: Action): Promise<void> {
           diag('muse.reply', `${job.status} ${job.error ?? ''}`);
           if (!job.reply) {
             const why = job.error || (job.status === 'timeout' ? 'Muse took too long' : 'unknown error');
-            model.setMuseProblem(action.text, why);
-            museTile.askReply(action.text, `Muse didn't get it: ${why}.`);
+            if (model.setMuseProblem(action.text, why, ask)) museTile.askReply(action.text, `Muse didn't get it: ${why}.`);
           }
           paint();
           break;
         }
       }
-      museTile.askEnd();
+      if (model.museIsNewest(ask)) museTile.askEnd();
       paint();
     } else if (action.kind === 'continueSession') {
       const r = await api<{ ok: boolean; pane?: string; error?: string }>('continue', { method: 'POST', body: JSON.stringify(action) })
