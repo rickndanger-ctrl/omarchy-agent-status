@@ -160,7 +160,8 @@ test('pop-ups wait while you are talking', () => {
   openAgent(m);
   m.input('select', NOW); // listening
   m.update(tmuxed({ pending: [pending] }));
-  assert.equal(m.screenKind, 'listen');
+  assert.equal(m.screenKind, 'agent');
+  assert.match(m.render(NOW), /^Listening/);
 });
 
 test('the Agents page puts chats you can talk to first, then threads to read, then computers', () => {
@@ -247,35 +248,88 @@ test('every screen fits the glasses, so a swipe is never eaten by native scrolli
   assert.ok(m.render(NOW).split('\n').length <= 10);
 });
 
-test('talk: tap starts the mic, tap stops, the text is confirmed, Send types it into the pane', () => {
+test('talk: tap starts the mic on the terminal page, tap stops, the heard text shows there, tap sends', () => {
   const m = new HomeModel();
   m.update(tmuxed());
   openAgent(m);
+  m.setTerminal('Mini 1/%3', ['You: hi', 'hello there']);
   assert.deepEqual(m.input('select', NOW), { kind: 'startMic' });
-  assert.match(m.render(NOW), /TALK → Claude · Mini 1/);
+  assert.equal(m.screenKind, 'agent');
+  assert.match(m.render(NOW), /^Listening… tap to send\n/);
+  assert.match(m.render(NOW), /hello there/, 'the terminal stays under the header');
   assert.deepEqual(m.input('select', NOW), { kind: 'stopMic' });
+  assert.match(m.render(NOW), /^Turning speech into text/);
   assert.equal(m.input('select', NOW), null, 'a second tap while transcribing does nothing');
   m.setTranscript('run the tests and tell me what fails', NOW);
   const text = m.render(NOW);
-  assert.match(text, /SEND TO CLAUDE · MINI 1\?/);
+  assert.match(text, /^Tap to send/);
   assert.match(text, /"run the tests and tell me what fails"/);
-  assert.match(text, /> Send/);
+  assert.ok(text.split('\n').length <= 10, text);
   assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Mini 1', pane: '%3', text: 'run the tests and tell me what fails' });
+  assert.match(m.render(NOW), /^Sending…/);
+  m.promptDone(true, false, NOW);
+  assert.match(m.render(NOW), /^Sent\n/);
   assert.equal(m.screenKind, 'agent');
+  assert.doesNotMatch(m.render(NOW + 5000), /run the tests/, 'the heard text is gone once sent');
 });
 
-test('talk: double-tap cancels the mic; an empty transcript goes back to the agent', () => {
+test('talk: double-tap cancels at every step and sends nothing; an empty transcript goes back to the terminal', () => {
   const m = new HomeModel();
   m.update(tmuxed());
   openAgent(m);
   m.input('select', NOW);
   assert.deepEqual(m.input('back', NOW), { kind: 'cancelMic' });
   assert.equal(m.screenKind, 'agent');
+  assert.doesNotMatch(m.render(NOW), /^Listening/);
+  m.input('select', NOW);
+  m.input('select', NOW);
+  assert.deepEqual(m.input('back', NOW), { kind: 'cancelMic' }, 'while transcribing too');
+  m.input('select', NOW);
+  m.input('select', NOW);
+  m.setTranscript('do not send this', NOW);
+  assert.equal(m.input('back', NOW), null, 'heard text: cancel sends nothing');
+  assert.equal(m.screenKind, 'agent');
+  assert.doesNotMatch(m.render(NOW), /do not send/);
   m.input('select', NOW);
   m.input('select', NOW);
   m.setTranscript('', NOW);
   assert.equal(m.screenKind, 'agent');
   assert.match(m.render(NOW), /Didn't catch that/);
+});
+
+test('select on a tmux, screen or window pin always starts the mic; voice off flashes why and opens no reply list', () => {
+  for (const over of [{ pane: '%3', tmux: 'claude' }, { pane: 'screen:1234.claude', tmux: 'claude' }, { pane: '', window: '0xabc' }]) {
+    const m = new HomeModel();
+    m.update(tmuxed({ sessions: [{ ...tmuxed().sessions[0], ...over }] }));
+    openAgent(m);
+    assert.deepEqual(m.input('select', NOW), { kind: 'startMic' }, JSON.stringify(over));
+    const off = new HomeModel();
+    off.update(tmuxed({ voice: false, sessions: [{ ...tmuxed().sessions[0], ...over }] }));
+    openAgent(off);
+    assert.equal(off.input('select', NOW), null);
+    assert.equal(off.screenKind, 'agent', 'no reply list');
+    assert.match(off.render(NOW), /^Voice not set up on Mini 1/);
+  }
+});
+
+test('the reply list starts with Speak: it starts the mic (or says voice is off); Back is second and does nothing', () => {
+  const m = new HomeModel();
+  m.update(tmuxed());
+  openAgent(m);
+  m.input('down', NOW);
+  assert.match(m.render(NOW), /> Speak\n  Back\n  Continue/);
+  assert.deepEqual(m.input('select', NOW), { kind: 'startMic' });
+  assert.match(m.render(NOW), /^Listening/);
+  m.input('back', NOW);
+  m.input('down', NOW);
+  m.input('down', NOW);
+  assert.equal(m.input('select', NOW), null, 'Back sends nothing');
+  const off = new HomeModel();
+  off.update(tmuxed({ voice: false }));
+  openAgent(off);
+  off.input('down', NOW);
+  assert.equal(off.input('select', NOW), null);
+  assert.match(off.render(NOW), /^Voice not set up on Mini 1/);
 });
 
 test('swipe down opens replies: quick replies send text, Stop sends Escape, Show on screen focuses', () => {
@@ -284,17 +338,19 @@ test('swipe down opens replies: quick replies send text, Stop sends Escape, Show
   openAgent(m);
   m.input('down', NOW);
   assert.equal(m.screenKind, 'reply');
-  assert.match(m.render(NOW), /> Back\n  Continue/);
-  assert.equal(m.input('select', NOW), null, 'a stray tap on the first item sends nothing');
+  assert.match(m.render(NOW), /> Speak\n  Back\n  Continue/);
+  m.input('down', NOW);
+  assert.equal(m.input('select', NOW), null, 'a stray tap on Back sends nothing');
   assert.equal(m.screenKind, 'agent');
+  m.input('down', NOW);
   m.input('down', NOW);
   m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Mini 1', pane: '%3', text: 'Continue' });
   m.input('down', NOW);
-  for (let i = 0; i < 5; i++) m.input('down', NOW);
+  for (let i = 0; i < 6; i++) m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Mini 1', pane: '%3', key: 'Escape' });
   m.input('down', NOW);
-  for (let i = 0; i < 6; i++) m.input('down', NOW);
+  for (let i = 0; i < 7; i++) m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'focus', machine: 'Mini 1', workspace: '2' });
 });
 
@@ -302,6 +358,7 @@ test('a plain terminal window on the Dell is prompted through its window', () =>
   const m = new HomeModel();
   m.update(base({ sessions: [{ ...base().sessions[0], window: '0xabc' }] }));
   openAgent(m);
+  m.input('down', NOW);
   m.input('down', NOW);
   m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'lap', pane: '', window: '0xabc', text: 'Continue' });
@@ -460,6 +517,7 @@ test('a Codex app thread is talkable: its conversation shows and replies go into
   assert.deepEqual(m.terminalTarget(), { machine: 'Mini 1', pane: '', appThread: 't1', key: 'Mini 1/codex/app:t1' });
   m.input('down', NOW);
   assert.doesNotMatch(m.render(NOW), /Stop \(Esc\)/, 'no Escape key for app threads');
+  m.input('down', NOW);
   m.input('down', NOW);
   assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Mini 1', pane: '', appThread: 't1', text: 'Continue' });
 });

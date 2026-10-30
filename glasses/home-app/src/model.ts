@@ -251,6 +251,8 @@ export class HomeModel {
   private lastState = new Map<string, string>();
   private notices: { key: string; text: string; at: number }[] = [];
   private terminal: { key: string; lines: string[] } | null = null;
+  /** A voice reply typed into the terminal page: listening, turning speech into text, or the heard text waiting for a tap. */
+  private talk: { key: string; phase: 'listening' | 'thinking' | 'ready'; text: string } | null = null;
   private termScroll = 0;
   private alerts: Alert[] = [];
   private returnTo: Screen | null = null;
@@ -334,7 +336,7 @@ export class HomeModel {
     // Already looking at it? Then it isn't news.
     const here = JSON.stringify(this.screen);
     this.alerts = this.alerts.filter(a => JSON.stringify(a.open) !== here);
-    const busy = ['listen', 'confirm', 'reply', 'textReply', 'approval', 'alert'].includes(this.screen.kind);
+    const busy = Boolean(this.talk) || ['listen', 'confirm', 'reply', 'textReply', 'approval', 'alert'].includes(this.screen.kind);
     if (busy || !this.alerts.length) return;
     if (!this.returnTo) this.returnTo = this.screen;
     const alert = this.alerts[0];
@@ -389,9 +391,26 @@ export class HomeModel {
     if (pane) this.waitingFor = { machine, pane, until: nowMs + 60_000 };
   }
 
+  /** Start a voice reply on the open terminal page. Always starts the mic; without voice on this hub it says why instead. */
+  private startTalk(x: Session, key: string, nowMs: number): Action | null {
+    if (!this.data?.voice) { this.showFlash(`Voice not set up on ${x.machine}`, nowMs); return null; }
+    this.talk = { key, phase: 'listening', text: '' };
+    return { kind: 'startMic' };
+  }
+
+  /** The prompt went out (or not): the header says Sent. */
+  promptDone(ok: boolean, stopped: boolean, nowMs: number): void {
+    this.showFlash(ok ? (stopped ? 'Stopped' : 'Sent') : 'Could not send to that agent', nowMs);
+  }
+
   /** Speech-to-text result for the listen screen; empty or null means nothing usable. */
   setTranscript(text: string | null, nowMs: number): void {
     const s = this.screen;
+    if (this.talk && s.kind === 'agent' && s.key === this.talk.key) {
+      if (text) this.talk = { ...this.talk, phase: 'ready', text };
+      else { this.talk = null; this.showFlash(text === null ? 'Voice failed. Try again' : "Didn't catch that", nowMs); }
+      return;
+    }
     if (s.kind !== 'listen') return;
     if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.reminder ? { reminder: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
     else {
@@ -404,7 +423,7 @@ export class HomeModel {
   goHome(): void { this.goTo('home'); }
   /** Jump straight to a main page from the long-press menu (not while you're mid-recording). */
   goTo(kind: 'home' | 'agents' | 'messages' | 'muse'): void {
-    if (this.screen.kind === 'listen') return;
+    if (this.screen.kind === 'listen' || this.talk) return;
     this.returnTo = null;
     this.go({ kind });
     if (kind === 'muse') this.museLines = null;
@@ -440,7 +459,7 @@ export class HomeModel {
     }
     this.notices = this.notices.filter(n => n.key !== target.key);
     const x = this.data?.sessions.find(y => sessionKey(y) === target.key);
-    if (target.then === 'listen' && x && talkable(x) && this.data?.voice) { this.go({ kind: 'listen', key: target.key, thinking: false }); return { kind: 'startMic' }; }
+    if (target.then === 'listen' && x && talkable(x)) { this.go({ kind: 'agent', key: target.key }); return this.startTalk(x, target.key, Date.now()); }
     this.go(target.then && x && this.replyChoices(x).length ? { kind: 'reply', key: target.key } : { kind: 'agent', key: target.key });
     return null;
   }
@@ -481,6 +500,7 @@ export class HomeModel {
 
   private go(screen: Screen): void {
     this.generation++;
+    this.talk = null;
     this.screen = screen;
     this.cursor = 0;
     this.scroll = 0;
@@ -611,7 +631,7 @@ export class HomeModel {
     if (!x) return [];
     // "Back" first: swiping down lands here, and a stray tap must not send anything.
     const replies = talkable(x) ? (x.appThread ? QUICK_REPLIES.filter(r => r !== 'Stop (Esc)') : QUICK_REPLIES) : [];
-    return ['Back', ...replies, ...(x.workspace ? [`Show on screen (workspace ${x.workspace})`] : [])];
+    return [...(replies.length ? ['Speak'] : []), 'Back', ...replies, ...(x.workspace ? [`Show on screen (workspace ${x.workspace})`] : [])];
   }
 
   private workspaceRows(): { row: Row; machine: string; id: number }[] {
@@ -678,6 +698,12 @@ export class HomeModel {
       if (input === 'back') { this.go(s.reminder ? { kind: 'home' } : s.chat ? { kind: 'chat', ...s.chat } : s.muse ? { kind: 'muse' } : s.start ? { kind: 'agents' } : { kind: 'agent', key: s.key }); return { kind: 'cancelMic' }; }
       if (input === 'select' && !s.thinking) { this.screen = { ...s, thinking: true }; return { kind: 'stopMic' }; }
       return null;
+    }
+    // Double-tap during a voice reply cancels it and stays on the terminal.
+    if (input === 'back' && this.talk && s.kind === 'agent' && this.talk.key === s.key) {
+      const phase = this.talk.phase;
+      this.talk = null;
+      return phase === 'ready' ? null : { kind: 'cancelMic' };
     }
     if (input === 'back') {
       // One double-tap always gets you home; only a chat and the reply/confirm steps go back one level.
@@ -789,6 +815,17 @@ export class HomeModel {
       const x = this.session();
       if (!x) return null;
       const total = this.terminalLines()?.length ?? 0;
+      const t = this.talk && this.talk.key === s.key ? this.talk : null;
+      if (t) {
+        if (input === 'back') { this.talk = null; return t.phase === 'ready' ? null : { kind: 'cancelMic' }; }
+        if (t.phase === 'listening' && input === 'select') { this.talk = { ...t, phase: 'thinking' }; return { kind: 'stopMic' }; }
+        if (t.phase === 'ready' && input === 'select') {
+          this.talk = null;
+          this.showFlash('Sending…', nowMs);
+          return { kind: 'prompt', machine: x.machine, pane: x.pane ?? '', ...(x.window ? { window: x.window } : {}), ...(x.appThread ? { appThread: x.appThread } : {}), text: t.text };
+        }
+        if (input !== 'up') return null;
+      }
       if (input === 'up') { this.termScroll = Math.min(this.termScroll + 3, Math.max(0, total - (TERM_LINES - 1))); return null; }
       if (input === 'down') {
         if (this.termScroll > 0) { this.termScroll = Math.max(0, this.termScroll - 3); return null; }
@@ -799,7 +836,7 @@ export class HomeModel {
         this.showFlash('Opening it on the glasses…', nowMs);
         return { kind: 'continueSession', machine: x.machine, session: x.desktopSession };
       }
-      if (talkable(x) && this.data?.voice) { this.go({ kind: 'listen', key: s.key, thinking: false }); return { kind: 'startMic' }; }
+      if (talkable(x)) return this.startTalk(x, s.key, nowMs);
       if (this.replyChoices(x).length) this.go({ kind: 'reply', key: s.key });
       return null;
     }
@@ -819,6 +856,7 @@ export class HomeModel {
       if (s.kind === 'reply') {
         const text = this.replyChoices(session)[this.cursor];
         this.go({ kind: 'agent', key: s.key });
+        if (text === 'Speak') return this.startTalk(session, s.key, nowMs);
         if (!text || text === 'Back') return null;
         if (text.startsWith('Show on screen')) return { kind: 'focus', machine: session.machine, workspace: session.workspace };
         return text === 'Stop (Esc)' ? { ...target, key: 'Escape' } : { ...target, text };
@@ -914,6 +952,8 @@ export class HomeModel {
           if (x.workspace) lines.push('', '▼ swipe down: show on screen');
         } else {
           const all = this.terminalLines();
+          const tk = this.talk && this.talk.key === s.key ? this.talk : null;
+          if (tk) lines[0] = clip(tk.phase === 'listening' ? 'Listening… tap to send' : tk.phase === 'thinking' ? 'Turning speech into text…' : 'Tap to send · double-tap cancels');
           if (all === null) lines.push('Loading…');
           else {
             // A full-screen terminal: 9 lines of tail under the header; scrolled back, the last line says how far back you are (still 10 lines).
@@ -921,7 +961,11 @@ export class HomeModel {
             const end = all.length - this.termScroll;
             const start = Math.max(0, end - rowsShown);
             const view = all.slice(start, end);
-            lines.push(...view, ...Array(rowsShown - view.length).fill(''));
+            const t = this.talk && this.talk.key === s.key ? this.talk : null;
+            const heard = t?.phase === 'ready' ? wrap(`"${t.text}"`).slice(0, 4) : [];
+            const room = rowsShown - heard.length;
+            const tail = view.slice(Math.max(0, view.length - room));
+            lines.push(...tail, ...Array(room - tail.length).fill(''), ...heard);
             // Scrolled back: one short position line (no hints).
             if (this.termScroll) lines.push(`▼ ${this.termScroll} newer`);
           }

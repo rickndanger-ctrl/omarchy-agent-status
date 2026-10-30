@@ -689,7 +689,7 @@ async function run(action: Action): Promise<void> {
     } else if (action.kind === 'prompt') {
       const r = await api<{ ok: boolean }>('prompt', { method: 'POST', body: JSON.stringify(action) });
       diag('prompt', `${action.machine} ${action.window ? 'window' : 'tmux'} ok=${r.ok}`);
-      model.showFlash(r.ok ? (action.key ? 'Stopped' : 'Sent') : 'Could not send to that agent', Date.now());
+      model.promptDone(r.ok, Boolean(action.key), Date.now());
       for (const wait of [500, 1500, 3000]) setTimeout(() => void refreshTerminal(), wait);
     } else if (action.kind === 'startMic') {
       if (getConv()?.isListening()) { model.setTranscript(null, Date.now()); model.showFlash('Stop listening first', Date.now()); paint(); return; }
