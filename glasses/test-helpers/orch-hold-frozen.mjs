@@ -1,8 +1,10 @@
 // Read-only preservation gate for ORCH-HOLD.md. The reference cannot be changed by environment.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, lstatSync } from 'node:fs';
 import path from 'node:path';
-import { stripHook } from './listen-frozen-hooks.mjs';
+// Muse Listen is removed: no live-hook regions remain, so there is nothing to strip.
+const stripHook = source => source;
 import { fileURLToPath } from 'node:url';
 
 const RELEASE = '03f7bcf2cba3bd17ab501356347ad969e73a0877';
@@ -23,25 +25,49 @@ function check(label, fn) {
 }
 function equal(a, b) { if (!a.equals(b)) throw new Error('differs from released 0.4.28'); }
 
-const whole = new Set(baselineFiles.filter(name => /muse/i.test(name)));
+// Files this removal (0.4.30) deleted: Muse Listen (hub + app) was added after the Muse freeze, Desk before it.
+const REMOVED = new Set(['glasses/muse-queue.mjs', 'glasses/muse-queue.test.mjs']);
+const whole = new Set(baselineFiles.filter(name => /muse/i.test(name) && !REMOVED.has(name)));
 for (const name of [
-  'glasses/hud-server.mjs', 'glasses/listen.mjs', 'glasses/listen-g2.mjs', 'glasses/listen-page.mjs',
-  'glasses/test-listen-join.sh',
-  ...['tiles', 'desk', 'deskpointer', 'remote', 'musecache', 'musepoll', 'musesync', 'shownwatch', 'settle'].map(n => `glasses/home-app/src/${n}.ts`),
-  'glasses/home-app/tests/listen-bounce.test.ts', 'glasses/home-app/tests/small-0427.test.ts',
+  ...['tiles', 'remote', 'musecache', 'musepoll', 'musesync', 'shownwatch', 'settle'].map(n => `glasses/home-app/src/${n}.ts`),
 ]) whole.add(name);
 for (const name of [...whole].sort()) check(name, () => equal(original(name), working(name)));
+
+// Files the removal had to change are pinned to their reviewed post-removal bytes instead (sha256), so any
+// later change still needs review. Their Muse parts are proved byte-identical to 56fe3b2 by test-muse-frozen.sh.
+const REMOVAL_PINS = {
+  'glasses/hud-server.mjs': '756d582d7ebc808b8ad6a8fb978fd20677001cf9827ff110274d8946903b9c81',
+  'glasses/home-app/tests/small-0427.test.ts': '6e37890bc3cf2dfb1957200f6b96e92f21db799834620b6426c9ed522ad5d348',
+};
+for (const [name, digest] of Object.entries(REMOVAL_PINS)) {
+  check(name + ' (post-removal pin)', () => {
+    if (createHash('sha256').update(working(name)).digest('hex') !== digest) throw new Error('differs from the reviewed 0.4.30 bytes');
+  });
+}
+
+// Desk (test) was removed from home-app after the 0.4.28 release. These exact phrases are the only Desk text
+// inside the otherwise frozen Muse/menu/paint spans; the reference is read with them taken out.
+const DESK_PHRASES = [
+  ['!showingDesk() && ', ''], [', the Desk, display off', ', display off'], [', Home, Desk)', ', Home)'], [', Desk)', ')'],
+  [' && foreground && !showingDesk()', ' && foreground'], ["showingDesk() ? 'desk' : ", ''], [' || showingDesk()', ''],
+  ['  } else if (showingDesk()) {\n    preview = desk!.render();\n    glasses.setText(preview);\n', ''],
+];
+function deskFree(text) {
+  for (const [from, to] of DESK_PHRASES) text = text.split(from).join(to);
+  // The launcher line for Muse lived inside the Desk's own app opener, which is gone with the Desk.
+  return text.split('\n').filter(line => !/showingDesk\(\)\) \{ deskMode|leaveDesk\(\);\s*$|^    if \(app === 'muse'\) \{ model\.goTo\('muse'\); void run\(\{ kind: 'loadMuse' \}\); \}$/.test(line)).join('\n');
+}
 
 // Only the literal additive id3 entry is allowed; all previous menu bytes remain pinned.
 exactMenu();
 function exactMenu() {
-  check('menu.ts: exact additive Listen item only', () => {
+  check('menu.ts: released menu without the removed Muse Listen item', () => {
     const name = 'glasses/home-app/src/menu.ts';
-    let text = working(name).toString();
+    let text = original(name).toString();
     text = text.replace('// Muse Listen hook: the one remaining SDK menu slot.\n', '');
     text = text.replace(', listen: 3', '');
     text = text.replace("  // Muse Listen hook: keep the original Muse item unchanged.\n  { id: MENU.listen, name: 'Muse Listen' },\n", '');
-    equal(original(name), Buffer.from(text));
+    equal(Buffer.from(text), working(name));
   });
 }
 
@@ -56,8 +82,10 @@ function walk(dir) {
   }
   return names;
 }
+// The frozen proof itself is the only Muse-named file this removal adds.
+const MUSE_PROOF = new Set(['glasses/test-muse-frozen.sh', 'glasses/test-helpers/muse-frozen-check.mjs', 'glasses/test-helpers/muse-frozen-mutations.test.mjs']);
 check('no added Muse path', () => {
-  const extra = walk('glasses').filter(n => /muse/i.test(n) && !whole.has(n));
+  const extra = walk('glasses').filter(n => /muse/i.test(n) && !whole.has(n) && !MUSE_PROOF.has(n));
   if (extra.length) throw new Error(extra.join(', '));
 });
 
@@ -84,7 +112,7 @@ function block(source, start) {
   throw new Error(`unterminated block: ${start.trim()}`);
 }
 function exact(name, label, select) {
-  check(`${name}: ${label}`, () => equal(Buffer.from(select(original(name).toString())), Buffer.from(select(working(name).toString()))));
+  check(`${name}: ${label}`, () => equal(Buffer.from(select(deskFree(original(name).toString()))), Buffer.from(select(working(name).toString()))));
 }
 const model = 'glasses/home-app/src/model.ts', main = 'glasses/home-app/src/main.ts';
 exact(model, 'Muse action and screen declarations', s => s.split('\n').filter(line => /\| \{ kind: '(?:loadMuse|askMuse|muse|listen|confirm)'|const CONFIRM_CHOICES =|^  muse: boolean;/.test(line)).join('\n'));
@@ -120,9 +148,9 @@ for (const [name, pattern] of [
   [main, /^.*(?:import .*Muse|import .*muse|askMuse|api\/muse|api\s*\(\s*[\'"`]muse(?:\/|[\'"`])|let urgentPaint =|let prevKind =|onDrawn:|const museShown =|const museTile =|muse: \(\)|if \(app === 'muse'\)|if \(id === MENU\.muse\)).*$/gm],
 ]) exact(name, 'Muse dispatch lines', s => [...s.matchAll(pattern)].map(m => m[0]).join('\n'));
 check('main.ts: original paint body preserved', () => {
-  const old = block(original(main).toString(), 'function paint(): void {\n');
+  const old = block(deskFree(original(main).toString()), 'function paint(): void {\n');
   const cur = block(stripHook(working(main).toString(), 'live-paint'), 'function paint(): void {\n');
-  const hold = block(git('show', `a742fa6:${main}`).toString(), 'function paint(): void {\n');
+  const hold = block(deskFree(git('show', `a742fa6:${main}`).toString()), 'function paint(): void {\n');
   if (cur !== old && cur !== hold) throw new Error('unreviewed paint addition or changed preserved body');
   const body = old.slice(old.indexOf('\n') + 1, old.lastIndexOf('\n')).trim();
   if (!cur.includes(body)) throw new Error('original paint body changed; agent scheduling must be additive');

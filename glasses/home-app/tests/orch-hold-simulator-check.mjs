@@ -94,11 +94,11 @@ try {
   const tokenFile = path.join(work, 'hub.token'), nodeTokenFile = path.join(work, 'node.token'), config = path.join(work, 'hub.json');
   await writeFile(tokenFile, token, { mode: 0o600 });
   await writeFile(nodeTokenFile, nodeToken, { mode: 0o600 });
-  await writeFile(config, JSON.stringify({ nodes: [{ name: 'Fixture', url: `http://127.0.0.1:${fixturePort}/node`, tokenFile: nodeTokenFile }], peers: [], listen: { notesFrom: 'page' } }));
+  await writeFile(config, JSON.stringify({ nodes: [{ name: 'Fixture', url: `http://127.0.0.1:${fixturePort}/node`, tokenFile: nodeTokenFile }], peers: [] }));
   const env = { HOME: home, PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'en_US.UTF-8', TMPDIR: work,
     HUD_TOKEN_FILE: tokenFile, HUD_HUB_CONFIG: config, HUD_TRANSCRIBE_URL: `http://127.0.0.1:${fixturePort}/asr`, GROQ_API_KEY: 'fake',
-    LISTEN_TEST_ALLOW_PORTS: `${fixturePort},${hubPort}`, LISTEN_TEST_GUARD_LOG: path.join(work, 'guard.log') };
-  hub = spawn(process.execPath, ['--import', path.join(glasses, 'test-helpers/listen-network-guard.mjs'), path.join(glasses, 'hud-server.mjs'), '--mode', 'hub', '--host', '127.0.0.1', '--port', String(hubPort), '--machine', 'Orch Hold Fixture'], { cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    FIXTURE_ALLOW_PORTS: `${fixturePort},${hubPort}`, FIXTURE_GUARD_LOG: path.join(work, 'guard.log') };
+  hub = spawn(process.execPath, ['--import', path.join(glasses, 'test-helpers/fixture-network-guard.mjs'), path.join(glasses, 'hud-server.mjs'), '--mode', 'hub', '--host', '127.0.0.1', '--port', String(hubPort), '--machine', 'Orch Hold Fixture'], { cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'] });
   for (const stream of [hub.stdout, hub.stderr]) stream.on('data', d => { hubLog = (hubLog + d).slice(-8000); });
   await wait(async () => { try { return (await request(`http://127.0.0.1:${hubPort}/api/health`)).ok; } catch { return false; } }, 'fake-only hub ready');
   const hubUrl = `http://127.0.0.1:${hubPort}/`;

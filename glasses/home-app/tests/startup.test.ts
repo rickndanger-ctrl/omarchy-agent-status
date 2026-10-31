@@ -22,10 +22,10 @@ test('the long-press menu has at most 10 items, valid unique ids and names', () 
   assert.deepEqual(Object.values(MENU).sort((a, b) => a - b), GLASSES_MENU.map(m => m.id).sort((a, b) => a - b)); // nothing in MENU is missing from the menu
 });
 
-test('the long-press menu has ten items including the live Muse Listen screen', () => {
-  assert.equal(GLASSES_MENU.length, 10);
-  assert.equal(GLASSES_MENU.some(m => m.name === 'Listen'), false);
-  assert.equal(GLASSES_MENU.find(m => m.id === MENU.listen)?.name, 'Muse Listen');
+test('the long-press menu has nine items and no Listen or Desk item', () => {
+  assert.equal(GLASSES_MENU.length, 9);
+  assert.equal(GLASSES_MENU.some(m => /listen|desk/i.test(m.name)), false);
+  assert.equal(Object.keys(MENU).some(k => /listen|desk/i.test(k)), false);
 });
 
 test('main.ts builds the glasses with that menu list', () => {
@@ -83,7 +83,7 @@ test('startup reaches the first glasses frame, and every page it builds (single 
 });
 
 test('the harness catches the 0.4.9 failure: 11 menu items are refused and the app reports it', async () => {
-  const { g, connected, errors, statuses } = await boot([...GLASSES_MENU, { id: 11, name: 'Extra one' }]);
+  const { g, connected, errors, statuses } = await boot([...GLASSES_MENU, { id: 11, name: 'Extra one' }, { id: 13, name: 'Extra two' }]);
   try {
     assert.equal(connected, false);
     assert.match(errors.join(' '), /TOO_MANY_MENU_ITEMS|11 menuItems/);

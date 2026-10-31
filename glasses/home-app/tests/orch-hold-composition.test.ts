@@ -20,7 +20,7 @@ async function rig() {
   const model = new HomeModel(); model.update(data); model.openTarget({ kind: 'agent', key: 'Dell/orchestrator' });
   const latest = new Latest(), tiles = new Tiles(), actions: Action[] = [], mics: boolean[] = [], uploads: Uint8Array[] = [];
   const timers = new Map<number, { at: number; fn: () => void }>(); let sequence = 0, now = 100000;
-  const state = { foreground: true, blank: false, tiles: false, desk: false, recording: null as Uint8Array[] | null,
+  const state = { foreground: true, blank: false, tiles: false, recording: null as Uint8Array[] | null,
     render: null as Promise<void> | null, asr: null as Promise<string> | null };
   let event!: (value: EvenHubEvent) => void, queue!: InputQueue, expiry!: AgentConfirmExpiry;
   const bridge = { onEvenHubEvent: (handler: typeof event) => { event = handler; return () => {}; },
@@ -28,13 +28,13 @@ async function rig() {
     createStartUpPageContainer: async () => StartUpPageCreateResult.success,
     rebuildPageContainer: async () => true, textContainerUpgrade: async () => true,
     audioControl: async (on: boolean) => { mics.push(on); return true; } } as unknown as EvenAppBridge;
-  const visibleToken = () => state.foreground && !state.blank && !state.tiles && !state.desk ? model.agentHoldToken() : null;
+  const visibleToken = () => state.foreground && !state.blank && !state.tiles ? model.agentHoldToken() : null;
   const glasses = new Glasses({ onInput: input => queue.push(input, 'touch'),
     onLongPress: () => { if (visibleToken() !== null) queue.pushHold(); }, onMenu: id => queue.pushMenu(id),
     onStatus: () => {}, onDevice: () => {}, onAudio: pcm => state.recording?.push(pcm),
     onForeground: value => { state.foreground = value; if (!value) { voice.abandon(); queue.clear('left the front'); expiry.sync(); } },
     bridge: async () => bridge }, GLASSES_MENU);
-  const paint = () => { if (state.blank || state.tiles || state.desk) voice.abandon(); expiry?.sync(); };
+  const paint = () => { if (state.blank || state.tiles) voice.abandon(); expiry?.sync(); };
   const voice = new AgentVoice({ model, latest, now: () => now,
     recording: () => state.recording, setRecording: value => { state.recording = value; },
     microphone: on => glasses.microphone(on), transcribe: async audio => { uploads.push(audio); return state.asr ?? 'fixture private speech'; },
@@ -49,7 +49,7 @@ async function rig() {
     paint();
   };
   const host: FlowHost = { model, tiles, now: () => now, paint, isBlank: () => state.blank, wake: () => { state.blank = false; },
-    showingTiles: () => state.tiles, showingDesk: () => state.desk, inOpenedScreen: () => false,
+    showingTiles: () => state.tiles, inOpenedScreen: () => false,
     leaveTiles: () => { state.tiles = false; }, backToTiles: () => { state.tiles = true; paint(); },
     tileCtx: () => ({ data, now, timeZone: 'UTC', terminal: () => null, chat: () => null, muse: () => null, reminders: () => [], url: () => null }),
     runTileEffect: () => {}, runModelAction: run, saveLayout: () => {}, refreshTiles: () => {}, refreshTerminal: () => {} };
@@ -132,8 +132,8 @@ test('a send hold queued before expiry cannot send after its deadline even ahead
   } finally { render.resolve(); r.close(); }
 });
 
-test('Tiles, Desk or blank taking the front clears agent voice and suppresses later holds', async () => {
-  for (const surface of ['tiles', 'desk', 'blank'] as const) {
+test('Tiles or blank taking the front clears agent voice and suppresses later holds', async () => {
+  for (const surface of ['tiles', 'blank'] as const) {
     const r = await rig(); try {
       await r.confirm(); r.state[surface] = true; r.paint(); r.hold(); await flush();
       assert.equal(r.model.agentHoldToken(), null); assert.equal(r.model.agentConfirmDeadline(), null);

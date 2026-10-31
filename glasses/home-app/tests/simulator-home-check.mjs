@@ -2,7 +2,7 @@
 // still names the retired "conversation" tile on a page. Run from glasses/home-app:   node tests/simulator-home-check.mjs
 //
 // Part A (any OS): the real app code (main.ts + glasses + model, fake Even bridge) against the demo hub. Asserts, from what the
-//   app really draws and logs: Home has no Listen/Conversation row and the glasses menu has exactly 9 items (no 'Listen'); the
+//   app really draws and logs: Home has no Listen/Conversation/Desk row and the glasses menu has exactly 9 items (no 'Listen' or 'Desk'); the
 //   Tiles page with that layout draws, its conversation slot renders as an empty tile, taps/back/page swipes do not crash and
 //   the app logs no frame failure.
 // Part B (macOS only): the same hub and the app served by Vite, shown in a hidden, owned copy of the native Even simulator
@@ -80,11 +80,11 @@ if (process.argv.includes('--driver')) {
       if (!/AGENTS/.test(text)) problems.push('Home never drew its AGENTS list');
       out.homeText = text.slice(0, 600);
       if (!/Claude|Codex/.test(text)) problems.push('Home drew no agent row (demo sessions expected)');
-      if (/conversation/i.test(text) || /\bListen\b/.test(text)) problems.push('Home draws a Listen/Conversation row: ' + (text.match(/.*(conversation|\bListen\b).*/i)?.[0] ?? ''));
+      if (/conversation|\bDesk\b/i.test(text) || /\bListen\b/.test(text)) problems.push('Home draws a Listen/Conversation/Desk row: ' + (text.match(/.*(conversation|\bDesk\b|\bListen\b).*/i)?.[0] ?? ''));
       const names = bridge.menu ?? [];
       out.menuNames = names;
       if (names.length !== 9) problems.push(`the glasses menu has ${names.length} items, expected 9: ${names.join(', ')}`);
-      if (names.some(n => /listen|conversation/i.test(n))) problems.push('the glasses menu still has a Listen/Conversation item: ' + names.join(', '));
+      if (names.some(n => /listen|conversation|desk/i.test(n))) problems.push('the glasses menu still has a Listen/Conversation/Desk item: ' + names.join(', '));
     } else {
       const layout = await call('/api/layout');
       out.layoutPage1 = layout.pages?.[0];
@@ -185,7 +185,7 @@ registerHooks({
   for (const mode of ['home', 'tiles']) {
     const r = await runDriver(mode);
     summary.push(r);
-    const label = mode === 'home' ? 'Home: no Listen/Conversation row, glasses menu has 9 items, no frame failures' : 'Tiles with the old layout: the conversation slot is an empty tile, taps/back/swipes do not crash, no frame failures';
+    const label = mode === 'home' ? 'Home: no Listen/Conversation/Desk row, glasses menu has 9 items, no frame failures' : 'Tiles with the old layout: the conversation slot is an empty tile, taps/back/swipes do not crash, no frame failures';
     if (r.ok) proof.push(`PASS ${label}` + (mode === 'home' ? ` [menu: ${(r.menuNames ?? []).join(' | ')}]` : ''));
     else { proof.push(`FAIL ${label}: ${r.problems.join('; ')}`); exitCode = 1; }
   }

@@ -1,8 +1,0 @@
-PASS actual evenhub-simulator 0.9.5 automation API; SDK framebuffer 576x288
-CAPTURE native RGBA files retained verbatim; readable copies flatten alpha onto black with Pillow, no text/content edits
-PASS listening indicator, transcript and two notes from loopback fake hub; injected fake microphone only
-PASS phone /api/input down twice selects note 2; arrival 01:40, transcript anchor 01:30
-PASS touch up/down uses same selection; double-down returns to newest
-PASS PCM16 fake chunk uploaded through HTTP; select stops fake microphone and hub session
-PASS no uncaught JavaScript errors or SDK frame failures
-CLEANUP owned simulator process and loopback fixture servers only

@@ -48,7 +48,6 @@ export type Action =
   | { kind: 'loadFolders'; machine: string }
   | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string }
   | { kind: 'openTiles' }
-  | { kind: 'openDesk' }
   | { kind: 'displayOff' }
   | { kind: 'brightness'; value: number }
   | { kind: 'closeApp' }
@@ -63,11 +62,8 @@ type Screen =
   | { kind: 'messages' }
   | { kind: 'chat'; id: number; name: string }
   | { kind: 'muse' }
-  // Muse Listen hook: distinct from the existing single-utterance voice screen.
-  | { kind: 'museListen' }
   | { kind: 'studio' }
   | { kind: 'tiles' }
-  | { kind: 'desk' } // only a Home row's target, like tiles: the Desk is drawn by src/desk.ts
   | { kind: 'settings' }
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
@@ -377,8 +373,6 @@ export class HomeModel {
 
   /** Pop the next alert up, but never in the middle of talking, confirming, or replying. */
   private showNextAlert(): void {
-    // Muse Listen hook: transcript/recording stays visible until deliberately left.
-    if (this.screen.kind === 'museListen') return;
     // Already looking at it? Then it isn't news.
     const here = JSON.stringify(this.screen);
     this.alerts = this.alerts.filter(a => JSON.stringify(a.open) !== here);
@@ -486,7 +480,7 @@ export class HomeModel {
     this.abandonTalk();
     return true;
   }
-  /** A separate SDK hold path: never a generic Input or a Tiles/Desk gesture. */
+  /** A separate SDK hold path: never a generic Input or a Tiles gesture. */
   hold(nowMs: number, token?: unknown): Action | null {
     if (this.expireAgentConfirm(nowMs)) return null;
     const voice = this.agentConfirm ?? this.talk;
@@ -549,8 +543,6 @@ export class HomeModel {
 
   setError(message: string): void { this.error = message; }
   goHome(): void { this.goTo('home'); }
-  // Muse Listen hook: screen entry itself never opens the microphone.
-  goListen(): void { this.returnTo = null; this.go({ kind: 'museListen' }); }
   /** Jump straight to a main page from the long-press menu (not while you're mid-recording). */
   goTo(kind: 'home' | 'agents' | 'messages' | 'muse'): void {
     if (this.screen.kind === 'listen') return;
@@ -770,7 +762,7 @@ export class HomeModel {
       .map(state => `${counts.get(state)} ${STATE_WORD[state]}`)
       .join(' · ');
     const rows: Row[] = [title(clip(`AGENTS │ ${summary || 'none running'}`, WIDTH - 2)), title(RULE)];
-    // The items come first (no MENU title: its line is needed for the Listen row); anything waiting is one row that opens its own page.
+    // The items come first; anything waiting is one row that opens its own page.
     const waiting = d.pending.length + this.notices.length;
     const online = d.machines.filter(m => m.online).length;
     const pins = this.pins();
@@ -798,10 +790,7 @@ export class HomeModel {
       rows.push({ id: 'home:studio', text: clip(`Studio · ${busy.length ? `${busy.length} working · ${busy[0].name}: ${busy[0].line}` : 'standing by'}`, WIDTH - 2), open: { kind: 'studio' } });
     }
     if (waiting) rows.push({ id: 'home:needs', text: clip(`! Needs you · ${waiting}${d.pending.length ? ` (${d.pending.length} approval${d.pending.length === 1 ? '' : 's'})` : ''}`, WIDTH - 2), open: { kind: 'needs' } });
-    // Muse Listen hook: leave existing Muse rows and actions intact.
-    rows.push({ id: 'home:museListen', text: 'Muse Listen', open: { kind: 'museListen' } });
     rows.push({ text: 'Tiles · 5 pages of apps', open: { kind: 'tiles' } });
-    rows.push({ text: 'Desk (test) · 3×3 apps, head pointer', open: { kind: 'desk' } });
     if (pins.length) rows.push({ text: clip(`All agents · ${d.sessions.length} on ${online} computer${online === 1 ? '' : 's'}`, WIDTH - 2), open: { kind: 'agents' } });
     return rows;
   }
@@ -938,8 +927,6 @@ export class HomeModel {
 
   /** Apply one tap or swipe. Returns work for the network layer, if any. */
   input(input: Input, nowMs: number, source: 'touch' | 'remote' = 'touch'): Action | null {
-    // Muse Listen hook: the controller handles live-screen gestures; model fallback only leaves.
-    if (this.screen.kind === 'museListen') { if (input === 'back') this.goHome(); return null; }
     if (this.expireAgentConfirm(nowMs)) return null;
     const voice = this.agentConfirm ?? this.talk;
     if (voice && !this.agentTargetCurrent(voice.target)) { this.abandonTalk(); return null; }
@@ -1164,7 +1151,6 @@ export class HomeModel {
     const target = rows[this.cursor]?.open;
     if (!target) return null;
     if (target.kind === 'tiles') return { kind: 'openTiles' };
-    if (target.kind === 'desk') return { kind: 'openDesk' };
     if (target.kind === 'agent') this.notices = this.notices.filter(n => n.key !== target.key);
     // An approval answered from Needs you comes back to Needs you.
     if (target.kind === 'approval') this.returnTo = s;

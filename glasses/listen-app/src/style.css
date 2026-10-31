@@ -1,9 +1,0 @@
-:root { color-scheme: dark; font: 15px/1.5 -apple-system, BlinkMacSystemFont, sans-serif; background: #101719; color: #e0e8e6; }
-* { box-sizing: border-box; } body { margin: 0; } #app { max-width: 980px; margin: 0 auto; padding: 24px; }
-h1 { font-size: 25px; font-weight: 650; letter-spacing: -.5px; } .setup { padding: 16px; border: 1px solid #344341; border-radius: 12px; }
-label { display: block; color: #b0c2be; font-size: 13px; margin-bottom: 12px; } input { display: block; width: 100%; margin-top: 5px; padding: 10px; background: #192325; color: inherit; border: 1px solid #465754; border-radius: 6px; }
-button { background: #243d38; color: #e6f4ed; border: 1px solid #466258; border-radius: 7px; padding: 9px 12px; cursor: pointer; font: inherit; font-size: 13px; }
-button:disabled { opacity: .5; cursor: default; } .status { min-height: 1.5em; font-size: 13px; color: #b2c3bf; overflow-wrap: anywhere; }
-.mic-state { color: #c8d5d2; } .mic-state[data-listening="true"] { color: #9fe5ae; font-weight: 650; }
-.boxes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; } pre { min-height: 260px; padding: 15px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #40564d; border-radius: 10px; background: #09100d; color: #9cdaa1; font: 14px/1.65 ui-monospace, monospace; }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; } @media(max-width: 480px) { #app { padding: 14px; } pre { padding: 8px; font-size: 12px; } }

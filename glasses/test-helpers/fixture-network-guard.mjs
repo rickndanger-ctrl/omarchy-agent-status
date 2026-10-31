@@ -1,5 +1,5 @@
 // TEST ONLY. Load with node --import before the hub. Never import from production.
-// LISTEN_TEST_ALLOW_PORTS lists explicit fixture loopback ports; all other
+// FIXTURE_ALLOW_PORTS lists explicit fixture loopback ports; all other
 // network destinations and all child commands are denied. The audit contains
 // only denial categories, never URLs, headers, prompts, argv or credentials.
 import { appendFileSync } from 'node:fs'
@@ -11,16 +11,16 @@ import { syncBuiltinESMExports } from 'node:module'
 import { urlToHttpOptions } from 'node:url'
 
 const livePorts = new Set([5180, 5181, 5182, 8765, 8791, 18080, 18081])
-const ports = String(process.env.LISTEN_TEST_ALLOW_PORTS || '').split(',').filter(Boolean).map(Number)
+const ports = String(process.env.FIXTURE_ALLOW_PORTS || '').split(',').filter(Boolean).map(Number)
 if (!ports.length || ports.some(p => !Number.isInteger(p) || p < 1 || p > 65535 || livePorts.has(p))) {
-  throw new Error('Listen fixture requires explicit non-live loopback ports')
+  throw new Error('Fixture guard requires explicit non-live loopback ports')
 }
 const allowed = new Set(ports)
-const audit = process.env.LISTEN_TEST_GUARD_LOG
+const audit = process.env.FIXTURE_GUARD_LOG
 
 function deny(kind) {
   if (audit) appendFileSync(audit, JSON.stringify({ blocked: kind }) + '\n', { mode: 0o600 })
-  throw new Error(`Listen fixture guard blocked ${kind}`)
+  throw new Error(`Fixture guard blocked ${kind}`)
 }
 
 function endpoint(host, port, protocol = 'http:') {

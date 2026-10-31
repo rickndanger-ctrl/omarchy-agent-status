@@ -1,6 +1,4 @@
 import './style.css';
-// Muse Listen hook: the controller owns only the new live screen.
-import { HomeListen } from './listen/home';
 import { Glasses, DEFAULT_OUTLINE } from './glasses';
 import { ShownWatch } from './shownwatch';
 import { applyMuseLatest } from './musesync';
@@ -16,7 +14,6 @@ import { remoteSettingsIgnored, makeHandle, makeHoldHandle, TOP_SCREENS, openSet
 import { AgentVoice, AgentConfirmExpiry } from './agent-voice';
 import { MENU, GLASSES_MENU, INTERNAL_MENU, setHideDone } from './menu';
 import { Latest } from './latest';
-import type { Desk, DeskAppId } from './desk'; // type only: desk.ts itself is loaded by import() when the Desk is opened
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
 const BUILD = '2026-10-26-b12';
@@ -60,7 +57,7 @@ const remote = new RemoteInput({
   hub: () => base, token: () => token, active: () => foreground,
   apply: input => {
     if (input !== 'settings') return handle(input, 'remote');
-    const screen = showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind;
+    const screen = showingTiles() ? 'tiles' : model.screenKind;
     if (remoteSettingsIgnored(screen)) { diag('input.ignored', `settings on ${screen}`); return; }
     inputQueue.pushMenu(INTERNAL_MENU.settings, 'remote');
   },
@@ -93,9 +90,7 @@ function abandonAgentVoice(): void {
 }
 
 function visibleAgentHoldToken(): unknown | null {
-  // Muse Listen hook: scope a physical hold to this live-screen visit.
-  if (showingListen()) return listenHoldToken;
-  return foreground && !blank && !showingTiles() && !showingDesk() ? model.agentHoldToken() : null;
+  return foreground && !blank && !showingTiles() ? model.agentHoldToken() : null;
 }
 let status = 'Starting…';
 
@@ -106,9 +101,7 @@ const glasses = new Glasses({
   onMenu: id => inputQueue.pushMenu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
   onForeground: on => {
-    // Muse Listen hook: menu/background/exit relinquishes audio without an automatic restart.
-    if (!on) { foreground = false; void homeListen.leave(); }
-    foreground = on; if (!on) { model.abandonTalk(); const cancel = agentVoice.run({ kind: 'cancelMic' }); if (cancel) void cancel; if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); syncAgentConfirmExpiry(); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); }
+    foreground = on; if (!on) { model.abandonTalk(); const cancel = agentVoice.run({ kind: 'cancelMic' }); if (cancel) void cancel; if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); syncAgentConfirmExpiry(); } remote.sync(); if (on) { void poll(); }
   },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
@@ -117,33 +110,16 @@ const glasses = new Glasses({
     paint();
   },
   onLifecycle: event => diag('lifecycle', event),
-  onImu: sample => desk?.imuSample(sample),
-  onImuOff: () => desk?.imuLost(),
   onFrame: what => diag('frame', `${model.screenKind} ${what}`),
   onDrawn: text => { const ms = museShown.drawn(text, Date.now()); if (ms !== null) diag('muse.shown', ms); },
   onSlowRender: ms => diag('render.slow', `${ms} ms on ${model.screenKind}`),
   onAudio: pcm => {
-    // Muse Listen hook: claimed Listen audio never reaches the legacy recording buffer.
-    if (homeListen.onAudio(pcm)) return;
     if (!recording) return;
     if (!recording.length) diag('mic.first-audio', pcm.length);
     if (recording.length < 4000) recording.push(pcm);
   },
 }, GLASSES_MENU);
 glasses.setBrightness(model.brightness);
-
-// Muse Listen hook: share current Home credentials only when beginning a pinned-hub session.
-let voiceJobs = 0;
-let listenVisible = false;
-let listenHoldToken: object = {};
-const showingListen = () => foreground && !blank && !showingTiles() && !showingDesk() && model.screenKind === 'museListen';
-const homeListen = new HomeListen({
-  hub: () => ({ base, token }),
-  mic: { on: () => glasses.listenMicrophone(true), off: () => glasses.listenMicrophone(false) },
-  busy: () => recording !== null || voiceJobs > 0 || model.micWanted() || glasses.microphoneBusy(),
-  changed: () => paint(), leave: () => { model.goHome(); paint(); },
-  diag: name => diag(name, ''),
-});
 
 $('app').innerHTML = `
 <main>
@@ -156,9 +132,6 @@ $('app').innerHTML = `
   <p id="status" class="status"></p>
   <label class="row"><input type="checkbox" id="hide-old"> Hide messages older than 24 h</label>
   <label class="row"><input type="checkbox" id="hide-done"> Hide finished agents</label>
-  <label class="row"><input type="checkbox" id="desk-swap"> Desk: swap axes</label>
-  <label class="row"><input type="checkbox" id="desk-invx"> Desk: invert X</label>
-  <label class="row"><input type="checkbox" id="desk-invy"> Desk: invert Y</label>
   <label class="row">Tile outline brightness <input type="range" id="outline" min="1" max="15" step="1"> <span id="outline-val"></span></label>
   <label class="row"><input type="checkbox" id="quiet"> Quiet mode: pop-ups only for pinned agents</label>
   <details class="row"><summary>Pinned agents</summary>
@@ -396,12 +369,6 @@ $<HTMLInputElement>('hide-done').checked = model.hideDone;
 $<HTMLInputElement>('hide-done').onchange = () => { setHideDone(model, store, $<HTMLInputElement>('hide-done').checked); paint(); };
 $<HTMLInputElement>('hide-old').checked = model.hideOldTexts;
 $<HTMLInputElement>('hide-old').onchange = () => setHideOldTexts($<HTMLInputElement>('hide-old').checked);
-/** The Desk's head-pointer switches (phone page): saved like the other settings and applied at once. */
-const deskOptions = () => ({ swapAxes: store.get('home.deskSwap') === '1', invertX: store.get('home.deskInvX') === '1', invertY: store.get('home.deskInvY') === '1' });
-for (const [id, key] of [['desk-swap', 'home.deskSwap'], ['desk-invx', 'home.deskInvX'], ['desk-invy', 'home.deskInvY']] as const) {
-  $<HTMLInputElement>(id).checked = store.get(key) === '1';
-  $<HTMLInputElement>(id).onchange = () => { store.set(key, $<HTMLInputElement>(id).checked ? '1' : '0'); desk?.setPointerOptions(deskOptions()); diag('desk.options', JSON.stringify(deskOptions())); };
-}
 const outlineInput = $<HTMLInputElement>('outline');
 outlineInput.value = String(savedOutline());
 $('outline-val').textContent = outlineInput.value;
@@ -508,75 +475,6 @@ function runTileEffect(effect: TileEffect, source: InputSource = 'touch'): void 
 }
 
 
-// --- Desk (test): src/desk.ts is loaded only when it is opened ---
-let desk: Desk | null = null;
-/** off: not used; desk: the grid is showing; app: a screen opened from it is showing (Back returns to the grid). */
-let deskMode: 'off' | 'desk' | 'app' = 'off';
-let deskApp: DeskAppId | null = null;
-/** When each press arrived, so two downs are judged by arrival, not by when the queue got to them. */
-let deskArrivals: number[] = [];
-const showingDesk = () => deskMode === 'desk' && desk !== null;
-async function openDesk(): Promise<void> {
-  abandonAgentVoice();
-  try {
-    if (!desk) {
-      const mod = await import('./desk');
-      desk = new mod.Desk({ imu: open => glasses.imu(open), paint: () => paint(), settled: () => glasses.settled(), diag: (n, d) => diag(n, d), now: () => Date.now() });
-      desk.setPointerOptions(deskOptions());
-    }
-  } catch (error) {
-    diag('desk.load-failed', error instanceof Error ? error.message : String(error));
-    model.showFlash('Desk is not available', Date.now());
-    paint();
-    return;
-  }
-  tilesActive = false; fromTiles = false;
-  model.abandonListen();
-  model.goHome();
-  deskMode = 'desk'; deskApp = null; deskArrivals = [];
-  paint();
-  await desk.enter();
-}
-function leaveDesk(): void {
-  if (deskMode === 'off') return;
-  deskMode = 'off'; deskApp = null; deskArrivals = [];
-  desk?.leave();
-}
-function backToDesk(): void {
-  if (deskMode !== 'app' || !desk) return;
-  if (deskApp) desk.appBack(deskApp);
-  deskApp = null; tilesActive = false; fromTiles = false;
-  model.goHome();
-  deskMode = 'desk'; deskArrivals = [];
-  paint();
-  void desk.enter();
-}
-function openDeskApp(app: DeskAppId): void {
-  if (!desk) return;
-  if (app === 'reminders' || app === 'clock') { desk.note(`${app === 'clock' ? 'Clock' : 'Reminders'}: not yet`); paint(); return; }
-  if (app === 'listen') { desk.note('Listen: not available'); paint(); return; }
-  deskMode = 'app'; deskApp = app;
-  desk.leave();
-  if (app === 'tiles') enterTiles();
-  else {
-    if (app === 'muse') { model.goTo('muse'); void run({ kind: 'loadMuse' }); }
-    else if (app === 'messages') model.goTo('messages');
-    else if (app === 'agents') model.goTo('agents');
-    else if (app === 'studio') model.openTarget({ kind: 'studio' });
-    else if (app === 'settings') model.openSettings();
-    void refreshTerminal();
-  }
-  paint();
-}
-function deskInput(input: Input): void {
-  if (!desk) return;
-  const at = deskArrivals.shift() ?? Date.now();
-  const result = desk.input(input, at);
-  if (result?.kind === 'home') { leaveDesk(); model.goHome(); paint(); return; }
-  if (result?.kind === 'open') { openDeskApp(result.app); return; }
-  paint();
-}
-
 let prevKind = model.screenKind;
 /** Set around the paint of a Muse answer the owner is waiting for: that frame skips the write pacing. */
 let urgentPaint = false;
@@ -594,26 +492,9 @@ const settingsHost = {
   paint: () => paint(),
 };
 function paint(): void {
-  // Muse Listen hook BEGIN live-paint
-  const live = showingListen();
-  if (live && !listenVisible) {
-    listenVisible = true; listenHoldToken = {};
-    if (recording !== null) void run({ kind: 'cancelMic' });
-    homeListen.enter();
-  }
-  if (!live && listenVisible) { listenVisible = false; void homeListen.leave(); }
-  if (live) {
-    const frame = homeListen.frame();
-    glasses.setListenFrame(frame.key, frame.left, frame.right);
-    $('glass').textContent = `${frame.left}\n\n${frame.right}`;
-    $('status').textContent = status;
-    syncAgentConfirmExpiry();
-    return;
-  }
-  // Muse Listen hook END live-paint
-  if (blank || showingTiles() || showingDesk()) abandonAgentVoice();
-  // The microphone is open only while a voice reply is on screen and in front: leaving the page (menu, Home, Desk) closes it.
-  if (recording !== null && !(model.micWanted() && foreground && !showingDesk())) void run({ kind: 'cancelMic' });
+  if (blank || showingTiles()) abandonAgentVoice();
+  // The microphone is open only while a voice reply is on screen and in front: leaving the page (menu, Home) closes it.
+  if (recording !== null && !(model.micWanted() && foreground)) void run({ kind: 'cancelMic' });
   // A reminder that was added or cancelled (or whose voice failed) ends on Home: that is back in Tiles.
   if (fromTiles && model.screenKind === 'home' && (prevKind === 'listen' || prevKind === 'confirm')) fromTiles = false;
   const enteredVoiceScreen = prevKind !== model.screenKind && ['listen', 'confirm', 'muse'].includes(model.screenKind);
@@ -622,9 +503,6 @@ function paint(): void {
   if (blank) {
     preview = '(display off: any press wakes it)';
     glasses.setText(' ');
-  } else if (showingDesk()) {
-    preview = desk!.render();
-    glasses.setText(preview);
   } else if (showingTiles()) {
     const frame = tiles.render(tileCtx());
     glasses.setTiles(`p${frame.page}`, frame.focus, frame.left, frame.right);
@@ -722,14 +600,6 @@ const agentVoice = new AgentVoice({
 });
 const FLASH = { allow: 'Allowed', deny: 'Denied', desk: 'Left for the desk' };
 async function run(action: Action): Promise<void> {
-  // Muse Listen hook BEGIN voice-fence
-  const micAction = ['startMic', 'stopMic', 'cancelMic'].includes(action.kind);
-  if (micAction && homeListen.ownsMic) {
-    model.abandonListen(); model.abandonTalk();
-    model.showFlash('Listen microphone is busy', Date.now()); paint(); return;
-  }
-  if (micAction) voiceJobs++;
-  // Muse Listen hook END voice-fence
   try {
     const agentJob = agentVoice.run(action);
     if (agentJob) { await agentJob; paint(); return; }
@@ -819,9 +689,9 @@ async function run(action: Action): Promise<void> {
             urgentPaint = true;
             try { paint(); } finally { urgentPaint = false; }
             const wanted = glasses.wantedText();
-            // Only when the Muse screen is what was painted: the owner may have gone elsewhere (another screen, Tiles, the Desk, display off).
+            // Only when the Muse screen is what was painted: the owner may have gone elsewhere (another screen, Tiles, display off).
             // ...and the answer's first line is inside the frame (not scrolled out of the 6-line window).
-            if (!museShown.expectOnScreen(!blank && !showingDesk() && !showingTiles() && model.museAnswerInView(), wanted, askedAt)) diag('muse.shown', 'not on screen');
+            if (!museShown.expectOnScreen(!blank && !showingTiles() && model.museAnswerInView(), wanted, askedAt)) diag('muse.shown', 'not on screen');
             // Already on the glasses (nothing changed and no older write in flight)? Then it is shown now.
             else if (glasses.upToDate()) { const ms = museShown.drawn(wanted!, Date.now()); if (ms !== null) diag('muse.shown', ms); }
           } else paint();
@@ -874,8 +744,6 @@ async function run(action: Action): Promise<void> {
       await runSettingsAction(settingsHost, action).job;
     } else if (action.kind === 'openTiles') {
       enterTiles();
-    } else if (action.kind === 'openDesk') {
-      await openDesk();
     } else if (action.kind === 'loadMuse') {
       const stamp = museTile.fetchStart();
       const read = museTile.startRead();
@@ -887,9 +755,6 @@ async function run(action: Action): Promise<void> {
     }
   } catch (error) {
     model.showFlash(error instanceof Error ? error.message : 'Failed', Date.now());
-  } finally {
-    // Muse Listen hook: pending legacy start/stop/transcription also blocks live-session acquisition.
-    if (micAction) voiceJobs--;
   }
   paint();
 }
@@ -898,8 +763,7 @@ async function run(action: Action): Promise<void> {
 const inputHost = {
   model, tiles, tileCtx, showingTiles,
   inOpenedScreen: () => tilesActive && fromTiles,
-  leaveTiles: () => { if (deskMode === 'app') { backToDesk(); return; } tilesActive = false; model.goHome(); paint(); },
-  showingDesk, deskInput, inDeskApp: () => deskMode === 'app' && !tilesActive, backToDesk,
+  leaveTiles: () => { tilesActive = false; model.goHome(); paint(); },
   backToTiles: () => { abandonAgentVoice(); fromTiles = false; paint(); void refreshTiles(); },
   paint, isBlank: () => blank, wake, runTileEffect,
   runModelAction: (action: Action) => run(action),
@@ -913,64 +777,39 @@ const applyHold = makeHoldHandle(inputHost);
 /** Changes whenever the screen does: the model's screen plus Tiles shown/hidden (seen at each call). */
 let tilesFlips = 0;
 let wasShowingTiles = false;
-let wasShowingDesk = false;
 function screenGeneration(): number {
   const now = showingTiles();
   if (now !== wasShowingTiles) { tilesFlips++; wasShowingTiles = now; }
-  const deskNow = showingDesk();
-  if (deskNow !== wasShowingDesk) { tilesFlips++; wasShowingDesk = deskNow; }
   return model.generation + tilesFlips;
 }
 /** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
 const inputQueue = new InputQueue({
-  // Muse Listen hook: deliberate remote select and physical touch retain their distinct privacy rules.
-  apply: (input, source) => showingListen() ? homeListen.input(input, source) : applyInput(input, source),
+  apply: (input, source) => applyInput(input, source),
   holdToken: visibleAgentHoldToken,
-  // Muse Listen hook: the existing queued hold path rejects stale live-screen visits.
-  hold: token => { if (showingListen()) { if (token === listenHoldToken) return homeListen.hold(); return; } if (visibleAgentHoldToken() !== null) return applyHold(token); },
+  hold: token => { if (visibleAgentHoldToken() !== null) return applyHold(token); },
   menu: (id, source) => menu(id, source),
   foreground: () => foreground,
   generation: screenGeneration,
-  screen: () => (showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind),
+  screen: () => (showingTiles() ? 'tiles' : model.screenKind),
   captureRemoteUp: () => showingTiles() ? tiles.capturePosition() : model.capturePosition(),
-  holdRemoteUp: () => showingDesk(),
-  cancelRemoteUp: () => { if (showingDesk()) deskArrivals.shift(); },
   settled: capMs => glasses.settled(capMs),
   log: (name, detail) => diag(name, detail),
   trace: (name, detail) => diag(name, detail),
 });
 function handle(input: Input, source: InputSource = 'touch'): void {
-  // Muse Listen hook BEGIN arrival-navigation
-  // Selection only: bypass frame-settle queue so double-down uses local event arrival times.
-  if (showingListen() && (input === 'up' || input === 'down')) {
-    void homeListen.input(input, source, performance.now());
-    return;
-  }
-  // Muse Listen hook END arrival-navigation
-  if (showingDesk()) deskArrivals.push(Date.now());
   inputQueue.push(input, source);
 }
 
 async function menu(id: number, source: InputSource = 'touch'): Promise<void> {
-  // Muse Listen hook BEGIN live-menu
-  if (model.screenKind === 'museListen') { await homeListen.leave(); listenVisible = false; }
-  if (id === MENU.listen) {
-    if (blank) { wake(); return; }
-    leaveDesk(); tilesActive = false; fromTiles = false;
-    model.goListen(); paint(); return;
-  }
-  // Muse Listen hook END live-menu
   diag('menu', id);
   if (blank) { wake(); return; } // the wake press is not passed on
   if (id === INTERNAL_MENU.settings) {
     // The remote's volume-up is judged when ITS turn runs (a press queued before it may have opened Muse by now), not when it arrived.
-    const screen = showingDesk() ? 'desk' : showingTiles() ? 'tiles' : model.screenKind;
+    const screen = showingTiles() ? 'tiles' : model.screenKind;
     if (source === 'remote' && remoteSettingsIgnored(screen)) { diag('input.ignored', `settings on ${screen}`); return; }
-    if (showingDesk()) { deskMode = 'app'; deskApp = 'settings'; desk!.leave(); }
     openSettings(settingsHost);
     return;
   }
-  if ([MENU.home, MENU.agents, MENU.messages, MENU.muse, MENU.tiles, MENU.editPage].includes(id)) leaveDesk();
   if (id === MENU.home) model.goTo('home');
   if (id === MENU.agents) model.goTo('agents');
   if (id === MENU.messages) model.goTo('messages');
@@ -1018,12 +857,9 @@ if (tilesOn) { tiles.resetPage(); enterTiles(true); } else paint();
 void glasses.connect().then(() => shareLocation());
 setInterval(() => void shareLocation(), 30 * 60_000);
 remote.sync();
-// Muse Listen hook: advance the live timer/chunks only while its screen is visible.
-setInterval(() => { if (showingListen()) void homeListen.tick(); }, 1000);
 void poll();
 setInterval(() => { if (foreground) void poll(); }, POLL_MS);
 // The open agent's conversation refreshes faster than the rest, so replies show up quickly.
-setInterval(() => { if (foreground && showingDesk() && !desk!.imuOn) void desk!.resume(); }, 3000); // reconnect: tracking is back on while the Desk is in front
 setInterval(() => { if (foreground) { void refreshTerminal(); void refreshTiles(); } }, 1200);
 setInterval(() => void loadLayout(), 60_000);
 setInterval(paint, 15_000); // keep the clock current between polls

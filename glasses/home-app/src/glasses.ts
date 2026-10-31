@@ -10,7 +10,6 @@ import {
   MenuContainerProperty,
   MenuItemProperty,
   OsEventTypeList,
-  ImuReportPace,
   RebuildPageContainer,
   StartUpPageCreateResult,
   TextContainerProperty,
@@ -20,8 +19,6 @@ import {
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk';
 import type { TilesFrame } from './tiles';
-// Muse Listen hook: preserve Listen's fixed-font, grapheme and UTF8 budgets.
-import { safeText } from './listen/render';
 import type { Input } from './model';
 import { SettleWaiters, Serial, type SettleResult } from './settle';
 
@@ -46,10 +43,6 @@ export interface GlassesOptions {
   onFrame?: (what: string) => void;
   /** The text of a full-screen frame that was actually drawn (the Even app took the write), not just asked for. */
   onDrawn?: (text: string) => void;
-  /** A head-motion sample (only while imu(true) is on). */
-  onImu?: (sample: { x: number; y: number; z: number }) => void;
-  /** Head tracking was switched off by the transport (left the front, app exit, reconnect): the owner of the pointer must stop too. */
-  onImuOff?: () => void;
   /** Where the Even app bridge comes from (tests pass a fake). Default: the SDK's waitForEvenAppBridge. */
   bridge?: () => Promise<EvenAppBridge>;
 }
@@ -181,27 +174,11 @@ export class Glasses {
     return this.settleWaiters.wait(() => this.settleState(), capMs);
   }
 
-  /** Head tracking on/off (100 ms reports). Returns whether the Even app took it. */
-  async imu(open: boolean): Promise<boolean> {
-    if (!open && !this.imuOn) return true;
-    this.imuOn = open;
-    try { return Boolean(await this.sdk?.imuControl(open, ImuReportPace.P100)); } catch (error) { this.options.onLifecycle?.(`imu ${open ? 'on' : 'off'} failed: ${reason(error)}`); return false; }
-  }
-  private imuOn = false;
-  /** The transport lost the front or the app: tracking is off on the glasses side, whatever the owner thinks. */
-  private imuStopped(): void {
-    if (!this.imuOn) return;
-    this.imuOn = false;
-    void this.sdk?.imuControl(false, ImuReportPace.P100)?.catch?.(() => {});
-    this.options.onImuOff?.();
-  }
-
   connect(): Promise<boolean> {
     if (this.connected) return Promise.resolve(true);
     if (this.connecting) return this.connecting;
     const epoch = ++this.epoch;
     this.forgetWrites();
-    this.imuStopped();
     this.connecting = this.open(epoch).finally(() => { this.connecting = null; });
     return this.connecting;
   }
@@ -298,36 +275,7 @@ export class Glasses {
 
   /** Glasses microphone on/off. Audio arrives through onAudio as 16 kHz s16le mono PCM. */
   microphone(on: boolean): Promise<boolean> {
-    // Muse Listen hook: every owner sees pending/uncertain microphone changes before acquiring it.
-    this.micPending++;
-    return this.micChain.run(async () => {
-      const ok = await this.setMicrophone(on);
-      this.micUnreleased = on || !ok;
-      return ok;
-    }).finally(() => { this.micPending--; });
-  }
-
-  // Muse Listen hook: refusal stays closed until an off is positively acknowledged.
-  private micPending = 0;
-  private micUnreleased = false;
-  private rawMicPending = 0;
-  microphoneBusy(): boolean { return this.micPending > 0 || this.rawMicPending > 0 || this.micUnreleased; }
-
-  // Muse Listen hook: keep the shared serial fence until the actual SDK write settles; session owns its deadline.
-  listenMicrophone(on: boolean): Promise<boolean> {
-    return this.micChain.run(() => this.rawMicrophone(on));
-  }
-
-  // Muse Listen hook: pending raw legacy writes remain visible even after their bounded wrapper times out.
-  private async rawMicrophone(on: boolean): Promise<boolean> {
-    if (!this.sdk) return false;
-    this.rawMicPending++;
-    this.micUnreleased = true;
-    try {
-      const ok = await (on ? this.sdk.audioControl(true, AudioInputSource.Glasses) : this.sdk.audioControl(false));
-      this.micUnreleased = on || !ok;
-      return ok;
-    } finally { this.rawMicPending--; }
+    return this.micChain.run(() => this.setMicrophone(on));
   }
 
   // Known limit: the SDK's audioControl call cannot be cancelled. If one times out (bounded() below), the SDK may still
@@ -335,8 +283,7 @@ export class Glasses {
   private async setMicrophone(on: boolean): Promise<boolean> {
     if (!this.sdk) return false;
     try {
-      // Muse Listen hook: retain legacy deadline behavior while observing its raw outstanding SDK write.
-      return await bounded(this.rawMicrophone(on), 'Microphone');
+      return await bounded(on ? this.sdk.audioControl(true, AudioInputSource.Glasses) : this.sdk.audioControl(false), 'Microphone');
     } catch (error) {
       this.options.onStatus(`Microphone failed: ${reason(error)}`);
       return false;
@@ -358,13 +305,6 @@ export class Glasses {
   /** Tiles mode. `layoutKey` names the page; changing it or the focus rebuilds the page, a text change only updates that tile. */
   setTiles(layoutKey: string, focus: TilesFrame['focus'], left: string, right: string): void {
     this.want = { kind: 'tiles', key: `${layoutKey}/${focus}`, focus, left: glassesSafe(left).slice(0, 400) || ' ', right: glassesSafe(right).slice(0, 400) || ' ' };
-    this.unblockFor(this.want);
-    this.scheduleRender();
-  }
-
-  // Muse Listen hook: reuse serialized, changed-box transport with the Listen950-character budget.
-  setListenFrame(key: string, left: string, right: string): void {
-    this.want = { kind: 'tiles', key: `listen/${key}/page`, focus: 'page', left: safeText(left), right: safeText(right) };
     this.unblockFor(this.want);
     this.scheduleRender();
   }
@@ -422,13 +362,8 @@ export class Glasses {
 
   private onEvent(event: EvenHubEvent): void {
     const system = event.sysEvent;
-    if (system?.eventType === OsEventTypeList.IMU_DATA_REPORT) {
-      const d = system.imuData;
-      if (d && this.imuOn) this.options.onImu?.({ x: d.x ?? 0, y: d.y ?? 0, z: d.z ?? 0 });
-      return;
-    }
+    if (system?.eventType === OsEventTypeList.IMU_DATA_REPORT) return; // never a tap or a lifecycle change
     if (system?.eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
-      this.imuStopped();
       this.options.onLifecycle?.('foreground-exit');
       this.foreground = false;
       this.pressing = false;
@@ -449,7 +384,6 @@ export class Glasses {
     if (system?.eventType === OsEventTypeList.SYSTEM_EXIT_EVENT || system?.eventType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
       this.options.onLifecycle?.(`exit ${system.eventType}`);
       this.pressing = false;
-      this.imuStopped();
       ++this.epoch;
       this.forgetWrites();
       this.connected = false;

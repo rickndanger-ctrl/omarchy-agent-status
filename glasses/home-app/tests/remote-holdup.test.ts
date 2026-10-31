@@ -5,30 +5,30 @@ import { InputQueue, REMOTE_HOLD_MS } from '../src/inputqueue';
 import { INTERNAL_MENU } from '../src/menu';
 import { HomeModel, type HomeData } from '../src/model';
 import { Tiles, normalizeLayout, type TileContext } from '../src/tiles';
-import { Desk } from '../src/desk';
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const data: HomeData = { now: 1000, paused: false, machines: [], sessions: [], pending: [], messages: null, muse: false };
 const ctx: TileContext = { data, now: 1000, timeZone: 'UTC', terminal: () => null, chat: () => null, muse: () => null, reminders: () => [], url: () => null };
 
-function rig(kind: 'home' | 'tiles' | 'desk' = 'home', gate?: Promise<void>) {
+function rig(kind: 'home' | 'tiles' | 'opener' = 'home', gate?: Promise<void>) {
   const model = new HomeModel(); model.update(data);
   const tiles = new Tiles(); tiles.setLayout(normalizeLayout({ pages: [{ left: 'clock', right: 'empty' }] }));
   const events: string[] = [];
-  const desk = new Desk({ imu: async () => true, paint: () => {}, settled: async () => {}, diag: () => {}, now: Date.now });
+  // A screen where a remote up opens something (so it must wait until it cannot be part of a hold).
+  const opener = { highlighted: 0, input: (_input: string, _at: number) => ({ kind: 'open' as const }) };
   let opened = 0, settings = false;
   const screen = () => settings ? 'settings' : kind;
   const state = () => kind === 'tiles' ? JSON.stringify(tiles.render(ctx)) : model.render(1000);
   const queue = new InputQueue({
-    apply: input => { events.push(input); if (kind === 'home') model.input(input, 1000); else if (kind === 'tiles') tiles.input(input, ctx); else if (desk.input(input, Date.now())?.kind === 'open') opened++; },
+    apply: input => { events.push(input); if (kind === 'home') model.input(input, 1000); else if (kind === 'tiles') tiles.input(input, ctx); else if (opener.input(input, Date.now()).kind === 'open') opened++; },
     menu: () => { events.push('settings'); settings = true; },
     captureRemoteUp: () => kind === 'tiles' ? tiles.capturePosition() : model.capturePosition(),
-    holdRemoteUp: () => kind === 'desk',
+    holdRemoteUp: () => kind === 'opener',
     foreground: () => true, generation: () => model.generation, screen,
     settled: () => gate ? gate.then(() => 'rendered' as const) : Promise.resolve('rendered' as const),
     log: () => {},
   });
-  return { model, tiles, desk, queue, state, events, get opened() { return opened; }, get settings() { return settings; } };
+  return { model, tiles, opener, queue, state, events, get opened() { return opened; }, get settings() { return settings; } };
 }
 
 test('Home remote up applies immediately and hold-up restores the previous selection', async () => {
@@ -92,20 +92,18 @@ test('an unsolicited screen change prevents restoring a snapshot onto the new sc
   assert.equal(restored, 0); assert.equal(position, 3);
 });
 
-test('Desk hold-up never opens the highlighted app', async () => {
-  const r = rig('desk'); const highlight = r.desk.highlighted;
+test('a deferred remote up in a hold never opens the highlighted item', async () => {
+  const r = rig('opener'); const highlight = r.opener.highlighted;
   r.queue.push('up', 'remote'); r.queue.pushMenu(INTERNAL_MENU.settings, 'remote');
-  await sleep(30); assert.equal(r.opened, 0); assert.equal(r.settings, true); assert.equal(r.desk.highlighted, highlight);
+  await sleep(30); assert.equal(r.opened, 0); assert.equal(r.settings, true); assert.equal(r.opener.highlighted, highlight);
 });
 
-test('Desk remote up alone opens after the hold window', async () => {
-  const r = rig('desk'); r.queue.push('up', 'remote'); await sleep(50); assert.equal(r.opened, 0);
+test('a deferred remote up alone opens after the hold window', async () => {
+  const r = rig('opener'); r.queue.push('up', 'remote'); await sleep(50); assert.equal(r.opened, 0);
   await sleep(REMOTE_HOLD_MS + 30); assert.equal(r.opened, 1);
 });
 
-test('startup keeps Desk dynamically loaded and the remote settings routed through the queue', () => {
+test('startup routes the remote settings through the queue', () => {
   const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
-  assert.match(main, /import\('\.\/desk'\)/);
   assert.match(main, /inputQueue\.pushMenu\(INTERNAL_MENU\.settings, 'remote'\)/);
-  assert.doesNotMatch(main, /^import\s+\{[^}]*Desk[^}]*\}\s+from\s+['"]\.\/desk['"]/m);
 });

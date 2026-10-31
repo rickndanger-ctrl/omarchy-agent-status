@@ -39,7 +39,7 @@ test('an ask started from the Muse TILE says so (the app goes back to Tiles); on
 
 test('the remote settings button is ignored on Muse, listening and confirm; it still opens from Home and Tiles', () => {
   for (const s of ['muse', 'listen', 'confirm']) assert.equal(remoteSettingsIgnored(s), true, s);
-  for (const s of ['home', 'tiles', 'agents', 'messages', 'desk']) assert.equal(remoteSettingsIgnored(s), false, s);
+  for (const s of ['home', 'tiles', 'agents', 'messages']) assert.equal(remoteSettingsIgnored(s), false, s);
 });
 
 function rig() {

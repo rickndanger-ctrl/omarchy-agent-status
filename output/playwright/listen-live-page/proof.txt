@@ -1,7 +1,0 @@
-Synthetic loopback browser fixture using real Listen engine and page handler.
-PASS local wall-clock and session transcript visible.
-PASS two-second refresh shows new speech while note and about drafts remain unchanged.
-PASS native browser form POST accepted with same-origin Origin.
-PASS exact note stored with anchor 00:00 and shown under Recent notes.
-PASS zero automatic relay callbacks.
-No production hub, Muse, relay, microphone or user browser profile used.

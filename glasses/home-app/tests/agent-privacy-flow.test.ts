@@ -8,20 +8,20 @@ const data: HomeData = { now: 1000, paused: false, voice: true, muse: true, pend
   machines: [{ name: 'Dell', online: true }], sessions: [{ machine: 'Dell', pane: 'orchestrator', session: 's1', agent: 'claude', name: 'Orchestrator', state: 'idle', page: 'Project', at: 1, workspace: '' }] };
 function fixture() {
   const model = new HomeModel(), tiles = new Tiles(), actions: Action[] = [], sources: unknown[] = [];
-  let time = 1000, blank = false, desk = false, tiled = false, opened = false, wakes = 0, backs = 0, paints = 0;
+  let time = 1000, blank = false, tiled = false, opened = false, wakes = 0, backs = 0, paints = 0;
   model.update(data); model.openTarget({ kind: 'agent', key: 'Dell/orchestrator' });
   const ctx = (): TileContext => ({ data, now: time, terminal: () => null, chat: () => null, muse: () => null, reminders: () => [], url: () => null });
   const host: flow.FlowHost = {
     model, tiles, tileCtx: ctx, showingTiles: () => tiled, inOpenedScreen: () => opened,
     leaveTiles: () => { tiled = false }, backToTiles: () => { backs++; tiled = true }, paint: () => { paints++ },
-    isBlank: () => blank, wake: () => { wakes++; blank = false }, showingDesk: () => desk, deskInput: () => {},
+    isBlank: () => blank, wake: () => { wakes++; blank = false },
     runTileEffect: (effect: TileEffect, source?: 'touch' | 'remote') => {
       sources.push(source); if (effect.kind === 'open') model.openTarget(effect.target, source);
     },
     runModelAction: action => { actions.push(action) }, saveLayout: () => {}, refreshTiles: () => {}, refreshTerminal: () => {}, now: () => time,
   };
   return { model, tiles, actions, sources, host, apply: flow.makeHandle(host),
-    tick: (now: number) => { time = now }, setBlank: () => { blank = true }, setDesk: () => { desk = true }, setTiles: () => { tiled = true }, setOpened: () => { opened = true },
+    tick: (now: number) => { time = now }, setBlank: () => { blank = true }, setTiles: () => { tiled = true }, setOpened: () => { opened = true },
     wakes: () => wakes, backs: () => backs, paints: () => paints,
   };
 }
@@ -57,13 +57,12 @@ test('tile effect receives original source so remote Speak stays remote', () => 
   assert.equal(f.model.screenKind, 'agent');
 });
 
-test('hold never becomes a global Tiles or Desk input and a blank display only wakes', () => {
-  for (const surface of ['blank', 'tiles', 'desk']) {
+test('hold never becomes a global Tiles input and a blank display only wakes', () => {
+  for (const surface of ['blank', 'tiles']) {
     const f = fixture(); f.apply('select');
     const token = f.model.agentHoldToken(), hold = flow.makeHoldHandle(f.host);
     if (surface === 'blank') f.setBlank();
     if (surface === 'tiles') f.setTiles();
-    if (surface === 'desk') f.setDesk();
     hold(token);
     assert.deepEqual(f.actions.map(a => a.kind), ['startMic']);
     assert.equal(f.model.micWanted(), true);

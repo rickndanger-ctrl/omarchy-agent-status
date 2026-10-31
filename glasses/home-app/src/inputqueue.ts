@@ -45,7 +45,7 @@ export interface QueueHost {
   trace?(name: string, detail: string): void;
   /** Save the current position before a remote up; the returned function restores it. */
   captureRemoteUp?(): () => void;
-  /** Desk up can open an app, so defer it until it cannot be part of a hold. */
+  /** A remote up that opens something is deferred until it cannot be part of a hold. */
   holdRemoteUp?(): boolean;
   cancelRemoteUp?(): void;
 }
