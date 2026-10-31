@@ -7,6 +7,110 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 const speech = (n, prefix = 'word') => Array.from({ length: n }, (_, i) => `${prefix}${i}`).join(' ')
 const pcm = (ms = 1000, marker = 0) => { const bytes = new Uint8Array(ms * 32); bytes[0] = marker; return bytes }
 
+test('default page mode never invokes automatic ask or status callbacks across speech and timers', async () => {
+  let calls = 0
+  const f = fixture({ notesFrom: undefined, ask: () => { calls++; throw new Error('must not run') } })
+  for (let seq = 0; seq < 4; seq++) {
+    await f.clock.advance(46_000)
+    await f.engine.chunk(f.id, seq, pcm())
+  }
+  assert.equal(calls, 0)
+  assert.equal(f.engine.snapshot().body.lines.length, 4)
+  assert.deepEqual(f.engine.snapshot().body.notes, [])
+  assert.deepEqual(f.engine.snapshot().body.muse, { state: 'idle' })
+  f.engine.close()
+})
+
+test('page mode needs no ask callback and missing chat callbacks fail closed', () => {
+  const clock = new Clock()
+  const engine = createListen({ transcribe: async () => '', now: clock.now,
+    setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+  assert.equal(engine.snapshot().status, 404)
+  assert.equal(engine.start().status, 200)
+  engine.close()
+  for (const notesFrom of ['chat', 'both']) {
+    assert.throws(() => createListen({ notesFrom, transcribe: async () => '' }), TypeError)
+  }
+})
+
+test('invalid notesFrom values fall back to page and never call ask', async () => {
+  for (const notesFrom of ['', null, 'invalid', true, 1, {}, ['chat']]) {
+    const f = fixture({ notesFrom })
+    await f.engine.chunk(f.id, 0, pcm())
+    await f.clock.advance(46_000)
+    assert.equal(f.asks.length, 0)
+    assert.equal(f.engine.snapshot().body.notesFrom, 'page')
+    assert.equal(f.engine.addNote(f.id, { text: 'Manual note' }).status, 200)
+    f.engine.close()
+  }
+})
+
+test('chat-only mode rejects page notes with409 while preserving automatic chat', async () => {
+  const f = fixture({ notesFrom: 'chat' })
+  assert.equal(f.engine.snapshot().body.notesFrom, 'chat')
+  assert.equal(f.engine.addNote(f.id, { text: 'Page note' }).status, 409)
+  assert.deepEqual(f.engine.snapshot().body.notes, [])
+  await f.engine.chunk(f.id, 0, pcm())
+  await flush()
+  assert.equal(f.asks.length, 1)
+  assert.deepEqual(f.engine.snapshot().body.notes.map(note => note.text), ['Check the deadline.'])
+  f.engine.close()
+})
+
+test('page notes sanitize and cap300 characters without imposing chat25word limit', async () => {
+  const f = fixture({ notesFrom: 'page' })
+  await f.clock.advance(10_000)
+  await f.engine.chunk(f.id, 0, pcm())
+  const first = f.engine.addNote(f.id, { text: 'Helpful note.\n\nMuse\nStatus\nApprovals history\nAllowed once · 2h ago' })
+  assert.deepEqual(first.body.note, { t: 10_000, at_t: 9000, text: 'Helpful note.' })
+  const long = f.engine.addNote(f.id, { text: 'word '.repeat(100), at_t: 1234 })
+  assert.ok(long.body.note.text.length <= 300)
+  assert.ok(long.body.note.text.split(' ').length > 25)
+  assert.equal(long.body.note.at_t, 1234)
+  assert.equal(long.body.note.t, 10_001)
+  assert.deepEqual(f.engine.state(f.id, 10_001).body.notes, [long.body.note])
+  first.body.note.text = 'mutation'
+  const snapshot = f.engine.snapshot()
+  snapshot.body.notes[0].text = 'also mutation'
+  snapshot.body.lines[0].text = 'mutation'
+  assert.equal(f.engine.snapshot().body.notes[0].text, 'Helpful note.')
+  assert.notEqual(f.engine.snapshot().body.lines[0].text, 'mutation')
+  f.engine.close()
+})
+
+test('page admission rejects invalid notes/anchors and stale sessions without side effects', () => {
+  const f = fixture({ notesFrom: 'page' })
+  for (const text of ['', ' ', null, 42, '—']) assert.equal(f.engine.addNote(f.id, { text }).status, 400)
+  for (const at_t of [-1, Infinity, NaN, '00:01', 1]) {
+    assert.equal(f.engine.addNote(f.id, { text: 'Useful', at_t }).status, 400)
+  }
+  assert.equal(f.engine.addNote('other', { text: 'Wrong session' }).status, 404)
+  assert.deepEqual(f.engine.snapshot().body.notes, [])
+  assert.equal(f.engine.addNote(f.id, { text: 'Before transcript' }).body.note.at_t, 0)
+  f.engine.stop(f.id)
+  assert.equal(f.engine.addNote(f.id, { text: 'Stopped' }).status, 410)
+  assert.equal(f.engine.snapshot().body.state, 'stopped')
+  const next = f.engine.start().body.id
+  assert.notEqual(next, f.id)
+  assert.equal(f.engine.addNote(f.id, { text: 'Old session' }).status, 404)
+  assert.deepEqual(f.engine.snapshot().body.notes, [])
+  f.engine.close()
+})
+
+test('both mode merges page and automatic notes with one bounded ordered timeline', async () => {
+  const f = fixture({ notesFrom: 'both', maxNotes: 2 })
+  assert.equal(f.engine.snapshot().body.notesFrom, 'both')
+  f.engine.addNote(f.id, { text: 'Page first' })
+  await f.engine.chunk(f.id, 0, pcm())
+  await flush()
+  assert.equal(f.asks.length, 1)
+  f.engine.addNote(f.id, { text: 'Page last' })
+  const notes = f.engine.snapshot().body.notes
+  assert.deepEqual(notes.map(note => note.text), ['Check the deadline.', 'Page last'])
+  assert.ok(notes[1].t > notes[0].t)
+  f.engine.close()
+})
+
 class Clock {
   at = 1_000_000
   next = 0
@@ -34,6 +138,7 @@ function fixture(options = {}) {
   const clock = new Clock(), asks = [], transcriptions = []
   let ids = 0
   const engine = createListen({
+    notesFrom: 'chat',
     now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
     idFactory: () => `listen-${++ids}`,
     transcribe: async bytes => { transcriptions.push(bytes[0]); return speech(25) },

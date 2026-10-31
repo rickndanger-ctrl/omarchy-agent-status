@@ -24,10 +24,13 @@ const stamp = t => {
 /**
  * ask({text, sessionId, signal, onStatus}) is the Listen-only Muse service
  * callback. Only its terminal {status:'done', reply} can create a note.
+ * notesFrom defaults (including invalid values) to page: no automatic asks.
+ * snapshot() reads the current session; addNote(id,{text,at_t?}) admits a
+ * sanitized page note in page/both mode. at_t is session milliseconds.
  * All public methods return {status,body}; chunk waits for ASR, never for Muse.
  */
 export function createListen({
-  transcribe, ask, diag = () => {}, now = () => Date.now(),
+  transcribe, ask, notesFrom = 'page', diag = () => {}, now = () => Date.now(),
   setTimer = setTimeout, clearTimer = clearTimeout,
   idFactory = () => randomBytes(12).toString('hex'),
   snippetMs = 45_000, minWords = 25, idleMs = 30 * 60_000, gapMs = 8000,
@@ -35,7 +38,9 @@ export function createListen({
   maxLines = 2000, maxNotes = 200, maxLineChars = 4000,
   maxSnippetWords = 400, maxSnippetChars = 6000,
 } = {}) {
-  if (typeof transcribe !== 'function' || typeof ask !== 'function') throw new TypeError('Listen callbacks required')
+  if (!['page', 'chat', 'both'].includes(notesFrom)) notesFrom = 'page'
+  const automaticNotes = notesFrom !== 'page'
+  if (typeof transcribe !== 'function' || (automaticNotes && typeof ask !== 'function')) throw new TypeError('Listen callbacks required')
   snippetMs = positive(snippetMs, 45_000)
   idleMs = positive(idleMs, 30 * 60_000)
   gapMs = positive(gapMs, 8000)
@@ -121,18 +126,27 @@ export function createListen({
     else if (['unavailable', 'error', 'timeout'].includes(state)) session.muse = { state: 'unavailable', reason: 'Muse unavailable' }
     else if (['idle', 'cancelled'].includes(state)) session.muse = { state: 'idle' }
   }
-  const noteText = reply => {
+  const noteText = (reply, wordLimit = 25) => {
     if (typeof reply !== 'string') return ''
     // Bound even a malformed broker result before the shared sanitizer sees it.
     const cleaned = sanitizeMuseReply(reply.slice(0, 64 * 1024))
     let text = cleanText(cleaned.text, 64 * 1024)
     if (text === NO_TEXT || (cleaned.trimmed && /^(Status|Muse|Connected|Received)$/i.test(text))) return ''
     if (/^[—–-]+$/.test(text)) return ''
-    text = text.split(/\s+/).slice(0, 25).join(' ').slice(0, 300).trim()
+    text = text.split(/\s+/).slice(0, wordLimit).join(' ').slice(0, 300).trim()
     return text
   }
+  const appendNote = (session, text, at_t) => {
+    const t = Math.max(Math.floor(elapsed(session)), session.lastNoteT + 1)
+    session.lastNoteT = t
+    session.clockT = Math.max(session.clockT, t)
+    const note = { t, at_t, text }
+    session.notes.push(note)
+    if (session.notes.length > maxNotes) session.notes.shift()
+    return { ...note }
+  }
   const kickSnippet = session => {
-    if (!active(session) || session.asking) return
+    if (!automaticNotes || !active(session) || session.asking) return
     const text = boundedSnippet(session)
     if (words(text) < minWords) return
     const delay = session.lastAttempt === undefined ? 0 : snippetMs - (elapsed(session) - session.lastAttempt)
@@ -174,11 +188,7 @@ export function createListen({
           if (text) {
             // Public (t,text) tuples are client deduplication identities. A
             // deterministic +1ms tie-break preserves identical real notes.
-            const t = Math.max(Math.floor(elapsed(session)), session.lastNoteT + 1)
-            session.lastNoteT = t
-            session.clockT = Math.max(session.clockT, t)
-            session.notes.push({ t, at_t: snippet.end, text })
-            if (session.notes.length > maxNotes) session.notes.shift()
+            appendNote(session, text, snippet.end)
           }
           session.muse = { state: 'idle' }
         } else if (['busy', 'skipped'].includes(result?.status)) {
@@ -245,9 +255,11 @@ export function createListen({
           resultLines.push({ t: start, text })
           session.lastSpeechAt = Math.max(session.lastSpeechAt, entry.end)
           armIdle(session)
-          session.snippetParts.push({ start, end, text })
-          boundedSnippet(session)
-          kickSnippet(session)
+          if (automaticNotes) {
+            session.snippetParts.push({ start, end, text })
+            boundedSnippet(session)
+            kickSnippet(session)
+          }
         }
         const result = response(200, { ok: true, lines: resultLines })
         session.completed.set(entry.seq, result)
@@ -261,7 +273,19 @@ export function createListen({
     } finally { session.pumping = false }
   }
 
-  return {
+  const api = {
+    snapshot() { return api.state(current?.id) },
+    addNote(id, value) {
+      const session = known(id)
+      if (!session) return fail(404, 'Listen session not found')
+      if (!active(session)) return fail(410, 'Listen session stopped')
+      if (notesFrom === 'chat') return fail(409, 'Page notes disabled')
+      const text = noteText(value?.text, Infinity)
+      if (!text) return fail(400, 'Invalid Listen note')
+      const at_t = value?.at_t ?? session.lines.at(-1)?.t ?? 0
+      if (typeof at_t !== 'number' || !Number.isFinite(at_t) || at_t < 0 || at_t > elapsed(session)) return fail(400, 'Invalid Listen note anchor')
+      return response(200, { note: appendNote(session, text, at_t) })
+    },
     start(backend = 'muse') {
       if (backend && typeof backend === 'object' && !Array.isArray(backend)) backend = backend.backend ?? 'muse'
       if (backend !== 'muse') return fail(400, 'Unsupported Listen backend')
@@ -315,7 +339,7 @@ export function createListen({
       const now_t = elapsed(session)
       // since is a publication watermark, not the estimated speech start. Use
       // the previous now_t inclusively and deduplicate returned (t,text) pairs.
-      return response(200, { id: session.id, state: session.state, startedAt: session.startedAt, now_t,
+      return response(200, { id: session.id, state: session.state, startedAt: session.startedAt, now_t, notesFrom,
         lines: session.lines.filter(line => since === undefined || line.published_t >= since).map(({ t, text }) => ({ t, text })),
         notes: session.notes.filter(note => since === undefined || note.t >= since).map(note => ({ ...note })),
         muse: { ...session.muse } })
@@ -326,4 +350,5 @@ export function createListen({
       return response(200, { ok: true })
     },
   }
+  return api
 }

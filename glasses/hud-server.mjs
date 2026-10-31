@@ -51,6 +51,7 @@ import { createConversations, CONVERSATION_MAX_BYTES } from './conversation.mjs'
 import { createListen, LISTEN_MAX_BYTES } from './listen.mjs'
 import { createListenMuse } from './muse-queue.mjs'
 import { isListenG2Busy } from './listen-g2.mjs'
+import { createListenPage } from './listen-page.mjs'
 
 const run = promisify(execFile)
 // macOS keeps lsof in /usr/sbin, which launchd's default PATH leaves out.
@@ -1462,7 +1463,9 @@ const LISTEN = createListen({
   snippetMs: HUB.listen?.snippetMs,
   minWords: HUB.listen?.minWords,
   idleMs: HUB.listen?.idleMs,
+  notesFrom: HUB.listen?.notesFrom,
 })
+const LISTEN_PAGE = createListenPage({ listen: LISTEN, loopback })
 
 // Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl", "remindersTokenFile", "remindersList").
 const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
@@ -1630,6 +1633,7 @@ async function handle(req, res) {
   const url = new URL(req.url, 'http://x')
   const p = url.pathname.replace(/^\/hud(?=\/|$)/, '') || '/'
   LISTEN_MUSE.noteG2(req.method, p)
+  if (p === '/listen' || p.startsWith('/listen/')) return LISTEN_PAGE(req, res, p)
   if (req.method === 'OPTIONS') return send(res, 204, {})
   if (!p.startsWith('/api/')) return req.method === 'GET' ? serveStatic(res, p) : send(res, 405, {})
   if (p === '/api/health') return send(res, 200, { ok: true, mode: MODE, machine: MACHINE })

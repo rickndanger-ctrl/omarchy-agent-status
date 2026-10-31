@@ -244,7 +244,7 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
 
 class Fixture:
     def __init__(self, hub_script=None, fake_clock=False, **listen):
-        self.options = dict(snippetMs=100, minWords=25, idleMs=30000, pollMs=20, requestMs=250, timeoutMs=1500)
+        self.options = dict(notesFrom="chat", snippetMs=100, minWords=25, idleMs=30000, pollMs=20, requestMs=250, timeoutMs=1500)
         # The public hub config keeps the original timeoutMs knob. The adapter
         # calls the same whole-attempt limit attemptMs.
         if "attemptMs" in listen:

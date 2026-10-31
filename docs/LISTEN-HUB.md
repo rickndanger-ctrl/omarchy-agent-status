@@ -1,102 +1,78 @@
 # Muse Listen: hub half A
 
-Muse Listen is separate from G2 OMAC. Its app belongs in `glasses/listen-app/`
-with package id `com.piebird.muselisten`; half B owns that app. This half adds
-the authenticated `/api/listen` API on a hub. It does not change `home-app/`,
-deploy a hub, or enable an always-on microphone.
+Muse Listen is separate from G2 OMAC. Its glasses app is `glasses/listen-app/`,
+package `com.piebird.muselisten`. This hub provides the authenticated session API
+and a separate, unauthenticated **direct-loopback-only** transcript page.
+Owner instructions: [README-LISTEN.md](../glasses/README-LISTEN.md).
 
-Every session starts only after an explicit `POST /api/listen/start`. The client
-owns the microphone and **must call stop on app close/backgrounding**, as well as
-on the owner's Stop action. A normal HTTP disconnect is not an app-close signal.
-The hub also stops the session after 30 minutes without recognized speech;
-silence, polling and receipt of empty audio do not extend that deadline.
+A session starts only after explicit `POST /api/listen/start`. The client owns
+the microphone and must call stop on app close/backgrounding and on Stop.
+A normal HTTP disconnect is not an app-close signal. The hub stops after
+30 minutes without recognized speech. Reading, posting notes, polling, silence
+and empty audio do not extend that speech deadline.
 
-## API
+## Live page and notes
 
-All calls use the hub's existing Bearer authentication. These endpoints exist
-only in hub mode. No transcript, audio or note is written to disk.
+These routes exist only on a hub and require a direct connection from
+`127.0.0.1` (including an IPv4-mapped socket), with a matching local Host.
+Other addresses, forwarded/proxied requests and foreign browser origins are
+refused even with a valid Bearer token. They do not use the API's permissive
+CORS policy. No transcript text is logged or written to disk.
+
+| Request | Result |
+| --- | --- |
+| `GET /listen/live.txt` | Live session header, then `[YYYY-MM-DD HH:MM:SS] [mm:ss] text` per transcript line, newest last |
+| `GET /listen/live.html` | The same transcript, note form and recent notes; refreshes every two seconds without replacing the draft |
+| `POST /listen/note`, JSON `{ "text": "…", "about": "mm:ss" }` | Stores a cleaned note; JSON receipt |
+| `POST /listen/note`, form fields `note` and optional `about` | Stores a note and returns to the page |
+
+No token is needed for a direct-loopback form or JSON request. Browser-origin
+checks protect the form without requiring another secret. A hidden session ID
+binds a form draft to its session. Stopped or stale submissions fail plainly.
+
+Omitted `about` uses the newest transcript line's `t` (or zero before speech).
+An explicit anchor must be valid and within the session clock. Manual notes
+pass through `muse-clean.mjs` and are capped at 300 characters, without a separate
+25-word limit. Their `t` is arrival time; `at_t` is the transcript anchor.
+They appear immediately in `GET /api/listen`, for the glasses' next poll.
+
+## Authenticated session API
+
+All `/api/listen*` calls retain hub Bearer authentication and exist only in hub
+mode. No audio, transcript or note is persisted.
 
 | Request | Response |
 | --- | --- |
-| `POST /api/listen/start` with `{ "backend": "muse" }` (backend optional) | `{ id, startedAt }` |
-| `POST /api/listen/chunk?id=…&seq=…` with raw PCM16, 16 kHz mono | `{ ok, lines: [{ t, text }] }` |
+| `POST /api/listen/start` with optional `{ "backend": "muse" }` | `{ id, startedAt }` |
+| `POST /api/listen/chunk?id=…&seq=…`, raw PCM16, 16 kHz mono | `{ ok, lines: [{ t, text }] }` |
 | `POST /api/listen/stop` with `{ "id": "…" }` | `{ ok }` |
-| `GET /api/listen?id=…&since=…` | `{ id, state, startedAt, now_t, lines, notes, muse }` |
+| `GET /api/listen?id=…&since=…` | `{ id, state, startedAt, now_t, lines, notes, muse, notesFrom }` |
 
-The client numbers chunks from zero. The chunk request waits for that chunk's
-ordered transcription; Muse runs separately in the background. Retrying an
-already accepted sequence does not transcribe or send it twice. Audio and
-pending sequences are bounded; a missing sequence is eventually skipped rather
-than blocking the session forever. A stopped session accepts no new chunks or
-Muse work. On stop/close, turn the microphone off, send the final PCM chunk and
-await its acknowledgement **before** posting stop. A concurrent stop discards
-unfinished transcription. Starting again creates a new session id.
+Sequences start at zero. Each chunk waits for ordered transcription; accepted
+sequence retries do not repeat it. Pending audio and sequences are bounded,
+and missing sequences have a bounded gap wait. The client turns off its mic,
+sends/awaits the last chunk, then posts stop. Concurrent stop discards unfinished
+transcription. Restart creates a new ID.
 
-`startedAt` is epoch milliseconds. All other times are milliseconds on that
-session's elapsed clock. `lines[].t` estimates the start of its PCM chunk from
-receipt time minus audio duration, before transcription begins. The request
-format has no capture timestamp or word alignment, so this is a chunk-level
-estimate, not a word-accurate speech timestamp. Network delay can affect it.
-Ordering and the elapsed clock stay monotonic. Line and note timestamps each
-break ties by at least one millisecond, so repeated identical speech/notes are
-distinct records; `now_t` includes that deterministic tie-break. A note's `at_t` is the end of the
-exact transcript snippet it discusses; its `t` is when the note arrived.
+`startedAt` is epoch milliseconds. Other times are elapsed milliseconds.
+Transcript `t` is a coarse PCM-receipt/duration estimate, not word alignment.
+Local wall-clock labels use `startedAt + t` in the hub Mac's time zone. Session
+labels become `h:mm:ss` past an hour. Monotonic tie-breaking keeps repeated
+identical lines/notes distinct, and `now_t` includes those ties.
 
-`since` is an **inclusive publication cutoff**, using the previous response's
-`now_t` as the next cutoff. A newly transcribed line can have `t < since` because
-its audio predates transcription completion; it is still returned when it was
-published after the cutoff. Equal-clock records can repeat. Merge/deduplicate
-lines and notes by their timestamp/text tuples, or omit `since` to obtain the
-bounded current snapshot. Do not use a note's `at_t` as a publication cursor.
+`since` is an inclusive publication cutoff. Late transcription may have spoken
+`t < since` but still be returned because publication happened later. Deduplicate
+by timestamp/text tuples or omit `since` for the bounded snapshot. A note's
+`at_t` is not a publication cursor.
 
-## Best-effort Listen snippets
+## Note-source modes
 
-The first snippet becomes eligible after at least 25 new words. Later snippets
-wait at least 45 seconds after the previous request finishes. This conservative
-gap also applies after skipped or failed attempts, so retries cannot bunch
-Listen submissions together. The last two snippets are
-included as time-labelled context. The prompt requests one useful note of at
-most 25 words, or exactly `—` when there is nothing useful to add.
-
-Only a finished reply can become a note. It passes through the existing
-`muse-clean.mjs`, then the note limits (25 words and 300 characters). Empty
-answers, `—`, and the cleaner's no-text placeholder are dropped. Public errors
-and Muse state reasons are fixed plain messages, never raw relay error text.
-The prompt bounds its two context snippets and new snippet to fit the
-16,000-character input limit.
-
-G2 OMAC's `askMuse`, relay helpers and existing `/api/muse*` paths are restored
-byte-for-byte from `56fe3b2`. Listen does not wrap, queue, alias or intercept any
-G2 request. There is no shared G2/Listen queue and no virtual G2 job id.
-
-Listen's own service admits at most one snippet at a time. Only the last
-configured Muse receives Listen questions. It sends only after explicit relay
-`/selftest` reports `composer: true` and `busy: false`, and its read-only G2
-gate permits it. Other relays are checked before and after the target's health
-probe. Missing or ambiguous readiness is not idle. Busy attempts return at once
-rather than waiting or blocking G2. Proven unsent speech is retained/merged for
-the next cadence attempt; it is not submitted repeatedly in a busy loop.
-
-The hub gate reads existing handoff flags and G2 client diagnostics without
-changing them. Direct API callers emit no client diagnostics, so the other
-relays' busy flags provide an additional veto. These observations are
-best-effort snapshots, not an atomic cross-client lock. The laptop join test
-keeps Listen on the last Muse and G2 on the first; its one-Muse overlap is an
-explicit known risk. G2's original admission behavior remains unchanged.
-
-Every health/send/poll request and the complete attempt have hard time limits.
-At most one POST is attempted per snippet. A failed or uncertain POST is dropped,
-never retried on the same or another Muse. Cancellation suppresses late notes;
-unknown acceptance does not poison a shared queue or stall G2. A later, distinct
-snippet must pass readiness again. Note output remains capped at 300 characters.
-Only a proven pre-send busy/skipped result permits retaining speech; errors and
-timeouts do not restore a possibly submitted snippet.
-
-Optional hub configuration (defaults shown):
+Defaults:
 
 ```json
 {
   "listen": {
+    "notesFrom": "page",
     "snippetMs": 45000,
     "minWords": 25,
     "idleMs": 1800000
@@ -104,12 +80,46 @@ Optional hub configuration (defaults shown):
 }
 ```
 
-## Verification boundary
+- `page`: manual page notes only; zero automatic relay health, ask or reply
+  calls, even while speech arrives. Invalid modes fall back to this default.
+- `chat`: explicit opt-in to rolling relay notes; page submissions are disabled.
+- `both`: manual page notes plus the rolling relay path.
 
-Tests use fake transcription and a fake Muse relay on explicit loopback ports,
-private temporary home/config directories, and blocked external network/child
-commands. No test may contact the real Muse or relay. The API integration test
-is `bash glasses/test-hub-listen.sh`; the session and queue tests use Node's
-built-in test runner. Half B's remote navigation, microphone and rendering are
-separate join/device checks; this half makes no real glasses or deployed-hub
-claim.
+Chat/both retains the earlier fixes: one Listen attempt at a time, only the last
+configured Muse targeted, and only that target must be idle/ready. Other relays
+being down is not a veto. Observed G2 asks, reply/latest polls and transcription
+requests block new Listen POSTs for 60 seconds after the latest activity.
+Diagnostic busy assertions expire after 150 seconds without new evidence.
+Proven unsent busy speech can be retained for a later cadence; uncertain/error/
+timeout snippets are dropped, including future context.
+
+Relay snippets require at least 25 new words, with at least 45 seconds after the
+previous attempt finishes by default. Only confirmed completed snippets enter
+the two-snippet context. The prompt requests one useful note of at most 25 words
+or `—`; dash, empty and no-text replies are dropped. Shared cleaning and a
+300-character cap apply. Requests and whole attempts have hard deadlines;
+possibly admitted POSTs are never retried automatically.
+
+G2's routes, helpers and client stay frozen. Its previously authorized `askMuse`
+condition permits FIFO admission behind a POSTed unfinished Listen job on that
+Muse, only until Listen's hard deadline. The page adds no further G2 changes.
+It does not repair the separately reported frozen fallback race.
+
+## Verification
+
+Tests use private temporary homes, fake transcription/relays, explicit loopback
+ports and deny-by-default network/child-process guards. They never contact real
+Muse, relays or a deployed hub.
+
+```sh
+node --test glasses/test-listen.mjs glasses/muse-queue.test.mjs glasses/test-listen-g2.mjs glasses/listen-page.test.mjs
+bash glasses/test-hub-listen-page.sh
+bash glasses/test-hub-listen.sh
+bash glasses/test-hub-muse.sh
+bash glasses/test-listen-frozen.sh
+```
+
+The supplied frozen script needs Python 3.12+ for its f-string syntax. Legacy
+relay fixtures explicitly select `notesFrom: "chat"`; they do not change the
+production default. Half B's remote controls, mic and physical glasses rendering
+remain separate integration/device checks.
