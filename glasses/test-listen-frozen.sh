@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Guards the Muse Listen stitch: G2 OMAC and its Muse path must stay byte-identical to the frozen base commit.
-# Fails unless home-app/ and muse-clean.mjs are unchanged since the base, and every /api/muse* route block plus
+# Fails unless muse-clean.mjs is unchanged since the base, home-app/ is unchanged since the base (or since the approved
+# Conversation removal 8e57984 when that is an ancestor), and every /api/muse* route block plus
 # museReply and askMuse in hud-server.mjs is byte-identical to the base. Read-only; touches nothing.
 #   bash glasses/test-listen-frozen.sh      (needs git and python3)
 set -u
@@ -14,9 +15,18 @@ bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
 
 git rev-parse --verify -q "$BASE^{commit}" >/dev/null || { echo "  FAIL  base commit $BASE not found"; exit 1; }
 
-# 1. whole paths: no diff against the base (committed or not), and no untracked file added inside them
-for path in glasses/home-app glasses/muse-clean.mjs; do
-  if git diff --quiet "$BASE" -- "$path"; then ok "$path: git diff $BASE is empty"; else bad "$path differs from $BASE: $(git diff --stat "$BASE" -- "$path" | tail -1)"; fi
+# 1. whole paths: no diff against the base (committed or not), and no untracked file added inside them.
+# home-app/ is the approved exception: the Claude Conversation removal (8e57984) changed it on purpose, so when that commit
+# is an ancestor of HEAD, home-app/ must equal 8e57984 (not the older base); otherwise it must equal the base.
+HOME_BASE=${FROZEN_HOME_BASE:-8e57984}
+if git rev-parse --verify -q "$HOME_BASE^{commit}" >/dev/null && git merge-base --is-ancestor "$HOME_BASE" HEAD; then
+  home_ref=$HOME_BASE
+else
+  home_ref=$BASE
+fi
+for spec in "glasses/home-app:$home_ref" "glasses/muse-clean.mjs:$BASE"; do
+  path=${spec%%:*}; ref=${spec##*:}
+  if git diff --quiet "$ref" -- "$path"; then ok "$path: git diff $ref is empty"; else bad "$path differs from $ref: $(git diff --stat "$ref" -- "$path" | tail -1)"; fi
 done
 extra=$(git ls-files --others --exclude-standard -- glasses/home-app glasses/muse-clean.mjs)
 if [ -z "$extra" ]; then ok "no untracked files in the frozen paths"; else bad "untracked in a frozen path: $extra"; fi
