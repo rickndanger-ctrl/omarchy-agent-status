@@ -48,6 +48,8 @@ import { fileURLToPath } from 'node:url'
 import { helpers, think, THINK_BACKENDS } from './think.mjs'
 import { sanitizeMuseReply } from './muse-clean.mjs'
 import { createConversations, CONVERSATION_MAX_BYTES } from './conversation.mjs'
+import { createListen, LISTEN_MAX_BYTES } from './listen.mjs'
+import { createMuseQueue, createMuseBridge } from './muse-queue.mjs'
 
 const run = promisify(execFile)
 // macOS keeps lsof in /usr/sbin, which launchd's default PATH leaves out.
@@ -792,23 +794,51 @@ function museReply(raw, id, partial = false) {
   return text
 }
 
-async function askMuse(text, start) {
+async function sendMuse(text, start = 0, { signal } = {}) {
   for (const [i, muse] of MUSES.entries()) {
     if (i < start) continue
+    if (signal?.aborted) return null
     try {
       const health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 })
       if (!health.ok || !health.composer) continue
+    } catch { continue /* try the next Muse */ }
+    if (signal?.aborted) return null
+    // Once a POST is attempted, failure may mean it was accepted without a receipt.
+    // Never submit the same question to another Muse under that uncertainty.
+    try {
       const r = await call(`${muse.url}/ask`, muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
-      return { id: `${i}-${r.id}`, muse: muse.name }
-    } catch { /* try the next Muse */ }
+      const job = String(r?.id ?? '')
+      return /^\w{1,40}$/.test(job) ? { id: `${i}-${job}`, muse: muse.name } : { uncertain: true }
+    } catch { return { uncertain: true } }
   }
   return null
 }
 // Glasses id → id of the same question re-asked on a later Muse.
 const museMoved = new Map()
 const museMoving = new Set() // ids being handed on right now (the glasses poll fast)
+const MUSE_QUEUE = createMuseQueue({
+  ask: sendMuse,
+  read: async id => {
+    const [, index, job] = String(id).match(/^(\d+)-(\w{1,40})$/) ?? []
+    const muse = MUSES[Number(index)]
+    if (!muse || !job) throw new Error('unknown Muse job')
+    return call(`${muse.url}/reply/${job}`, muse.token, { timeout: 6000 })
+  },
+  pollMs: HUB.listen?.pollMs,
+  timeoutMs: HUB.listen?.timeoutMs,
+})
+const MUSE_BRIDGE = createMuseBridge(MUSE_QUEUE, {
+  relayUrl: MUSES[0]?.url,
+  onAdmitted: (from, to) => {
+    museMoved.set(from, to)
+    setTimeout(() => museMoved.delete(from), 10 * 60_000).unref()
+  },
+})
+const askMuse = async (text, start = 0) => start >= MUSES.length ? null : MUSE_BRIDGE.ask(text, start)
 
 async function call(url, token, options = {}) {
+  const queued = MUSE_BRIDGE.lookup(url)
+  if (queued !== undefined) return queued
   const res = await fetch(url, {
     ...options,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -1440,6 +1470,14 @@ const CONVERSATION = createConversations({
   dir: path.join(CONFIG_DIR, 'conversations'),
   limitMs: Number(process.env.HUD_CONV_LIMIT_MS) || undefined,
 })
+const LISTEN = createListen({
+  transcribe,
+  ask: ({ text, signal, onStatus }) => MUSE_QUEUE.enqueue(text, { source: 'listen', signal, onStatus }).result,
+  diag: conversationDiag,
+  snippetMs: HUB.listen?.snippetMs,
+  minWords: HUB.listen?.minWords,
+  idleMs: HUB.listen?.idleMs,
+})
 
 // Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl", "remindersTokenFile", "remindersList").
 const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
@@ -1754,6 +1792,28 @@ async function handle(req, res) {
       if (appThread) return send(res, 200, { lines: await codexThreadView(appThread, stamps) })
       const lines = await terminalView(pane, window, stamps)
       return lines ? send(res, 200, { lines }) : send(res, 404, { error: 'agent not found' })
+    }
+    if (p === '/api/listen' || p.startsWith('/api/listen/')) {
+      if (MODE !== 'hub') return send(res, 404, { error: 'Listen is unavailable on this node' })
+      if (req.method === 'GET' && p === '/api/listen') {
+        const raw = url.searchParams.get('since')
+        const r = LISTEN.state(url.searchParams.get('id'), raw === null ? undefined : raw.trim() ? Number(raw) : NaN)
+        return send(res, r.status, r.body)
+      }
+      if (req.method === 'POST' && p === '/api/listen/chunk') {
+        const pcm = await readRaw(req, LISTEN_MAX_BYTES).catch(() => null)
+        if (!pcm) return send(res, 413, { error: 'chunk too large' })
+        const seq = url.searchParams.get('seq')
+        const r = await LISTEN.chunk(url.searchParams.get('id'), seq?.trim() ? Number(seq) : NaN, pcm)
+        return send(res, r.status, r.body)
+      }
+      if (req.method === 'POST' && (p === '/api/listen/start' || p === '/api/listen/stop')) {
+        const b = await readBody(req).catch(() => null)
+        if (!b || typeof b !== 'object' || Array.isArray(b)) return send(res, 400, { error: 'invalid request' })
+        const r = p.endsWith('/start') ? LISTEN.start(b) : LISTEN.stop(b.id)
+        return send(res, r.status, r.body)
+      }
+      return send(res, 404, { error: 'unknown Listen endpoint' })
     }
     if (req.method === 'POST' && p === '/api/transcribe') {
       const pcm = await readRaw(req, 4_000_000) // ~2 minutes of 16 kHz audio
