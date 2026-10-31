@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Guards the Muse Listen stitch: G2 OMAC and its Muse path must stay byte-identical to the frozen base commit.
 # Fails unless muse-clean.mjs is unchanged since the base, home-app/ is unchanged since the base (or since the approved
-# Conversation removal 8e57984 when that is an ancestor), and every /api/muse* route block plus
+# Conversation removal 8e57984 when that is an ancestor; files ADDED under home-app/tests/ are allowed), and every /api/muse* route block plus
 # museReply and askMuse in hud-server.mjs is byte-identical to the base. Read-only; touches nothing.
 #   bash glasses/test-listen-frozen.sh      (needs git and python3)
 set -u
@@ -24,12 +24,20 @@ if git rev-parse --verify -q "$HOME_BASE^{commit}" >/dev/null && git merge-base 
 else
   home_ref=$BASE
 fi
-for spec in "glasses/home-app:$home_ref" "glasses/muse-clean.mjs:$BASE"; do
-  path=${spec%%:*}; ref=${spec##*:}
-  if git diff --quiet "$ref" -- "$path"; then ok "$path: git diff $ref is empty"; else bad "$path differs from $ref: $(git diff --stat "$ref" -- "$path" | tail -1)"; fi
-done
-extra=$(git ls-files --others --exclude-standard -- glasses/home-app glasses/muse-clean.mjs)
-if [ -z "$extra" ]; then ok "no untracked files in the frozen paths"; else bad "untracked in a frozen path: $extra"; fi
+# muse-clean.mjs: no difference at all.
+if git diff --quiet "$BASE" -- glasses/muse-clean.mjs; then ok "glasses/muse-clean.mjs: git diff $BASE is empty"; else bad "glasses/muse-clean.mjs differs from $BASE: $(git diff --stat "$BASE" -- glasses/muse-clean.mjs | tail -1)"; fi
+# home-app/: every file equals the reference, except that files ADDED under glasses/home-app/tests/ are allowed (new tests, e.g.
+# the simulator check). A modified, deleted or renamed file anywhere in home-app/, or an added file outside tests/, fails.
+changes=$(git diff --name-status --no-renames "$home_ref" -- glasses/home-app)
+disallowed=$(printf '%s\n' "$changes" | awk -F'\t' 'NF >= 2 && !($1 == "A" && index($2, "glasses/home-app/tests/") == 1) { print $1 " " $2 }')
+added_ok=$(printf '%s\n' "$changes" | awk -F'\t' '$1 == "A" && index($2, "glasses/home-app/tests/") == 1 { print $2 }')
+if [ -z "$disallowed" ]; then
+  ok "glasses/home-app: equal to $home_ref except files added under tests/ ($(printf '%s' "$added_ok" | grep -c . ) added)"
+else
+  bad "glasses/home-app differs from $home_ref beyond added tests/ files: $(printf '%s' "$disallowed" | tr '\n' ';')"
+fi
+extra=$(git ls-files --others --exclude-standard -- glasses/home-app glasses/muse-clean.mjs | grep -v '^glasses/home-app/tests/' || true)
+if [ -z "$extra" ]; then ok "no untracked files in the frozen paths (outside home-app/tests/)"; else bad "untracked in a frozen path: $extra"; fi
 
 # 2. the Muse blocks of hud-server.mjs, compared as text with the base's
 git show "$BASE:glasses/hud-server.mjs" > "${TMPDIR:-/tmp}/frozen-base.$$" || exit 1
