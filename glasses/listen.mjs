@@ -153,7 +153,6 @@ export function createListen({
     ].join('\n')
     session.snippetParts = []
     const priorContext = session.context
-    session.context = [...priorContext, snippet].slice(-2)
     session.lastAttempt = elapsed(session)
     session.asking = true
     session.muse = { state: 'thinking' }
@@ -167,6 +166,10 @@ export function createListen({
           signal: session.controller.signal, onStatus: value => { if (acceptingStatus) museStatus(session, value) } })
         if (!active(session)) return
         if (result?.status === 'done') {
+          // Only confirmed completed snippets become future prompt context.
+          // A possibly POSTed attempt must not resurface as Previous snippets
+          // after uncertainty, cancellation, timeout, failure or rejection.
+          session.context = [...priorContext, snippet].slice(-2)
           const text = noteText(result.reply)
           if (text) {
             // Public (t,text) tuples are client deduplication identities. A

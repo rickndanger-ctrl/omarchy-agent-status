@@ -466,6 +466,55 @@ test('uncertain, error and timeout results never restore or retry a possibly pos
   }
 })
 
+for (const outcome of ['uncertain', 'unavailable', 'error', 'timeout', 'cancelled', 'rejected']) {
+  test(`${outcome} snippet is absent from all later prompts while confirmed context and new speech survive`, async () => {
+    const pending = deferred(), prompts = [], requests = []
+    const f = fixture({ snippetMs: 1000, transcribe: async bytes => speech(25, `batch${bytes[0]}-`),
+      ask: async request => {
+        requests.push(request)
+        prompts.push(request.text)
+        if (requests.length === 2) {
+          await pending.promise
+          if (outcome === 'rejected') throw new Error('PRIVATE FAILED PROVIDER DETAIL')
+          return { status: outcome, reason: 'PRIVATE FAILED PROVIDER DETAIL' }
+        }
+        if (requests.length === 3) return { status: 'busy' } // proven no POST
+        return { status: 'done', reply: requests.length === 1 ? '—' : 'Confirmed note.' }
+      } })
+    await f.clock.advance(1000)
+    await f.engine.chunk(f.id, 0, pcm(1000, 0))
+    await flush()
+    await f.clock.advance(1000)
+    await f.engine.chunk(f.id, 1, pcm(1000, 1))
+    await f.engine.chunk(f.id, 2, pcm(1000, 2)) // speech arriving during failed attempt
+    assert.equal(prompts.length, 2)
+    pending.resolve()
+    await flush()
+    requests[1].onStatus({ state: 'thinking' }) // terminal callbacks must stay inert
+    await f.clock.advance(1000)
+    assert.equal(prompts.length, 3)
+    assert.match(prompts[2], /Previous snippets:/)
+    assert.match(prompts[2], /batch0-0\b/) // done dash still confirms context
+    assert.match(prompts[2], /batch2-0\b/) // new speech was not dropped
+    await f.clock.advance(1000) // no-POST busy retry retains the exact fresh speech
+    assert.equal(prompts.length, 4)
+    assert.equal(prompts[3], prompts[2])
+    await f.clock.advance(1000)
+    await f.engine.chunk(f.id, 3, pcm(1000, 3))
+    await flush()
+    assert.equal(prompts.length, 5)
+    assert.match(prompts[4], /batch0-0\b/)
+    assert.match(prompts[4], /batch2-0\b/)
+    assert.match(prompts[4], /batch3-0\b/)
+    for (const prompt of prompts.slice(2)) {
+      assert.doesNotMatch(prompt, /batch1-\d+\b/, outcome)
+      assert.doesNotMatch(prompt, /PRIVATE FAILED PROVIDER DETAIL/)
+    }
+    assert.doesNotMatch(JSON.stringify(f.engine.state(f.id)), /PRIVATE FAILED PROVIDER DETAIL/)
+    f.engine.close()
+  })
+}
+
 test('cancelled and failed service results suppress late callbacks and keep errors private', async () => {
   const requests = []
   const f = fixture({ snippetMs: 1, ask: async request => {

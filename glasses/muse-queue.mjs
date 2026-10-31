@@ -1,8 +1,9 @@
-// Listen-only, best-effort Muse adapter. G2 admission/reply paths never pass
-// through this module. Fresh health is a veto, not an atomic cross-client lock.
+// Listen-only, best-effort Muse adapter. Observed G2 requests pause future
+// snippets; posted jobs expose a bounded hold so the relay can queue G2 FIFO.
 import { sanitizeMuseReply } from './muse-clean.mjs'
 
 const RUNNING = new Set(['queued', 'sending', 'waiting', 'running', 'pending', 'thinking'])
+const G2_PAUSE_MS = 60_000
 const REASONS = Object.freeze({
   busy: 'Muse is busy', unavailable: 'No Muse is ready right now',
   cancelled: 'Muse request cancelled', timeout: 'Muse took too long',
@@ -24,6 +25,8 @@ function relay(value) {
 
 /**
  * ask({text,signal,onStatus}) -> Promise<{status,reply,reason}>.
+ * noteG2(method,path) records only known hub-observed G2 routes. holds(index)
+ * identifies only this adapter's POSTed, unfinished target before its deadline.
  * status: done|busy|unavailable|cancelled|timeout|error. There is no queue,
  * retry, fallback, G2 mutation, or persistent uncertain-admission quarantine.
  * request(url,token,{method,body,signal,timeout}) may supply parsed JSON for
@@ -40,6 +43,26 @@ export function createListenMuse({ muses = [], isG2Busy = () => true, request,
   attemptMs = positive(attemptMs, positive(timeoutMs, 150_000, 150_000), 150_000)
   maxBodyBytes = Math.floor(positive(maxBodyBytes, 65536, 65536))
   let inFlight = false
+  let lastG2At = -Infinity
+  let held = null
+
+  function noteG2(method, path) {
+    if (typeof method !== 'string' || typeof path !== 'string') return false
+    const route = path.split('?', 1)[0]
+    const observed = method === 'POST' && (route === '/api/muse/ask' || route === '/api/transcribe')
+      || method === 'GET' && (route === '/api/muse/reply' || route === '/api/muse')
+    if (!observed) return false
+    const at = now()
+    // A backward clock cannot shorten an already observed cooldown.
+    if (Number.isFinite(at)) lastG2At = Math.max(lastG2At, at)
+    return true
+  }
+  function holds(index) {
+    if (!held) return false
+    const at = now()
+    if (held.signal.aborted || !Number.isFinite(at) || at >= held.end) { held = null; return false }
+    return Number.isInteger(index) && held.index === index && held.posted === true
+  }
 
   // Explicit timer races also bound transports that ignore AbortSignal.
   function bounded(operation, ms, parent) {
@@ -101,7 +124,11 @@ export function createListenMuse({ muses = [], isG2Busy = () => true, request,
   const transport = typeof request === 'function' ? request : fetchJson
 
   async function ask({ text, signal, onStatus } = {}) {
+    let attempt = null
     const outcome = (status, reply = '', reason = status === 'done' ? '' : REASONS[status]) => {
+      // Clear before notifying observers, without disturbing a concurrent ask's
+      // hold when this call merely returns busy before creating its own attempt.
+      if (attempt && held === attempt) held = null
       observe(onStatus, { state: status === 'done' || status === 'cancelled' ? 'idle' : status === 'busy' ? 'busy' : 'unavailable', ...(reason ? { reason } : {}) })
       return { status, reply, reason }
     }
@@ -111,9 +138,10 @@ export function createListenMuse({ muses = [], isG2Busy = () => true, request,
     }
     if (signal?.aborted) return outcome('cancelled')
     if (inFlight) return outcome('busy')
-    if (!relays.length || relays.some(r => !r)) return outcome('unavailable')
+    if (!relays.length || !relays.at(-1)) return outcome('unavailable')
     inFlight = true
     const controller = new AbortController(), end = now() + attemptMs
+    attempt = { index: relays.length - 1, end, posted: false, signal: controller.signal }
     const aborted = () => controller.abort(new Failure('cancelled'))
     signal?.addEventListener('abort', aborted, { once: true })
     const deadline = setTimer(() => controller.abort(new Failure('timeout')), attemptMs)
@@ -123,6 +151,7 @@ export function createListenMuse({ muses = [], isG2Busy = () => true, request,
     }
     function gate() {
       check()
+      if (now() - lastG2At < G2_PAUSE_MS) throw new Failure('busy')
       let busy = true
       try { busy = isG2Busy() !== false } catch { /* Unknown gate is a veto. */ }
       if (busy) throw new Failure('busy')
@@ -130,8 +159,13 @@ export function createListenMuse({ muses = [], isG2Busy = () => true, request,
     async function call(muse, path, method = 'GET', body) {
       check()
       const timeout = Math.min(requestMs, end - now())
-      const value = await bounded(s => transport(`${muse.url}${path}`, muse.token,
-        { method, ...(body === undefined ? {} : { body }), signal: s, timeout }), timeout, controller.signal)
+      const value = await bounded(s => {
+        if (method === 'POST' && path === '/ask') {
+          attempt.posted = true; held = attempt
+        }
+        return transport(`${muse.url}${path}`, muse.token,
+          { method, ...(body === undefined ? {} : { body }), signal: s, timeout })
+      }, timeout, controller.signal)
       check()
       return value
     }
@@ -157,37 +191,49 @@ export function createListenMuse({ muses = [], isG2Busy = () => true, request,
       gate()
       observe(onStatus, { state: 'thinking' })
       gate() // An observer may cancel synchronously before any request.
-      const target = relays.at(-1), others = relays.slice(0, -1)
-      // Direct G2 callers emit no UI diagnostics. Other relays must also be
-      // physically idle, including after the target's potentially slow probe.
-      for (const muse of others) await health(muse)
+      const target = relays.at(-1)
+      // G2 can queue behind our bounded target hold. An unrelated down/busy
+      // primary relay must not veto a ready Listen target.
       await health(target)
-      for (const muse of others) await health(muse)
       await health(target)
       gate()
       // Exactly one attempt. A timeout/malformed receipt may have submitted;
       // drop this snippet and never retry it on this or another relay.
       const receipt = await call(target, '/ask', 'POST', JSON.stringify({ text }))
-      if (typeof receipt?.id !== 'string' || !/^\w{1,40}$/.test(receipt.id)) throw new Failure('unavailable')
-      for (;;) {
-        const value = await call(target, `/reply/${receipt.id}`)
-        if (value?.status === 'done' && typeof value.reply === 'string') {
+      // A relay may return an already terminal job directly from POST. Never
+      // retain a hold or issue a later poll after that terminal evidence.
+      function terminal(value) {
+        if (value?.status === 'done') {
+          if (held === attempt) held = null
+          if (typeof value.reply !== 'string') throw new Failure('unavailable')
           const reply = sanitizeMuseReply(value.reply.slice(0, 65536)).text.trim().slice(0, 300)
           return outcome('done', reply)
         }
-        if (value?.status === 'error') throw new Failure('error')
-        if (value?.status === 'timeout') throw new Failure('timeout')
+        if (value?.status === 'error' || value?.status === 'timeout') {
+          if (held === attempt) held = null
+          throw new Failure(value.status)
+        }
+        return null
+      }
+      const completed = terminal(receipt)
+      if (completed) return completed
+      if (typeof receipt?.id !== 'string' || !/^\w{1,40}$/.test(receipt.id)) throw new Failure('unavailable')
+      for (;;) {
+        const value = await call(target, `/reply/${receipt.id}`)
+        const completed = terminal(value)
+        if (completed) return completed
         if (!RUNNING.has(value?.status)) throw new Failure('unavailable')
         await pause(pollMs)
       }
     } catch (error) {
       return outcome(error instanceof Failure ? error.status : 'unavailable')
     } finally {
+      if (held === attempt) held = null
       clearTimer(deadline)
       signal?.removeEventListener('abort', aborted)
       controller.abort()
       inFlight = false
     }
   }
-  return { ask }
+  return { ask, noteG2, holds }
 }

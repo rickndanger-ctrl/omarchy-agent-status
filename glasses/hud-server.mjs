@@ -50,6 +50,7 @@ import { sanitizeMuseReply } from './muse-clean.mjs'
 import { createConversations, CONVERSATION_MAX_BYTES } from './conversation.mjs'
 import { createListen, LISTEN_MAX_BYTES } from './listen.mjs'
 import { createListenMuse } from './muse-queue.mjs'
+import { isListenG2Busy } from './listen-g2.mjs'
 
 const run = promisify(execFile)
 // macOS keeps lsof in /usr/sbin, which launchd's default PATH leaves out.
@@ -799,7 +800,7 @@ async function askMuse(text, start) {
     if (i < start) continue
     try {
       const health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 })
-      if (!health.ok || !health.composer) continue
+      if (!health.ok || (!health.composer && !LISTEN_MUSE.holds(i))) continue
       const r = await call(`${muse.url}/ask`, muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
       return { id: `${i}-${r.id}`, muse: muse.name }
     } catch { /* try the next Muse */ }
@@ -1445,13 +1446,7 @@ const CONVERSATION = createConversations({
 
 // Listen owns only its best-effort snippets; G2's Muse paths above are unchanged.
 function listenG2Busy() {
-  if (museMoving.size) return true
-  let pending = 0
-  for (const event of diagnostics) {
-    if (event.name === 'muse.ask' && event.detail === 'queued') pending++
-    if (event.name === 'muse.reply' && /^(done|error|timeout)(\s|$)|^gave up:/.test(String(event.detail))) pending = Math.max(0, pending - 1)
-  }
-  return pending > 0
+  return isListenG2Busy(diagnostics, Date.now(), museMoving.size > 0)
 }
 const LISTEN_MUSE = createListenMuse({
   muses: MUSES,
@@ -1634,6 +1629,7 @@ function overInputRate() {
 async function handle(req, res) {
   const url = new URL(req.url, 'http://x')
   const p = url.pathname.replace(/^\/hud(?=\/|$)/, '') || '/'
+  LISTEN_MUSE.noteG2(req.method, p)
   if (req.method === 'OPTIONS') return send(res, 204, {})
   if (!p.startsWith('/api/')) return req.method === 'GET' ? serveStatic(res, p) : send(res, 405, {})
   if (p === '/api/health') return send(res, 200, { ok: true, mode: MODE, machine: MACHINE })

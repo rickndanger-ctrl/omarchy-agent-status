@@ -243,7 +243,7 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
 
 
 class Fixture:
-    def __init__(self, hub_script=None, **listen):
+    def __init__(self, hub_script=None, fake_clock=False, **listen):
         self.options = dict(snippetMs=100, minWords=25, idleMs=30000, pollMs=20, requestMs=250, timeoutMs=1500)
         # The public hub config keeps the original timeoutMs knob. The adapter
         # calls the same whole-attempt limit attemptMs.
@@ -255,6 +255,8 @@ class Fixture:
         self.stack = contextlib.ExitStack()
         self.forced = False
         self.hub_script = str(hub_script or HERE / "hud-server.mjs")
+        self.fake_clock = fake_clock
+        self.clock_at = 1_700_000_000_000
 
     def __enter__(self):
         self.temp = self.stack.enter_context(tempfile.TemporaryDirectory(prefix="hub-listen-"))
@@ -288,8 +290,20 @@ class Fixture:
                         LISTEN_TEST_GUARD_LOG=str(self.guard_log))
         self.log = self.stack.enter_context((self.root / "hub.log").open("w+"))
         self.machine = "Listen Fixture " + self.root.name
+        preloads = ["--import", str(GUARD)]
+        if self.fake_clock:
+            # Private test-only preload: production cooldowns are unchanged.
+            # Wall time and diagnostic ISO timestamps share this fixture clock;
+            # actual I/O deadlines/timers still run on real monotonic timers.
+            self.clock_file = self.root / "fixture-clock.json"
+            self.clock_file.write_text(str(self.clock_at))
+            clock_module = self.root / "fixture-clock.mjs"
+            clock_module.write_text("import {readFileSync} from 'node:fs';\n"
+                "const RealDate=Date;\nconst at=()=>Number(readFileSync(" + json.dumps(str(self.clock_file)) + ",'utf8'));\n"
+                "globalThis.Date=class extends RealDate {constructor(...args){super(...(args.length?args:[at()]));} static now(){return at();}};\n")
+            preloads = ["--import", str(clock_module)] + preloads
         try:
-            self.process = subprocess.Popen([NODE, "--import", str(GUARD), self.hub_script,
+            self.process = subprocess.Popen([NODE, *preloads, self.hub_script,
                                              "--mode", "hub", "--host", "127.0.0.1", "--port", str(self.hub_port),
                                              "--machine", self.machine], env=self.env, cwd=self.root,
                                             stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT,
@@ -311,6 +325,14 @@ class Fixture:
             finally:
                 self.stack.close()
             raise
+
+    def advance_clock(self, milliseconds):
+        if not self.fake_clock or not isinstance(milliseconds, int) or milliseconds < 0:
+            raise AssertionError("explicit nonnegative fixture clock advance required")
+        self.clock_at += milliseconds
+        temporary = self.root / "fixture-clock.next"
+        temporary.write_text(str(self.clock_at))
+        temporary.replace(self.clock_file)
 
     def call(self, method, route, body=None, raw=None, token=HUB_TOKEN, timeout=3):
         connection = http.client.HTTPConnection("127.0.0.1", self.hub_port, timeout=timeout)
@@ -388,7 +410,7 @@ class Fixture:
 
 
 class GuardTests(unittest.TestCase):
-    def test_g2_function_and_muse_routes_match_selected_baseline_exactly(self):
+    def test_g2_allows_only_authorized_composer_hold_condition_and_routes_stay_frozen(self):
         with tempfile.TemporaryDirectory(prefix="listen-baseline-") as temp:
             baseline = subprocess.run(["git", "-C", str(HERE.parent), "show", "56fe3b2:glasses/hud-server.mjs"],
                                       env=clean_env(Path(temp)), cwd=temp, capture_output=True, text=True, timeout=5)
@@ -400,7 +422,12 @@ class GuardTests(unittest.TestCase):
             routes = source.index("    if (req.method === 'POST' && p === '/api/muse/ask')")
             route_end = source.index("    if (req.method === 'GET' && p === '/api/layout')", routes)
             return source[start:end], source[routes:route_end]
-        self.assertTrue(blocks(current) == blocks(baseline.stdout), "G2 askMuse and Muse route bodies must remain exactly56fe3b2")
+        old = "if (!health.ok || !health.composer) continue"
+        new = "if (!health.ok || (!health.composer && !LISTEN_MUSE.holds(i))) continue"
+        expected_ask, expected_routes = blocks(baseline.stdout)
+        self.assertEqual(expected_ask.count(old), 1, "baseline must contain the one authorized condition")
+        self.assertEqual(blocks(current), (expected_ask.replace(old, new), expected_routes),
+                         "only the authorized composer/holds condition may differ; Muse routes remain byte-identical")
 
     def test_guard_blocks_remote_live_ports_named_child_imports_and_redirects(self):
         with Fixture() as f:
@@ -494,7 +521,7 @@ class ListenTests(unittest.TestCase):
         self.assertEqual(f.call("POST", "/api/diag", {"name": name, "detail": detail}), (200, {"ok": True}))
 
     def test_diagnostic_g2_gate_defers_and_merges_speech_then_asks_last_once(self):
-        with Fixture(snippetMs=300) as f:
+        with Fixture(snippetMs=300, fake_clock=True, idleMs=300000) as f:
             self.diag(f, "muse.ask", "queued")
             f.start()
             f.chunk(0)
@@ -503,15 +530,19 @@ class ListenTests(unittest.TestCase):
             self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.15)
             self.assertEqual(f.state.count(), 0)
             self.diag(f, "muse.reply", "done")
-            wait_for(lambda: f.state.count() == 1, label="merged busy speech after G2 done")
+            f.advance_clock(59999)
+            self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.35)
+            self.assertEqual(f.state.count(), 0)
+            f.advance_clock(301)  # cooldown plus the retained-speech cadence
+            wait_for(lambda: f.state.count() == 1, label="merged busy speech after full G2 cooldown")
             wait_for(lambda: len(f.view()["notes"]) == 1)
             self.assertEqual(f.state.asks[0]["relay"], "b")
             self.assertTrue(all(speech(i) in f.state.asks[0]["text"] for i in (1, 2)))
             self.assert_no_more_requests(f, "ask_event", f.state.count)
             f.stop()
 
-    def test_direct_g2_health_veto_defers_listen_without_client_diagnostics(self):
-        with Fixture(snippetMs=300) as f:
+    def test_observed_g2_ask_reply_cooldown_defers_listen_without_client_diagnostics(self):
+        with Fixture(snippetMs=300, fake_clock=True, idleMs=300000) as f:
             f.state.relays["a"]["manual"] = True
             code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE direct busy relay"})
             self.assertEqual(code, 200)
@@ -524,7 +555,16 @@ class ListenTests(unittest.TestCase):
             f.state.complete(f.state.asks[0]["id"])
             route = "/api/muse/reply?id=" + quote(receipt["id"])
             self.assertEqual(f.call("GET", route)[1]["status"], "done")
-            wait_for(lambda: f.state.count("b") == 1, label="Listen after direct G2 terminal")
+            f.advance_clock(59999)
+            self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.35)
+            self.assertEqual(f.state.count("b"), 0)
+            # A real reply poll renews the full cooldown, even after terminal.
+            self.assertEqual(f.call("GET", route)[1]["status"], "done")
+            f.advance_clock(59999)
+            self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.35)
+            self.assertEqual(f.state.count("b"), 0)
+            f.advance_clock(301)
+            wait_for(lambda: f.state.count("b") == 1, label="Listen after full observed G2 reply cooldown")
             wait_for(lambda: len(f.view()["notes"]) == 1)
             self.assertEqual(f.state.max_active, 1)
             self.assertEqual([a["relay"] for a in f.state.asks], ["a", "b"])
@@ -548,7 +588,7 @@ class ListenTests(unittest.TestCase):
             f.stop()
 
     def test_diagnostic_gate_is_rechecked_after_last_relay_health(self):
-        with Fixture(snippetMs=300, requestMs=1000) as f:
+        with Fixture(snippetMs=300, requestMs=1000, fake_clock=True, idleMs=300000) as f:
             f.state.health_gates["b"] = threading.Event()
             f.state.health_entered["b"] = threading.Event()
             f.start()
@@ -560,6 +600,10 @@ class ListenTests(unittest.TestCase):
             self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.15)
             self.assertEqual(f.state.count(), 0)
             self.diag(f, "muse.reply", "done")
+            f.advance_clock(59999)
+            self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.35)
+            self.assertEqual(f.state.count(), 0)
+            f.advance_clock(301)
             wait_for(lambda: len(f.view()["notes"]) == 1, label="retained speech after diagnostic gate clears")
             self.assertEqual(f.state.count(), 1)
             self.assertEqual(f.state.asks[0]["relay"], "b")
@@ -568,16 +612,16 @@ class ListenTests(unittest.TestCase):
     def test_hung_health_has_request_and_whole_attempt_deadlines_without_late_post(self):
         for request_ms, attempt_ms in ((70, 1500), (1000, 120)):
             with self.subTest(request_ms=request_ms, attempt_ms=attempt_ms), Fixture(requestMs=request_ms, attemptMs=attempt_ms) as f:
-                f.state.health_gates["a"] = threading.Event()
-                f.state.health_entered["a"] = threading.Event()
+                f.state.health_gates["b"] = threading.Event()
+                f.state.health_entered["b"] = threading.Event()
                 f.start()
                 before = time.monotonic()
                 f.chunk(0)
-                self.assertTrue(f.state.health_entered["a"].wait(3))
+                self.assertTrue(f.state.health_entered["b"].wait(3))
                 wait_for(lambda: f.view()["muse"]["state"] == "unavailable", seconds=.8, label="bounded hung selftest")
                 self.assertLess(time.monotonic() - before, .8)
                 self.assertEqual(f.state.count(), 0)
-                f.state.health_gates["a"].set()
+                f.state.health_gates["b"].set()
                 self.assert_no_more_requests(f, "ask_event", f.state.count)
                 f.stop()
                 self.assert_g2_works(f, "after hung health")
@@ -677,7 +721,8 @@ class ListenTests(unittest.TestCase):
             self.assertEqual(f.view(0)["lines"], view["lines"])
             self.assertTrue(all(speech(i) in f.state.asks[2]["text"] for i in (1, 2, 3)))
             self.assertEqual([a["relay"] for a in f.state.asks], ["b"] * 3)
-            self.assertGreaterEqual(f.state.health_calls.count("a"), 6)
+            self.assertEqual(f.state.health_calls.count("a"), 0)
+            self.assertGreaterEqual(f.state.health_calls.count("b"), 6)
             self.assertEqual(f.state.max_active, 1)
             self.assertEqual(f.stop(), (200, {"ok": True}))
 
@@ -724,14 +769,14 @@ class ListenTests(unittest.TestCase):
 
     def test_stop_during_health_probe_posts_no_listen_ask_and_g2_still_works(self):
         with Fixture() as f:
-            f.state.health_gates["a"] = threading.Event()
-            f.state.health_entered["a"] = threading.Event()
+            f.state.health_gates["b"] = threading.Event()
+            f.state.health_entered["b"] = threading.Event()
             f.start()
             f.chunk(0)
-            self.assertTrue(f.state.health_entered["a"].wait(3))
+            self.assertTrue(f.state.health_entered["b"].wait(3))
             self.assertEqual(f.state.count(), 0)
             self.assertEqual(f.stop(), (200, {"ok": True}))
-            f.state.health_gates["a"].set()
+            f.state.health_gates["b"].set()
             code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE after stopped health probe"})
             self.assertEqual(code, 200)
             self.assertRegex(receipt["id"], r"^0-j\d+$")
@@ -744,15 +789,15 @@ class ListenTests(unittest.TestCase):
 
     def test_timeout_then_stop_during_health_posts_no_listen_ask_and_g2_works(self):
         with Fixture(attemptMs=120, requestMs=1000) as f:
-            f.state.health_gates["a"] = threading.Event()
-            f.state.health_entered["a"] = threading.Event()
+            f.state.health_gates["b"] = threading.Event()
+            f.state.health_entered["b"] = threading.Event()
             f.start()
             f.chunk(0)
-            self.assertTrue(f.state.health_entered["a"].wait(3))
+            self.assertTrue(f.state.health_entered["b"].wait(3))
             wait_for(lambda: f.view()["muse"]["state"] == "unavailable", label="Listen caller timeout")
             self.assertEqual(f.state.count(), 0)
             self.assertEqual(f.stop(), (200, {"ok": True}))
-            f.state.health_gates["a"].set()
+            f.state.health_gates["b"].set()
             code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE after timed out health probe"})
             self.assertEqual(code, 200)
             self.assertRegex(receipt["id"], r"^0-j\d+$")
@@ -787,7 +832,7 @@ class ListenTests(unittest.TestCase):
                 self.assertNotIn(RAW_ERROR, json.dumps(f.view()))
                 f.stop()
 
-    def test_strict_health_fields_on_each_relay_prevent_listen_posts(self):
+    def test_only_target_health_fields_can_veto_listen_posts(self):
         values = ({"ok": True, "composer": True}, {"ok": True, "busy": False},
                   {"composer": True, "busy": False}, {"ok": True, "composer": True, "busy": True},
                   {"ok": True, "composer": "true", "busy": False}, {"ok": True, "composer": True, "busy": "false"},
@@ -798,16 +843,20 @@ class ListenTests(unittest.TestCase):
                     f.state.relays[name]["health_fields"] = value
                     f.start()
                     f.chunk(0)
-                    wait_for(lambda: f.view()["muse"]["state"] in ("busy", "unavailable"), label="strict health refusal")
-                    self.assertEqual(f.state.count(), 0)
-                    self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.12)
-                    # Busy speech may be retried on the snippet cadence; it
-                    # must never be POSTed while either relay lacks evidence.
+                    if name == "b":
+                        wait_for(lambda: f.view()["muse"]["state"] in ("busy", "unavailable"), label="strict target health refusal")
+                        self.assertEqual(f.state.count(), 0)
+                        self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.12)
+                    else:
+                        wait_for(lambda: len(f.view()["notes"]) == 1, label="unrelated relay must not veto ready target")
+                        self.assertEqual(f.state.count(), 1)
+                        self.assertEqual(f.state.asks[0]["relay"], "b")
+                    self.assertNotIn("a", f.state.health_calls)
                     f.stop()
 
     def test_uncertain_post_is_dropped_without_retry_or_fallback(self):
         for mode in ("malformed", "failed-post"):
-            with self.subTest(mode=mode), Fixture(attemptMs=200) as f:
+            with self.subTest(mode=mode), Fixture(attemptMs=200, fake_clock=True, idleMs=300000) as f:
                 f.state.relays["b"].update(mode=mode, manual=True)
                 f.start()
                 f.chunk(0)
@@ -825,6 +874,10 @@ class ListenTests(unittest.TestCase):
                 self.assert_g2_works(f, "after uncertain Listen admission")
                 f.state.replies = ["Fresh useful note."]
                 f.chunk(1)
+                f.advance_clock(59999)
+                self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.15)
+                self.assertEqual(f.state.count(), 2)
+                f.advance_clock(101)
                 wait_for(lambda: len(f.view()["notes"]) == 1, label="fresh attempt after uncertainty")
                 self.assertEqual(f.state.count(), 3)
                 f.stop()

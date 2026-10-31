@@ -6,12 +6,14 @@
 #   3 snippets -> 2 notes + 1 "—" dropped; at_t on the session clock; ?since; a G2 ask made while a Listen snippet is
 #   in flight lands on Muse 1 on its FIRST try, one POST per question, its reply is drawn; Listen then holds off
 #   while a G2 ask is in flight; stop ends it. A one-Muse overlap is a "known risk" note, never a fail.
+# Then G2 must ALWAYS succeed: one Muse, and two Muses with Muse 1 down, with a Listen snippet in flight (hard checks).
 # Scenario 2 (failure proof): /ask hangs past the hub's 10 s timeout once (uncertain admission) -> does a later G2 ask work?
 # Scenario 3 (failure proof): the relay restarts mid-Listen job (/reply/<id> is 404 forever) -> does a later G2 ask work?
 # Scenario 4 (failure proof): a G2 job fails with "Command failed" on 2 Muses, two clients poll /api/muse/reply at once
 #   -> is the question POSTed more than once to the same Muse?
 # Not covered here (the app's own test): remote down x2 selecting note 2 and the left box scrolling to its at_t.
 # S2/S3/S4 use the failure switches below; each: a LATER G2 ask must still work.
+# The hubs run with a built (not inherited) environment and the deny-by-default network guard of A's test.
 # Knobs go in the hub config: {"listen":{"snippetMs","minWords","pollMs","timeoutMs"}}.
 #   bash glasses/test-listen-join.sh      (needs node and python3; about 2 minutes)
 set -u
@@ -61,7 +63,7 @@ threading.Thread(target=whisper.serve_forever, daemon=True).start()
 #   fail_g2 = a G2 job ends status "error" with error "Command failed: x" (musectl failed before typing).
 LISTEN_REPLIES = ["Note one: ask about the budget.", "—", "Note three: they agreed on Friday."]
 def make_relay(port):
-    R = {"asks": [], "ask_while_busy": 0, "jobs": {}, "listen_n": 0, "free_at": 0.0, "lock": threading.Lock(), "opt": {}}
+    R = {"asks": [], "ask_while_busy": 0, "listen_while_busy": 0, "jobs": {}, "listen_n": 0, "free_at": 0.0, "lock": threading.Lock(), "opt": {}}
     busy_now = lambda: time.time() < R["free_at"]
     R["busy_now"] = busy_now
     class Relay(http.server.BaseHTTPRequestHandler):
@@ -80,6 +82,7 @@ def make_relay(port):
             return {"id": job["id"], "status": status, "question": job["q"], "reply": job["reply"] if status == "done" else "",
                     "error": "Command failed: x" if status == "error" else "", "timing": {}}
         def do_GET(self):
+            if R.get("down"): return self.send(503, {"error": "down"})
             with R["lock"]:
                 if self.path == "/selftest":
                     b = busy_now()
@@ -92,12 +95,15 @@ def make_relay(port):
             self.send(404, {"error": "not found"})
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if R.get("down"): return self.send(503, {"error": "down"})
             if not self.authed(): return self.send(401, {"error": "unauthorized"})
             if self.path.split("?")[0] != "/ask": return self.send(404, {"error": "not found"})
             hang = False
             with R["lock"]:
                 now = time.time()
-                if busy_now(): R["ask_while_busy"] += 1
+                if busy_now():
+                    R["ask_while_busy"] += 1
+                    if "G2 QUESTION" not in str(body.get("text", "")): R["listen_while_busy"] += 1
                 text = str(body.get("text", "")).strip()
                 if "G2 QUESTION" in text: reply, kind = "G2 answer.", "g2"
                 else:
@@ -125,16 +131,25 @@ def posts_of(R, needle): return sum(1 for a in R["asks"] if needle in a["text"])
 open(os.path.join(WORK, "hud.token"), "w").write(TOKEN + "\n")
 open(os.path.join(WORK, "relay.token"), "w").write(RELAY_TOKEN + "\n")
 hubs = []
+guard_logs = []
 atexit.register(lambda: [h.terminate() for h in hubs])
 PORT = BASE + 1
 def start_hub(port, relay_ports):
     cfg = os.path.join(WORK, f"hub-{port}.json")
     json.dump({"muse": [{"name": f"fake{i}", "url": f"http://127.0.0.1:{pt}", "tokenFile": os.path.join(WORK, "relay.token")} for i, pt in enumerate(relay_ports)],
                "listen": {"snippetMs": SNIPPET_MS, "minWords": 25, "pollMs": 200, "timeoutMs": QUEUE_TIMEOUT_MS}}, open(cfg, "w"))
-    env = dict(os.environ, HUD_TOKEN_FILE=os.path.join(WORK, "hud.token"), HUD_HUB_CONFIG=cfg,
-               HUD_TRANSCRIBE_URL=f"http://127.0.0.1:{BASE}/whisper", GROQ_API_KEY="test-groq-key")
-    proc = subprocess.Popen([NODE, os.path.join(HERE, "hud-server.mjs"), "--mode", "hub", "--port", str(port), "--machine", "Listen Test"],
-                            env=env, stdout=open(os.path.join(WORK, f"hub-{port}.log"), "w"), stderr=subprocess.STDOUT)
+    # Clean environment, built rather than copied (no inherited proxy, credential, HUD, Studio or Node preload), plus the
+    # deny-by-default network guard (test-helpers/listen-network-guard.mjs): only the fixture's own loopback ports are
+    # reachable and no child command may start. Anything else is refused and logged; the test fails if the log is not empty.
+    guard_log = os.path.join(WORK, f"guard-{port}.jsonl")
+    guard_logs.append(guard_log)
+    env = {"HOME": os.environ["HOME"], "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8", "TMPDIR": WORK,
+           "HUD_TOKEN_FILE": os.path.join(WORK, "hud.token"), "HUD_HUB_CONFIG": cfg,
+           "HUD_TRANSCRIBE_URL": f"http://127.0.0.1:{BASE}/whisper", "GROQ_API_KEY": "test-groq-key",
+           "LISTEN_TEST_ALLOW_PORTS": ",".join(str(x) for x in [BASE, port, *relay_ports]), "LISTEN_TEST_GUARD_LOG": guard_log}
+    proc = subprocess.Popen([NODE, "--import", os.path.join(HERE, "test-helpers", "listen-network-guard.mjs"),
+                             os.path.join(HERE, "hud-server.mjs"), "--mode", "hub", "--host", "127.0.0.1", "--port", str(port), "--machine", "Listen Test"],
+                            env=env, cwd=WORK, stdin=subprocess.DEVNULL, stdout=open(os.path.join(WORK, f"hub-{port}.log"), "w"), stderr=subprocess.STDOUT)
     hubs.append(proc)
     for _ in range(100):
         try:
@@ -268,18 +283,34 @@ code, body = call("GET", "/api/muse")
 check("GET /api/muse (G2) still answers", code == 200 and body.get("reply") == "latest", str(body))
 
 # ================================================================================================================
-print("One Muse (known risk, not counted): a G2 ask while Listen's question runs")
+print("G2 must ALWAYS succeed: one Muse, and two Muses with Muse 1 down, while Listen's snippet is in flight")
+def always_g2(label, relays, down=()):
+    global PORT
+    R = relays[-1]  # Listen uses the last Muse; with one Muse it is the only one
+    code, body = call("POST", "/api/listen/start", {"backend": "muse"})
+    lid = body.get("id")
+    call("POST", f"/api/listen/chunk?id={lid}&seq=0", raw=bytes(1000))
+    check(f"{label}: Listen's snippet is in flight", wait_for(lambda: R["busy_now"]() and R["listen_n"] >= 1, 15) is not None, f"listen_n={R['listen_n']}")
+    snippet_until = max((j["until"] for j in R["jobs"].values() if "G2 QUESTION" not in j["q"]), default=0)
+    text = f"G2 QUESTION: {label}"
+    t_ask = time.time()
+    code, body, gid = g2_ask(text)
+    check(f"{label}: a G2 ask during the snippet is 200 on its FIRST try, at once (< 3 s)", gid is not None and time.time() - t_ask < 3, f"{code} {body} {time.time() - t_ask:.1f}s")
+    r = g2_reply(gid, 20) if gid else {}
+    check(f"{label}: its reply is drawn (status done, 'G2 answer.')", r.get("status") == "done" and r.get("reply") == "G2 answer.", f"raw reply: {r}")
+    allasks = [a for rr in relays for a in rr["asks"]]
+    check(f"{label}: exactly ONE POST /ask for the G2 question", sum(1 for a in allasks if text in a["text"]) == 1, str([a["text"][:30] for a in allasks]))
+    check(f"{label}: exactly ONE POST /ask for the Listen snippet", sum(1 for a in allasks if a["kind"] == "listen") == 1)
+    g2job = [j for rr in relays for j in rr["jobs"].values() if text in j["q"]]
+    check(f"{label}: the G2 question ran AFTER the snippet, never alongside it", bool(g2job) and g2job[0]["start"] >= snippet_until - 0.05, f"g2 start {g2job[0]['start'] - snippet_until if g2job else 'n/a'} s after the snippet's end")
+    check(f"{label}: Listen itself never POSTed to a busy Muse", all(rr["listen_while_busy"] == 0 for rr in relays), str([rr["listen_while_busy"] for rr in relays]))
+    call("POST", "/api/listen/stop", {"id": lid})
+
 (R,) = new_scenario()
-code, body = call("POST", "/api/listen/start", {"backend": "muse"})
-lid = body.get("id")
-call("POST", f"/api/listen/chunk?id={lid}&seq=0", raw=bytes(1000))
-if wait_for(lambda: R["busy_now"]() and R["listen_n"] >= 1, 15):
-    code, body, gid = g2_ask("G2 QUESTION: one-Muse overlap")
-    r = g2_reply(gid, 10) if gid else {}
-    note(f"known risk, one Muse: G2 ask while Listen's question runs -> ask {code}, reply {r.get('status')} {r.get('error', '')}; POSTs of it: {posts_of(R, 'one-Muse overlap')}")
-else:
-    note("known risk, one Muse: Listen asked nothing, case not exercised")
-call("POST", "/api/listen/stop", {"id": lid})
+always_g2("one Muse", [R])
+R1, R2 = new_scenario(2)
+R1["down"] = True  # Muse 1 is down: its relay refuses every request
+always_g2("two Muses, Muse 1 down", [R1, R2])
 
 # ================================================================================================================
 print("Scenario 2 (failure proof): the relay hangs on /ask past the hub's 10 s timeout once (uncertain admission)")
@@ -334,6 +365,14 @@ if gid:
 note(f"POSTs of the question: Muse 1 = {posts_of(R1, 'duplicate probe')}, Muse 2 = {posts_of(R2, 'duplicate probe')}; final replies: {[r.get('status') for r in results]}")
 check("the question was POSTed at most once to each Muse (never twice to the same one)", posts_of(R1, "duplicate probe") <= 1 and posts_of(R2, "duplicate probe") <= 1,
       f"Muse1={posts_of(R1, 'duplicate probe')} Muse2={posts_of(R2, 'duplicate probe')}")
+
+print("Network guard")
+blocked = []
+for g in guard_logs:
+    if os.path.exists(g): blocked += open(g).read().split("\n")
+blocked = [b for b in blocked if b.strip()]
+check("no hub reached a non-fixture network destination or started a child command (guard logs empty)", not blocked, str(blocked[:5]))
+check("the guard was loaded for every hub (one log path each, hub ran under --import)", len(guard_logs) == len(hubs) and len(hubs) >= 5)
 
 print(f"{passed} passed, {failed} failed")
 sys.exit(0 if failed == 0 else 1)

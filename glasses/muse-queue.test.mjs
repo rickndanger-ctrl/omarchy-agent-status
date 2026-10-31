@@ -30,6 +30,7 @@ function fixture(options = {}) {
     now: () => time, setTimer, clearTimer: id => timers.delete(id), ...options,
   })
   return { client, calls, statuses, timers,
+    elapse: ms => { time += ms },
     ask: (extra = {}) => client.ask({ text: 'A conversation snippet', onStatus: s => statuses.push(s), ...extra }),
     tick: async ms => {
       const end = time + ms
@@ -45,24 +46,25 @@ function fixture(options = {}) {
 }
 const posts = f => f.calls.filter(c => c.method === 'POST')
 
-test('factory is lazy and exposes only independent Listen asks', async () => {
+test('factory is lazy and exposes Listen ask, observed G2 pause, and bounded target hold', async () => {
   const f = fixture()
   assert.equal(f.calls.length, 0)
   assert.equal(api.createMuseQueue, undefined)
   assert.equal(api.createMuseBridge, undefined)
+  assert.equal(typeof f.client.noteG2, 'function')
+  assert.equal(typeof f.client.holds, 'function')
   assert.equal((await f.ask()).status, 'done')
   assert.equal(f.timers.size, 0)
 })
 
-test('last configured Muse alone receives the question; all other relays are checked twice', async () => {
+test('only the last target is checked twice and receives exactly one question', async () => {
   const f = fixture()
   assert.deepEqual(await f.ask(), { status: 'done', reply: 'A useful note.', reason: '' })
   assert.equal(posts(f).length, 1)
   assert.equal(posts(f)[0].url, 'http://last.invalid/ask')
   assert.equal(posts(f)[0].token, 'fixture-last')
   assert.deepEqual(f.calls.filter(c => c.url.endsWith('/selftest')).map(c => c.url), [
-    'http://first.invalid/selftest', 'http://last.invalid/selftest',
-    'http://first.invalid/selftest', 'http://last.invalid/selftest',
+    'http://last.invalid/selftest', 'http://last.invalid/selftest',
   ])
 })
 
@@ -82,15 +84,13 @@ test('G2 gate must explicitly return false, including the default unknown gate',
   }
 })
 
-test('both chosen and other relay require exact ok/composer/busy health booleans', async () => {
+test('target requires exact ok/composer/busy health booleans', async () => {
   for (const bad of [{}, { ok: true, composer: true }, { ok: true, composer: 'true', busy: false },
     { ok: true, composer: true, busy: 'false' }, { ok: true, composer: true, busy: true },
     { ok: false, composer: true, busy: false }]) {
-    for (const host of ['first', 'last']) {
-      const f = fixture({ respond: c => c.url.includes(host) ? bad : idle() })
-      assert.notEqual((await f.ask()).status, 'done')
-      assert.equal(posts(f).length, 0)
-    }
+    const f = fixture({ respond: c => c.url.includes('last') ? bad : idle() })
+    assert.notEqual((await f.ask()).status, 'done')
+    assert.equal(posts(f).length, 0)
   }
 })
 
@@ -102,21 +102,19 @@ test('read-only G2 gate is checked again after held health', async () => {
   assert.equal(posts(f).length, 0)
 })
 
-test('direct G2 activity on another relay during chosen health vetoes POST', async () => {
-  const held = deferred(); let firstChecks = 0
-  const f = fixture({ respond: c => {
-    if (c.url.includes('first')) return ++firstChecks === 1 ? idle() : { ...idle(), busy: true, composer: false }
-    return held.promise
-  } })
-  const result = f.ask(); await flush(); held.resolve(idle())
+test('observed G2 request during held target health vetoes the Listen POST', async () => {
+  const held = deferred()
+  const f = fixture({ respond: () => held.promise })
+  const result = f.ask(); await flush()
+  f.client.noteG2('POST', '/api/muse/ask')
+  held.resolve(idle())
   assert.equal((await result).status, 'busy')
   assert.equal(posts(f).length, 0)
 })
 
-test('target becoming busy during the second other-relay pass vetoes POST', async () => {
+test('target becoming busy during its second health pass vetoes POST', async () => {
   let targetChecks = 0
   const f = fixture({ respond: c => {
-    if (c.url.includes('first')) return idle()
     if (c.url.endsWith('/selftest')) return ++targetChecks === 1 ? idle() : { ...idle(), busy: true, composer: false }
     return c.method === 'POST' ? { id: '1' } : { status: 'done', reply: 'Unexpected submission' }
   } })
@@ -266,8 +264,8 @@ test('independent fetch rejects redirects and oversized bodies without exposing 
     assert.equal(result.status, 'unavailable')
     assert.equal(calls.length, 1)
     assert.equal(calls[0].redirect, 'error')
-    assert.equal(calls[0].headers.Authorization, 'Bearer fixture-first')
-    assert.doesNotMatch(JSON.stringify([result, f.statuses]), /private|fixture-first/)
+    assert.equal(calls[0].headers.Authorization, 'Bearer fixture-last')
+    assert.doesNotMatch(JSON.stringify([result, f.statuses]), /private|fixture-first|fixture-last/)
   }
 })
 
@@ -303,5 +301,157 @@ test('stalled fetch body is hard bounded and its stream is cancelled', async () 
   const result = f.ask(); await f.tick(30)
   assert.equal((await result).status, 'timeout')
   assert.equal(closed, 1)
+  assert.equal(f.timers.size, 0)
+})
+
+test('each observed G2 route blocks through 59999ms and admits exactly at 60000ms', async () => {
+  for (const [method, path] of [['POST', '/api/muse/ask'], ['GET', '/api/muse/reply?id=fixture'],
+    ['GET', '/api/muse'], ['POST', '/api/transcribe']]) {
+    const f = fixture()
+    assert.equal(f.client.noteG2(method, path), true)
+    assert.equal((await f.ask()).status, 'busy')
+    assert.equal(f.calls.length, 0)
+    await f.tick(59_999)
+    assert.equal((await f.ask()).status, 'busy')
+    assert.equal(f.calls.length, 0)
+    await f.tick(1)
+    assert.equal((await f.ask()).status, 'done')
+    assert.equal(posts(f).length, 1)
+  }
+})
+
+test('every later G2 activity restarts the full 60s pause', async () => {
+  const f = fixture()
+  f.client.noteG2('POST', '/api/muse/ask')
+  await f.tick(45_000)
+  f.client.noteG2('GET', '/api/muse/reply?id=fixture')
+  await f.tick(59_999)
+  assert.equal((await f.ask()).status, 'busy')
+  assert.equal(posts(f).length, 0)
+  await f.tick(1)
+  assert.equal((await f.ask()).status, 'done')
+})
+
+test('Listen and unrelated or wrong-method requests never establish G2 activity', async () => {
+  const f = fixture()
+  for (const [method, path] of [['GET', '/api/listen'], ['POST', '/api/listen/chunk'],
+    ['GET', '/api/muse/ask'], ['POST', '/api/muse/reply'], ['GET', '/api/transcribe'],
+    ['GET', '/api/muse/anything'], [null, '/api/muse'], ['GET', null]]) {
+    assert.equal(f.client.noteG2(method, path), false)
+  }
+  assert.equal((await f.ask()).status, 'done')
+})
+
+test('a down, busy or invalid non-target Muse is never queried and cannot veto notes', async () => {
+  for (const first of [muses[0], { url: 'invalid-first' }]) {
+    const f = fixture({ muses: [first, muses[1]], respond: c => {
+      assert.ok(c.url.startsWith('http://last.invalid/'), 'No request may touch the earlier Muse')
+      if (c.url.endsWith('/selftest')) return idle()
+      return c.method === 'POST' ? { id: 'target' } : { status: 'done', reply: 'Target-only note.' }
+    } })
+    assert.equal((await f.ask()).reply, 'Target-only note.')
+    assert.equal(posts(f).length, 1)
+    assert.equal(f.calls.length, 4)
+  }
+})
+
+test('holds starts only with target POST, including while its receipt is pending', async () => {
+  const receipt = deferred()
+  const f = fixture({ muses: [muses[0]], respond: c => {
+    if (c.url.endsWith('/selftest')) { assert.equal(f.client.holds(0), false); return idle() }
+    if (c.method === 'POST') { assert.equal(f.client.holds(0), true); return receipt.promise }
+    return { status: 'done', reply: 'Done.' }
+  } })
+  assert.equal(f.client.holds(0), false)
+  const result = f.ask(); await flush()
+  assert.equal(f.client.holds(0), true)
+  for (const index of [1, -1, '0', NaN]) assert.equal(f.client.holds(index), false)
+  receipt.resolve({ id: 'target' })
+  assert.equal((await result).status, 'done')
+  assert.equal(f.client.holds(0), false)
+})
+
+test('only the target index is held, and concurrent Listen busy does not clear it', async () => {
+  const reply = deferred()
+  const f = fixture({ respond: c => c.url.endsWith('/selftest') ? idle() : c.method === 'POST' ? { id: 'target' } : reply.promise })
+  const result = f.ask(); await flush()
+  assert.equal(f.client.holds(0), false)
+  assert.equal(f.client.holds(1), true)
+  assert.equal((await f.ask({ text: 'Concurrent snippet' })).status, 'busy')
+  assert.equal(f.client.holds(1), true)
+  reply.resolve({ status: 'done', reply: 'One note.' })
+  assert.equal((await result).status, 'done')
+  assert.equal(f.client.holds(1), false)
+})
+
+test('G2 activity during a posted job does not cancel it; terminal observer sees no hold', async () => {
+  let reads = 0
+  const terminalHolds = []
+  const f = fixture({ respond: c => c.url.endsWith('/selftest') ? idle() : c.method === 'POST' ? { id: 'target' }
+    : ++reads === 1 ? { status: 'waiting' } : { status: 'done', reply: 'Finished first.' } })
+  const result = f.ask({ onStatus: value => {
+    if (value.state === 'idle') terminalHolds.push(f.client.holds(1))
+  } })
+  await flush(); assert.equal(f.client.holds(1), true)
+  f.client.noteG2('POST', '/api/muse/ask')
+  assert.equal(f.client.holds(1), true)
+  await f.tick(10)
+  assert.equal((await result).reply, 'Finished first.')
+  assert.deepEqual(terminalHolds, [false])
+  assert.equal(posts(f).length, 1)
+  assert.equal((await f.ask()).status, 'busy')
+})
+
+test('holds clears on terminal errors, lost jobs, malformed POST and cancellation', async () => {
+  for (const terminal of [{ status: 'error' }, { status: 'timeout' }, null, {}, { status: 'forgotten' }]) {
+    const reply = deferred()
+    const f = fixture({ respond: c => c.url.endsWith('/selftest') ? idle() : c.method === 'POST' ? { id: 'target' } : reply.promise })
+    const result = f.ask(); await flush()
+    assert.equal(f.client.holds(1), true)
+    reply.resolve(terminal); assert.notEqual((await result).status, 'done')
+    assert.equal(f.client.holds(1), false)
+  }
+  for (const cancel of [false, true]) {
+    const receipt = deferred(), controller = new AbortController()
+    const f = fixture({ respond: c => c.url.endsWith('/selftest') ? idle() : receipt.promise })
+    const result = f.ask({ signal: controller.signal }); await flush()
+    assert.equal(f.client.holds(1), true)
+    if (cancel) {
+      controller.abort()
+      assert.equal(f.client.holds(1), false, 'Abort releases hold synchronously before promise settlement')
+    } else receipt.resolve({ uncertain: true })
+    assert.notEqual((await result).status, 'done')
+    assert.equal(f.client.holds(1), false)
+  }
+})
+
+test('terminal POST receipts release holds without any reply poll', async () => {
+  for (const status of ['done', 'error', 'timeout']) {
+    const receipt = deferred(), observed = []
+    const f = fixture({ respond: c => c.url.endsWith('/selftest') ? idle() : receipt.promise })
+    const result = f.ask({ onStatus: value => {
+      if (value.state !== 'thinking') observed.push(f.client.holds(1))
+    } })
+    await flush()
+    assert.equal(f.client.holds(1), true)
+    receipt.resolve({ id: 'terminal', status, reply: 'Already finished.' })
+    assert.equal((await result).status, status)
+    assert.equal(f.client.holds(1), false)
+    assert.deepEqual(observed, [false])
+    assert.equal(f.calls.filter(c => c.url.includes('/reply/')).length, 0)
+    assert.equal(posts(f).length, 1)
+  }
+})
+
+test('holds cannot extend past the whole-attempt deadline even before timer delivery', async () => {
+  const f = fixture({ requestMs: 200, respond: c => c.url.endsWith('/selftest') ? idle() : c.method === 'POST' ? { id: 'target' } : new Promise(() => {}) })
+  const result = f.ask(); await flush()
+  assert.equal(f.client.holds(1), true)
+  f.elapse(100)
+  assert.equal(f.client.holds(1), false)
+  f.elapse(-1)
+  assert.equal(f.client.holds(1), false, 'Expired hold cannot reactivate on clock rollback')
+  await f.tick(1)
+  assert.equal((await result).status, 'timeout')
   assert.equal(f.timers.size, 0)
 })
