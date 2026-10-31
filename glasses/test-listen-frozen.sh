@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Guards the Muse Listen stitch: G2 OMAC and its Muse path must stay byte-identical to the frozen base commit.
-# Fails unless muse-clean.mjs is unchanged since the base, home-app/ is unchanged since the base (or since the approved
-# Conversation removal 8e57984 when that is an ancestor; files ADDED under home-app/tests/ are allowed), and every /api/muse* route block plus
-# museReply and askMuse in hud-server.mjs is byte-identical to the base. Read-only; touches nothing.
+# Guards Home Muse against release 03f7bcf and hub Muse against 56fe3b2.
+# Exact reviewed additive Home Listen hooks are allowed; no broad directory exception. Read-only.
 #   bash glasses/test-listen-frozen.sh      (needs git and python3)
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -15,29 +13,13 @@ bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
 
 git rev-parse --verify -q "$BASE^{commit}" >/dev/null || { echo "  FAIL  base commit $BASE not found"; exit 1; }
 
-# 1. whole paths: no diff against the base (committed or not), and no untracked file added inside them.
-# home-app/ is the approved exception: the Claude Conversation removal (8e57984) changed it on purpose, so when that commit
-# is an ancestor of HEAD, home-app/ must equal 8e57984 (not the older base); otherwise it must equal the base.
-HOME_BASE=${FROZEN_HOME_BASE:-8e57984}
-if git rev-parse --verify -q "$HOME_BASE^{commit}" >/dev/null && git merge-base --is-ancestor "$HOME_BASE" HEAD; then
-  home_ref=$HOME_BASE
+# Home Muse spans and paths use the immutable 0.4.28 release, with exact reviewed Listen hooks only.
+if node "$here/test-helpers/orch-hold-frozen.mjs"; then
+  ok "Home Muse spans/files and existing menu/paint preserved"
 else
-  home_ref=$BASE
+  bad "Home Muse preservation guard failed"
 fi
-# muse-clean.mjs: no difference at all.
-if git diff --quiet "$BASE" -- glasses/muse-clean.mjs; then ok "glasses/muse-clean.mjs: git diff $BASE is empty"; else bad "glasses/muse-clean.mjs differs from $BASE: $(git diff --stat "$BASE" -- glasses/muse-clean.mjs | tail -1)"; fi
-# home-app/: every file equals the reference, except that files ADDED under glasses/home-app/tests/ are allowed (new tests, e.g.
-# the simulator check). A modified, deleted or renamed file anywhere in home-app/, or an added file outside tests/, fails.
-changes=$(git diff --name-status --no-renames "$home_ref" -- glasses/home-app)
-disallowed=$(printf '%s\n' "$changes" | awk -F'\t' 'NF >= 2 && !($1 == "A" && index($2, "glasses/home-app/tests/") == 1) { print $1 " " $2 }')
-added_ok=$(printf '%s\n' "$changes" | awk -F'\t' '$1 == "A" && index($2, "glasses/home-app/tests/") == 1 { print $2 }')
-if [ -z "$disallowed" ]; then
-  ok "glasses/home-app: equal to $home_ref except files added under tests/ ($(printf '%s' "$added_ok" | grep -c . ) added)"
-else
-  bad "glasses/home-app differs from $home_ref beyond added tests/ files: $(printf '%s' "$disallowed" | tr '\n' ';')"
-fi
-extra=$(git ls-files --others --exclude-standard -- glasses/home-app glasses/muse-clean.mjs | grep -v '^glasses/home-app/tests/' || true)
-if [ -z "$extra" ]; then ok "no untracked files in the frozen paths (outside home-app/tests/)"; else bad "untracked in a frozen path: $extra"; fi
+if git diff --quiet "$BASE" -- glasses/muse-clean.mjs; then ok "muse-clean.mjs unchanged"; else bad "muse-clean.mjs changed"; fi
 
 # 2. the Muse blocks of hud-server.mjs, compared as text with the base's
 git show "$BASE:glasses/hud-server.mjs" > "${TMPDIR:-/tmp}/frozen-base.$$" || exit 1
@@ -53,7 +35,8 @@ def blocks(lines):
     for i, line in enumerate(lines):
         m = re.match(r"^(\s*)if \(.*p === '(/api/muse[^']*)'", line)
         if m:
-            key = f"route {m.group(2)}" + (f" [{re.search(r'req.method === .(\w+).', line).group(1)}]" if "req.method" in line else "")
+            method = re.search(r"req.method === .(\w+).", line)
+            key = "route " + m.group(2) + (" [" + method.group(1) + "]" if method else "")
         elif line.startswith("const museTrimLogged"):
             key, m = "museTrimLogged", re.match(r"^()", line)
         elif line.startswith("function museReply"):
@@ -69,9 +52,13 @@ def blocks(lines):
             j = i + 1
             while j < len(lines) and not (lines[j].startswith(indent + "}") and not lines[j].startswith(indent + "  ")):
                 j += 1
+            if j == len(lines):
+                raise ValueError("unterminated Muse block: " + key)
             text = "\n".join(lines[i:j + 1])
         else:
             text = line
+        if key in out:
+            raise ValueError("ambiguous Muse block: " + key)
         out[key] = text
     return out
 

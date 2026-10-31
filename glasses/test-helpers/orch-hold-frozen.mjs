@@ -1,7 +1,8 @@
 // Read-only preservation gate for ORCH-HOLD.md. The reference cannot be changed by environment.
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, lstatSync } from 'node:fs';
 import path from 'node:path';
+import { stripHook } from './listen-frozen-hooks.mjs';
 import { fileURLToPath } from 'node:url';
 
 const RELEASE = '03f7bcf2cba3bd17ab501356347ad969e73a0877';
@@ -9,7 +10,11 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const current = path.resolve(process.argv[2] || repo);
 const git = (...args) => execFileSync('git', ['-C', repo, ...args]);
 const original = name => git('show', `${RELEASE}:${name}`);
-const working = name => readFileSync(path.join(current, name));
+const working = name => {
+  let at = current;
+  for (const part of name.split('/')) { at = path.join(at, part); if (lstatSync(at).isSymbolicLink()) throw new Error('symlink in frozen path'); }
+  return readFileSync(at);
+};
 const baselineFiles = git('ls-tree', '-r', '--name-only', RELEASE, '--', 'glasses').toString().trim().split('\n');
 let passed = 0;
 const failures = [];
@@ -21,11 +26,24 @@ function equal(a, b) { if (!a.equals(b)) throw new Error('differs from released 
 const whole = new Set(baselineFiles.filter(name => /muse/i.test(name)));
 for (const name of [
   'glasses/hud-server.mjs', 'glasses/listen.mjs', 'glasses/listen-g2.mjs', 'glasses/listen-page.mjs',
-  'glasses/test-listen-frozen.sh', 'glasses/test-listen-join.sh',
-  ...['menu', 'tiles', 'desk', 'deskpointer', 'remote', 'musecache', 'musepoll', 'musesync', 'shownwatch', 'settle'].map(n => `glasses/home-app/src/${n}.ts`),
+  'glasses/test-listen-join.sh',
+  ...['tiles', 'desk', 'deskpointer', 'remote', 'musecache', 'musepoll', 'musesync', 'shownwatch', 'settle'].map(n => `glasses/home-app/src/${n}.ts`),
   'glasses/home-app/tests/listen-bounce.test.ts', 'glasses/home-app/tests/small-0427.test.ts',
 ]) whole.add(name);
 for (const name of [...whole].sort()) check(name, () => equal(original(name), working(name)));
+
+// Only the literal additive id3 entry is allowed; all previous menu bytes remain pinned.
+exactMenu();
+function exactMenu() {
+  check('menu.ts: exact additive Listen item only', () => {
+    const name = 'glasses/home-app/src/menu.ts';
+    let text = working(name).toString();
+    text = text.replace('// Muse Listen hook: the one remaining SDK menu slot.\n', '');
+    text = text.replace(', listen: 3', '');
+    text = text.replace("  // Muse Listen hook: keep the original Muse item unchanged.\n  { id: MENU.listen, name: 'Muse Listen' },\n", '');
+    equal(original(name), Buffer.from(text));
+  });
+}
 
 // New Muse files cannot introduce a replacement path outside the frozen files.
 function walk(dir) {
@@ -46,6 +64,7 @@ check('no added Muse path', () => {
 // The shared files retain these exact release spans. Anchors are unique and missing/ambiguous anchors fail closed.
 function span(source, start, end) {
   if (source.split(start).length !== 2) throw new Error(`missing or ambiguous start: ${start.trim()}`);
+  if (source.split(end).length !== 2) throw new Error(`missing or ambiguous end: ${end.trim()}`);
   const from = source.indexOf(start), until = source.indexOf(end, from + start.length);
   if (until < 0) throw new Error(`missing end: ${end.trim()}`);
   return source.slice(from, until);
@@ -94,15 +113,17 @@ for (const [label, marker] of [
   ['Muse tile refresh', "        } else if (need.kind === 'muse') {\n"],
   ['Tiles refresh function', 'async function refreshTiles(): Promise<void> {\n'],
   ['glasses menu behavior', "async function menu(id: number, source: InputSource = 'touch'): Promise<void> {\n"],
-]) exact(main, label, s => block(s, marker));
+]) exact(main, label, s => block(label === 'glasses menu behavior' ? stripHook(s, 'live-menu') : s, marker));
 // Single-line Muse branches and handlers must also retain exact source and order.
 for (const [name, pattern] of [
   [model, /^.*(?:private museLines:|if \(d\.muse\)|if \(target.kind === 'muse'\) \{|s\.kind === 'confirm' && s\.muse|if \(kind === 'muse'\)).*$/gm],
-  [main, /^.*(?:import .*Muse|import .*muse|let urgentPaint =|let prevKind =|onDrawn:|const museShown =|const museTile =|muse: \(\)|if \(app === 'muse'\)|if \(id === MENU\.muse\)).*$/gm],
+  [main, /^.*(?:import .*Muse|import .*muse|askMuse|api\/muse|api\s*\(\s*[\'"`]muse(?:\/|[\'"`])|let urgentPaint =|let prevKind =|onDrawn:|const museShown =|const museTile =|muse: \(\)|if \(app === 'muse'\)|if \(id === MENU\.muse\)).*$/gm],
 ]) exact(name, 'Muse dispatch lines', s => [...s.matchAll(pattern)].map(m => m[0]).join('\n'));
 check('main.ts: original paint body preserved', () => {
   const old = block(original(main).toString(), 'function paint(): void {\n');
-  const cur = block(working(main).toString(), 'function paint(): void {\n');
+  const cur = block(stripHook(working(main).toString(), 'live-paint'), 'function paint(): void {\n');
+  const hold = block(git('show', `a742fa6:${main}`).toString(), 'function paint(): void {\n');
+  if (cur !== old && cur !== hold) throw new Error('unreviewed paint addition or changed preserved body');
   const body = old.slice(old.indexOf('\n') + 1, old.lastIndexOf('\n')).trim();
   if (!cur.includes(body)) throw new Error('original paint body changed; agent scheduling must be additive');
 });

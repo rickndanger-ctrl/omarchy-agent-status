@@ -20,6 +20,8 @@ import {
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk';
 import type { TilesFrame } from './tiles';
+// Muse Listen hook: preserve Listen's fixed-font, grapheme and UTF8 budgets.
+import { safeText } from './listen/render';
 import type { Input } from './model';
 import { SettleWaiters, Serial, type SettleResult } from './settle';
 
@@ -296,7 +298,36 @@ export class Glasses {
 
   /** Glasses microphone on/off. Audio arrives through onAudio as 16 kHz s16le mono PCM. */
   microphone(on: boolean): Promise<boolean> {
-    return this.micChain.run(() => this.setMicrophone(on));
+    // Muse Listen hook: every owner sees pending/uncertain microphone changes before acquiring it.
+    this.micPending++;
+    return this.micChain.run(async () => {
+      const ok = await this.setMicrophone(on);
+      this.micUnreleased = on || !ok;
+      return ok;
+    }).finally(() => { this.micPending--; });
+  }
+
+  // Muse Listen hook: refusal stays closed until an off is positively acknowledged.
+  private micPending = 0;
+  private micUnreleased = false;
+  private rawMicPending = 0;
+  microphoneBusy(): boolean { return this.micPending > 0 || this.rawMicPending > 0 || this.micUnreleased; }
+
+  // Muse Listen hook: keep the shared serial fence until the actual SDK write settles; session owns its deadline.
+  listenMicrophone(on: boolean): Promise<boolean> {
+    return this.micChain.run(() => this.rawMicrophone(on));
+  }
+
+  // Muse Listen hook: pending raw legacy writes remain visible even after their bounded wrapper times out.
+  private async rawMicrophone(on: boolean): Promise<boolean> {
+    if (!this.sdk) return false;
+    this.rawMicPending++;
+    this.micUnreleased = true;
+    try {
+      const ok = await (on ? this.sdk.audioControl(true, AudioInputSource.Glasses) : this.sdk.audioControl(false));
+      this.micUnreleased = on || !ok;
+      return ok;
+    } finally { this.rawMicPending--; }
   }
 
   // Known limit: the SDK's audioControl call cannot be cancelled. If one times out (bounded() below), the SDK may still
@@ -304,7 +335,8 @@ export class Glasses {
   private async setMicrophone(on: boolean): Promise<boolean> {
     if (!this.sdk) return false;
     try {
-      return await bounded(on ? this.sdk.audioControl(true, AudioInputSource.Glasses) : this.sdk.audioControl(false), 'Microphone');
+      // Muse Listen hook: retain legacy deadline behavior while observing its raw outstanding SDK write.
+      return await bounded(this.rawMicrophone(on), 'Microphone');
     } catch (error) {
       this.options.onStatus(`Microphone failed: ${reason(error)}`);
       return false;
@@ -326,6 +358,13 @@ export class Glasses {
   /** Tiles mode. `layoutKey` names the page; changing it or the focus rebuilds the page, a text change only updates that tile. */
   setTiles(layoutKey: string, focus: TilesFrame['focus'], left: string, right: string): void {
     this.want = { kind: 'tiles', key: `${layoutKey}/${focus}`, focus, left: glassesSafe(left).slice(0, 400) || ' ', right: glassesSafe(right).slice(0, 400) || ' ' };
+    this.unblockFor(this.want);
+    this.scheduleRender();
+  }
+
+  // Muse Listen hook: reuse serialized, changed-box transport with the Listen950-character budget.
+  setListenFrame(key: string, left: string, right: string): void {
+    this.want = { kind: 'tiles', key: `listen/${key}/page`, focus: 'page', left: safeText(left), right: safeText(right) };
     this.unblockFor(this.want);
     this.scheduleRender();
   }

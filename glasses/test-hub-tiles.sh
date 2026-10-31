@@ -116,9 +116,9 @@ req() { # method base path [json-body]
   local auth=(-H "Authorization: Bearer $TOKEN")
   [ "${SEND_TOKEN:-1}" = 0 ] && auth=()
   if [ -n "$data" ]; then
-    CODE=$(curl -s -o "$work/out" -w '%{http_code}' -X "$m" "${auth[@]}" -H 'Content-Type: application/json' -d "$data" "$base$path")
+    CODE=$(curl -s -o "$work/out" -w '%{http_code}' -X "$m" ${auth[@]+"${auth[@]}"} -H 'Content-Type: application/json' -d "$data" "$base$path")
   else
-    CODE=$(curl -s -o "$work/out" -w '%{http_code}' -X "$m" "${auth[@]}" "$base$path")
+    CODE=$(curl -s -o "$work/out" -w '%{http_code}' -X "$m" ${auth[@]+"${auth[@]}"} "$base$path")
   fi
   OUT=$(cat "$work/out")
 }

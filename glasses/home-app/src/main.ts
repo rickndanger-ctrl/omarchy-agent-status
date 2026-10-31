@@ -1,4 +1,6 @@
 import './style.css';
+// Muse Listen hook: the controller owns only the new live screen.
+import { HomeListen } from './listen/home';
 import { Glasses, DEFAULT_OUTLINE } from './glasses';
 import { ShownWatch } from './shownwatch';
 import { applyMuseLatest } from './musesync';
@@ -91,6 +93,8 @@ function abandonAgentVoice(): void {
 }
 
 function visibleAgentHoldToken(): unknown | null {
+  // Muse Listen hook: scope a physical hold to this live-screen visit.
+  if (showingListen()) return listenHoldToken;
   return foreground && !blank && !showingTiles() && !showingDesk() ? model.agentHoldToken() : null;
 }
 let status = 'Starting…';
@@ -101,7 +105,11 @@ const glasses = new Glasses({
   onLongPress: () => { if (visibleAgentHoldToken() !== null) inputQueue.pushHold(); },
   onMenu: id => inputQueue.pushMenu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
-  onForeground: on => { foreground = on; if (!on) { model.abandonTalk(); const cancel = agentVoice.run({ kind: 'cancelMic' }); if (cancel) void cancel; if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); syncAgentConfirmExpiry(); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); } },
+  onForeground: on => {
+    // Muse Listen hook: menu/background/exit relinquishes audio without an automatic restart.
+    if (!on) { foreground = false; void homeListen.leave(); }
+    foreground = on; if (!on) { model.abandonTalk(); const cancel = agentVoice.run({ kind: 'cancelMic' }); if (cancel) void cancel; if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); syncAgentConfirmExpiry(); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); }
+  },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
     if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
@@ -115,12 +123,27 @@ const glasses = new Glasses({
   onDrawn: text => { const ms = museShown.drawn(text, Date.now()); if (ms !== null) diag('muse.shown', ms); },
   onSlowRender: ms => diag('render.slow', `${ms} ms on ${model.screenKind}`),
   onAudio: pcm => {
+    // Muse Listen hook: claimed Listen audio never reaches the legacy recording buffer.
+    if (homeListen.onAudio(pcm)) return;
     if (!recording) return;
     if (!recording.length) diag('mic.first-audio', pcm.length);
     if (recording.length < 4000) recording.push(pcm);
   },
 }, GLASSES_MENU);
 glasses.setBrightness(model.brightness);
+
+// Muse Listen hook: share current Home credentials only when beginning a pinned-hub session.
+let voiceJobs = 0;
+let listenVisible = false;
+let listenHoldToken: object = {};
+const showingListen = () => foreground && !blank && !showingTiles() && !showingDesk() && model.screenKind === 'museListen';
+const homeListen = new HomeListen({
+  hub: () => ({ base, token }),
+  mic: { on: () => glasses.listenMicrophone(true), off: () => glasses.listenMicrophone(false) },
+  busy: () => recording !== null || voiceJobs > 0 || model.micWanted() || glasses.microphoneBusy(),
+  changed: () => paint(), leave: () => { model.goHome(); paint(); },
+  diag: name => diag(name, ''),
+});
 
 $('app').innerHTML = `
 <main>
@@ -571,6 +594,23 @@ const settingsHost = {
   paint: () => paint(),
 };
 function paint(): void {
+  // Muse Listen hook BEGIN live-paint
+  const live = showingListen();
+  if (live && !listenVisible) {
+    listenVisible = true; listenHoldToken = {};
+    if (recording !== null) void run({ kind: 'cancelMic' });
+    homeListen.enter();
+  }
+  if (!live && listenVisible) { listenVisible = false; void homeListen.leave(); }
+  if (live) {
+    const frame = homeListen.frame();
+    glasses.setListenFrame(frame.key, frame.left, frame.right);
+    $('glass').textContent = `${frame.left}\n\n${frame.right}`;
+    $('status').textContent = status;
+    syncAgentConfirmExpiry();
+    return;
+  }
+  // Muse Listen hook END live-paint
   if (blank || showingTiles() || showingDesk()) abandonAgentVoice();
   // The microphone is open only while a voice reply is on screen and in front: leaving the page (menu, Home, Desk) closes it.
   if (recording !== null && !(model.micWanted() && foreground && !showingDesk())) void run({ kind: 'cancelMic' });
@@ -682,6 +722,14 @@ const agentVoice = new AgentVoice({
 });
 const FLASH = { allow: 'Allowed', deny: 'Denied', desk: 'Left for the desk' };
 async function run(action: Action): Promise<void> {
+  // Muse Listen hook BEGIN voice-fence
+  const micAction = ['startMic', 'stopMic', 'cancelMic'].includes(action.kind);
+  if (micAction && homeListen.ownsMic) {
+    model.abandonListen(); model.abandonTalk();
+    model.showFlash('Listen microphone is busy', Date.now()); paint(); return;
+  }
+  if (micAction) voiceJobs++;
+  // Muse Listen hook END voice-fence
   try {
     const agentJob = agentVoice.run(action);
     if (agentJob) { await agentJob; paint(); return; }
@@ -839,6 +887,9 @@ async function run(action: Action): Promise<void> {
     }
   } catch (error) {
     model.showFlash(error instanceof Error ? error.message : 'Failed', Date.now());
+  } finally {
+    // Muse Listen hook: pending legacy start/stop/transcription also blocks live-session acquisition.
+    if (micAction) voiceJobs--;
   }
   paint();
 }
@@ -872,9 +923,11 @@ function screenGeneration(): number {
 }
 /** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
 const inputQueue = new InputQueue({
-  apply: applyInput,
+  // Muse Listen hook: deliberate remote select and physical touch retain their distinct privacy rules.
+  apply: (input, source) => showingListen() ? homeListen.input(input, source) : applyInput(input, source),
   holdToken: visibleAgentHoldToken,
-  hold: token => { if (visibleAgentHoldToken() !== null) return applyHold(token); },
+  // Muse Listen hook: the existing queued hold path rejects stale live-screen visits.
+  hold: token => { if (showingListen()) { if (token === listenHoldToken) return homeListen.hold(); return; } if (visibleAgentHoldToken() !== null) return applyHold(token); },
   menu: (id, source) => menu(id, source),
   foreground: () => foreground,
   generation: screenGeneration,
@@ -887,11 +940,26 @@ const inputQueue = new InputQueue({
   trace: (name, detail) => diag(name, detail),
 });
 function handle(input: Input, source: InputSource = 'touch'): void {
+  // Muse Listen hook BEGIN arrival-navigation
+  // Selection only: bypass frame-settle queue so double-down uses local event arrival times.
+  if (showingListen() && (input === 'up' || input === 'down')) {
+    void homeListen.input(input, source, performance.now());
+    return;
+  }
+  // Muse Listen hook END arrival-navigation
   if (showingDesk()) deskArrivals.push(Date.now());
   inputQueue.push(input, source);
 }
 
 async function menu(id: number, source: InputSource = 'touch'): Promise<void> {
+  // Muse Listen hook BEGIN live-menu
+  if (model.screenKind === 'museListen') { await homeListen.leave(); listenVisible = false; }
+  if (id === MENU.listen) {
+    if (blank) { wake(); return; }
+    leaveDesk(); tilesActive = false; fromTiles = false;
+    model.goListen(); paint(); return;
+  }
+  // Muse Listen hook END live-menu
   diag('menu', id);
   if (blank) { wake(); return; } // the wake press is not passed on
   if (id === INTERNAL_MENU.settings) {
@@ -950,6 +1018,8 @@ if (tilesOn) { tiles.resetPage(); enterTiles(true); } else paint();
 void glasses.connect().then(() => shareLocation());
 setInterval(() => void shareLocation(), 30 * 60_000);
 remote.sync();
+// Muse Listen hook: advance the live timer/chunks only while its screen is visible.
+setInterval(() => { if (showingListen()) void homeListen.tick(); }, 1000);
 void poll();
 setInterval(() => { if (foreground) void poll(); }, POLL_MS);
 // The open agent's conversation refreshes faster than the rest, so replies show up quickly.
