@@ -1,253 +1,193 @@
-// One in-flight Muse question for G2 and Listen. No network/config/filesystem I/O
-// lives here: ask(text,start,{signal:preSendSignal}) and read(actualIndexJobId)
-// are supplied by the hub. The signal may stop only work BEFORE POST; the hub
-// must not use it to abort a POST that may already have submitted a question.
-// ask returns {id,muse}, null ONLY if no POST was attempted, or {uncertain:true}.
-// A rejected/malformed admission is also uncertain; it must never unlock Muse.
-import { randomBytes } from 'node:crypto'
-import { setTimeout as delay } from 'node:timers/promises'
+// Listen-only, best-effort Muse adapter. G2 admission/reply paths never pass
+// through this module. Fresh health is a veto, not an atomic cross-client lock.
 import { sanitizeMuseReply } from './muse-clean.mjs'
 
-const ACTUAL_ID = /^\d+-\w{1,40}$/
-const VIRTUAL_JOB = /^q\w{1,39}$/
-const TERMINAL = new Set(['done', 'error', 'timeout'])
-const RUNNING = new Set(['sending', 'running', 'queued', 'pending', 'thinking'])
-const REASON = Object.freeze({
-  invalid: 'Muse request is invalid', full: 'Muse queue is full',
-  unavailable: 'No Muse is ready right now', uncertain: 'Muse admission could not be confirmed',
-  reconcile: 'Muse is unavailable until the previous question is checked',
-  read: 'Muse reply is unavailable', error: 'Muse request failed',
-  timeout: 'Muse took too long', cancelled: 'Muse request cancelled',
+const RUNNING = new Set(['queued', 'sending', 'waiting', 'running', 'pending', 'thinking'])
+const REASONS = Object.freeze({
+  busy: 'Muse is busy', unavailable: 'No Muse is ready right now',
+  cancelled: 'Muse request cancelled', timeout: 'Muse took too long',
+  error: 'Muse request failed', invalid: 'Muse request is invalid',
 })
-const deferred = () => {
-  let complete, settled = false
-  const promise = new Promise(resolve => { complete = resolve })
-  return { promise, resolve(value) { if (!settled) { settled = true; complete(value) } } }
+class Failure extends Error {
+  constructor(status, reason = REASONS[status]) { super(reason); this.status = status }
 }
-const positive = (value, fallback) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
-const safely = (fn, value) => { try { fn?.(value) } catch { /* Observers never own the queue. */ } }
+const positive = (value, fallback, cap) => typeof value === 'number' && Number.isFinite(value) && value > 0
+  ? Math.min(value, cap) : fallback
+const observe = (fn, value) => { try { fn?.(value) } catch { /* Observers do not own admission. */ } }
+function relay(value) {
+  try {
+    const url = new URL(value?.url)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null
+    return { url: url.href.replace(/\/$/, ''), token: typeof value.token === 'string' ? value.token : '' }
+  } catch { return null }
+}
 
-/** Handle: {id:Promise<{id,muse}|null>, result:Promise<{status,reply,reason}>, cancel(), status()}.
- * G2 uses id through createMuseBridge; Listen consumes result and onStatus.
- * onStatus receives {state:busy|thinking|idle|unavailable,reason?}. A consumer
- * timeout or active cancellation suppresses delivery, never releases the slot.
+/**
+ * ask({text,signal,onStatus}) -> Promise<{status,reply,reason}>.
+ * status: done|busy|unavailable|cancelled|timeout|error. There is no queue,
+ * retry, fallback, G2 mutation, or persistent uncertain-admission quarantine.
+ * request(url,token,{method,body,signal,timeout}) may supply parsed JSON for
+ * fixtures; otherwise bounded streaming fetch is used independently of G2.
+ * timeoutMs is the HUD config alias for the whole-attempt attemptMs limit.
  */
-export function createMuseQueue({ ask, read, now = () => Date.now(),
-  sleep = (ms, { signal } = {}) => delay(ms, undefined, { signal, ref: false }),
-  pollMs = 700, timeoutMs = 150_000, maxQueued = 64, onChange } = {}) {
-  if (typeof ask !== 'function' || typeof read !== 'function') throw new TypeError('Muse callbacks are required')
-  pollMs = positive(pollMs, 700)
-  timeoutMs = positive(timeoutMs, 150_000)
-  maxQueued = Number.isInteger(maxQueued) && maxQueued > 0 ? maxQueued : 64
-  const pending = { g2: [], listen: [] }
-  let active = null, scheduled = false
+export function createListenMuse({ muses = [], isG2Busy = () => true, request,
+  fetch: fetchImpl = globalThis.fetch, pollMs = 700, requestMs = 6000,
+  attemptMs, timeoutMs, maxBodyBytes = 65536, now = () => Date.now(),
+  setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  const relays = Array.isArray(muses) ? muses.map(relay) : []
+  pollMs = positive(pollMs, 700, 6000)
+  requestMs = positive(requestMs, 6000, 30_000)
+  attemptMs = positive(attemptMs, positive(timeoutMs, 150_000, 150_000), 150_000)
+  maxBodyBytes = Math.floor(positive(maxBodyBytes, 65536, 65536))
+  let inFlight = false
 
-  function snapshot() {
-    return { active: active?.source ?? null,
-      queued: { g2: pending.g2.length, listen: pending.listen.length },
-      blocked: Boolean(active && (active.cancelled || active.finished || active.uncertain)) }
-  }
-  const changed = () => safely(onChange, snapshot())
-  function status(job, state, reason = '') {
-    if (job.finished) return
-    job.view = { state, ...(reason ? { reason } : {}) }
-    if (!job.cancelled && !job.finished) safely(job.onStatus, { ...job.view })
-  }
-  function complete(job, outcome, reply = '', reason = '') {
-    if (job.finished) return
-    status(job, outcome === 'done' || outcome === 'cancelled' ? 'idle' : 'unavailable', reason)
-    if (job.finished) return
-    job.finished = true
-    job.preSend.abort()
-    job.id.resolve(null)
-    job.result.resolve({ status: outcome, reply, reason })
-    job.deadlineStop.abort()
-    job.signal?.removeEventListener('abort', job.onAbort)
-  }
-  function quarantine(job) {
-    job.uncertain = true
-    job.unknownAdmission = true
-    complete(job, 'unavailable', '', REASON.uncertain)
-    for (const source of ['g2', 'listen']) {
-      for (const waiting of pending[source].splice(0)) complete(waiting, 'unavailable', '', REASON.reconcile)
-    }
-  }
-  async function pause(job, ms, controller) {
-    try { await sleep(ms, { signal: controller.signal }) } catch { /* Abort is local timer cleanup only. */ }
-  }
-  async function deadline(job) {
-    const end = now() + timeoutMs
-    while (active === job && !job.finished && !job.deadlineStop.signal.aborted) {
-      const left = end - now()
-      if (left <= 0) { complete(job, 'timeout', '', REASON.timeout); changed(); return }
-      await pause(job, left, job.deadlineStop)
-    }
-  }
-  function schedule() {
-    if (scheduled || active) return
-    scheduled = true
-    queueMicrotask(() => {
-      scheduled = false
-      if (active) return
-      const job = pending.g2.shift() ?? pending.listen.shift()
-      if (!job) return
-      active = job
-      job.started = true
-      status(job, 'thinking')
-      changed()
-      void run(job)
+  // Explicit timer races also bound transports that ignore AbortSignal.
+  function bounded(operation, ms, parent) {
+    return new Promise((resolve, reject) => {
+      const controller = new AbortController()
+      let settled = false, timer
+      const finish = (error, value) => {
+        if (settled) return
+        settled = true
+        clearTimer(timer)
+        parent.removeEventListener('abort', aborted)
+        controller.abort()
+        if (error) reject(error)
+        else resolve(value)
+      }
+      const aborted = () => finish(parent.reason instanceof Failure ? parent.reason : new Failure('cancelled'))
+      if (parent.aborted) { aborted(); return }
+      parent.addEventListener('abort', aborted, { once: true })
+      timer = setTimer(() => finish(new Failure('timeout')), ms)
+      // The handlers consume late results/rejections after deadline or cancel.
+      try { Promise.resolve(operation(controller.signal)).then(value => finish(null, value), error => finish(error)) }
+      catch (error) { finish(error) }
     })
   }
-  async function run(job) {
-    let confirmedFree = false
-    try {
-      if (job.cancelled || job.finished) { confirmedFree = true; return }
-      void deadline(job)
-      let receipt
-      if (job.cancelled || job.finished) { confirmedFree = true; return }
-      try { receipt = await ask(job.text, job.start, { signal: job.preSend.signal }) } catch {
-        quarantine(job)
-        return
-      }
-      if (receipt === null) {
-        confirmedFree = true
-        complete(job, 'unavailable', '', REASON.unavailable)
-        return
-      }
-      if (receipt?.uncertain || !receipt || typeof receipt.id !== 'string' || !ACTUAL_ID.test(receipt.id)
-          || typeof receipt.muse !== 'string') {
-        quarantine(job)
-        return
-      }
-      job.actual = receipt.id
-      if (!job.finished) job.id.resolve({ id: receipt.id, muse: receipt.muse })
-      while (active === job) {
-        let value
-        try { value = await read(job.actual) } catch { /* No raw relay error reaches a consumer. */ }
-        if (TERMINAL.has(value?.status)) {
-          confirmedFree = true
-          if (value.status === 'done' && typeof value.reply === 'string') {
-            const bounded = value.reply.slice(0, 64 * 1024)
-            complete(job, 'done', sanitizeMuseReply(bounded, { partial: bounded.length < value.reply.length }).text.trim().slice(0, 300))
-          } else if (value.status === 'timeout') complete(job, 'timeout', '', REASON.timeout)
-          else complete(job, 'error', '', REASON.error)
-          return
-        }
-        job.uncertain = !RUNNING.has(value?.status)
-        status(job, job.uncertain ? 'unavailable' : 'thinking', job.uncertain ? REASON.read : '')
-        changed()
-        await pause(job, pollMs, job.pollStop)
-      }
-    } catch {
-      // An unexpected local callback failure is not evidence that Muse is idle.
-      if (!job.actual) quarantine(job)
-      else { job.uncertain = true; complete(job, 'unavailable', '', REASON.uncertain) }
-    } finally {
-      if (confirmedFree && active === job) {
-        active = null
-        job.pollStop.abort()
-        job.deadlineStop.abort()
-        schedule()
-      }
-      changed()
-    }
-  }
-  function enqueue(text, { source = 'listen', start = 0, signal, onStatus } = {}) {
-    const job = { text, source, start, signal, onStatus, id: deferred(), result: deferred(),
-      view: { state: 'busy' }, cancelled: false, finished: false, started: false, uncertain: false,
-      deadlineStop: new AbortController(), pollStop: new AbortController(), preSend: new AbortController() }
-    function cancel() {
-      if (job.finished) return false
-      job.cancelled = true
-      job.preSend.abort()
-      if (!job.started) {
-        const index = pending[source]?.indexOf(job)
-        if (index >= 0) pending[source].splice(index, 1)
-      }
-      complete(job, 'cancelled', '', REASON.cancelled)
-      changed()
-      schedule()
-      return true
-    }
-    const handle = { id: job.id.promise, result: job.result.promise, cancel, status: () => ({ ...job.view }) }
-    job.onAbort = cancel
-    if (typeof text !== 'string' || !text.trim() || text.length > 16_000 || !['g2', 'listen'].includes(source)
-        || !Number.isInteger(start) || start < 0 || (signal && typeof signal.addEventListener !== 'function')) {
-      complete(job, 'error', '', REASON.invalid)
-    } else if (signal?.aborted) cancel()
-    else if (active?.unknownAdmission) complete(job, 'unavailable', '', REASON.reconcile)
-    else if (pending.g2.length + pending.listen.length >= maxQueued) complete(job, 'unavailable', '', REASON.full)
-    else {
-      signal?.addEventListener('abort', cancel, { once: true })
-      pending[source].push(job)
-      status(job, 'busy')
-      changed()
-      schedule()
-    }
-    return handle
-  }
-  return { enqueue, snapshot, status(source = 'listen') {
-    if (active) return active.source === source && !active.finished ? { ...active.view } : { state: 'busy' }
-    return { state: pending.g2.length + pending.listen.length ? 'busy' : 'idle' }
-  } }
-}
 
-/** Fast legacy G2 admission without changing existing /api/muse route bodies.
- * ask returns a virtual 0-q... receipt synchronously. At actual admission,
- * onAdmitted(virtualId,actualId) installs the hub's existing museMoved alias.
- * lookup intercepts ONLY owned virtual jobs on the exact configured relay0 URL.
- */
-export function createMuseBridge(queue, { relayUrl, onAdmitted, now = () => Date.now(),
-  idFactory = () => `q${randomBytes(12).toString('hex')}`, maxEntries = 256 } = {}) {
-  let base = null
-  if (typeof relayUrl === 'string' && relayUrl) {
+  async function fetchJson(url, token, init) {
+    if (typeof fetchImpl !== 'function') throw new Failure('unavailable')
+    const response = await fetchImpl(url, { ...init, redirect: 'error',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } })
+    const discard = () => { try { void response?.body?.cancel().catch(() => {}) } catch { /* Already closed. */ } }
+    if (response?.ok !== true || response.redirected) { discard(); throw new Failure('unavailable') }
+    const length = Number(response.headers?.get('content-length'))
+    if (length > maxBodyBytes) { discard(); throw new Failure('unavailable') }
+    const reader = response.body?.getReader()
+    if (!reader) throw new Failure('unavailable')
+    const chunks = []
+    let size = 0, complete = false
+    const cancel = () => { try { void reader.cancel().catch(() => {}) } catch { /* Stream may already be closed. */ } }
+    init.signal.addEventListener('abort', cancel, { once: true })
     try {
-      const parsed = new URL(relayUrl)
-      if (['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password && !parsed.search && !parsed.hash) {
-        base = relayUrl.replace(/\/$/, '')
+      if (init.signal.aborted) throw new Failure('cancelled')
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (!(value instanceof Uint8Array) || (size += value.byteLength) > maxBodyBytes) throw new Failure('unavailable')
+        chunks.push(value)
       }
-    } catch { /* Optional bad Muse configuration must not stop the existing HUD. */ }
-  }
-  maxEntries = Number.isInteger(maxEntries) && maxEntries > 0 ? maxEntries : 256
-  const entries = new Map()
-  function prune(makeSpace = false) {
-    for (const [id, entry] of entries) if (entry.finishedAt !== undefined && now() - entry.finishedAt >= 600_000) entries.delete(id)
-    if (makeSpace && entries.size >= maxEntries) for (const [id, entry] of entries) {
-      if (entry.aliased || entry.result) entries.delete(id)
-      if (entries.size < maxEntries) break
+      complete = true
+      const bytes = new Uint8Array(size)
+      let at = 0
+      for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.byteLength }
+      return JSON.parse(new TextDecoder().decode(bytes))
+    } finally {
+      init.signal.removeEventListener('abort', cancel)
+      if (!complete) cancel()
+      try { reader.releaseLock() } catch { /* Aborted pending read may still own its lock. */ }
     }
   }
-  return {
-    ask(text, start = 0) {
-      if (!base) return null
-      prune(true)
-      if (entries.size >= maxEntries) return null
-      let job
-      try { job = idFactory() } catch { return null }
-      if (typeof job !== 'string' || !VIRTUAL_JOB.test(job) || entries.has(job)) return null
-      const virtualId = `0-${job}`
-      const handle = queue.enqueue(text, { source: 'g2', start })
-      const entry = { question: typeof text === 'string' ? text.slice(0, 300) : '', handle, aliased: false, result: null }
-      entries.set(job, entry)
-      void handle.id.then(receipt => {
-        if (receipt && receipt.id !== virtualId && typeof onAdmitted === 'function') {
-          try { onAdmitted(virtualId, receipt.id); entry.aliased = true } catch { /* Keep a pending receipt if mapping failed. */ }
-        }
+  const transport = typeof request === 'function' ? request : fetchJson
+
+  async function ask({ text, signal, onStatus } = {}) {
+    const outcome = (status, reply = '', reason = status === 'done' ? '' : REASONS[status]) => {
+      observe(onStatus, { state: status === 'done' || status === 'cancelled' ? 'idle' : status === 'busy' ? 'busy' : 'unavailable', ...(reason ? { reason } : {}) })
+      return { status, reply, reason }
+    }
+    if (typeof text !== 'string' || !text.trim() || text.length > 16_000
+        || (signal && (typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function'))) {
+      return outcome('error', '', REASONS.invalid)
+    }
+    if (signal?.aborted) return outcome('cancelled')
+    if (inFlight) return outcome('busy')
+    if (!relays.length || relays.some(r => !r)) return outcome('unavailable')
+    inFlight = true
+    const controller = new AbortController(), end = now() + attemptMs
+    const aborted = () => controller.abort(new Failure('cancelled'))
+    signal?.addEventListener('abort', aborted, { once: true })
+    const deadline = setTimer(() => controller.abort(new Failure('timeout')), attemptMs)
+    function check() {
+      if (controller.signal.aborted) throw controller.signal.reason
+      if (now() >= end) throw new Failure('timeout')
+    }
+    function gate() {
+      check()
+      let busy = true
+      try { busy = isG2Busy() !== false } catch { /* Unknown gate is a veto. */ }
+      if (busy) throw new Failure('busy')
+    }
+    async function call(muse, path, method = 'GET', body) {
+      check()
+      const timeout = Math.min(requestMs, end - now())
+      const value = await bounded(s => transport(`${muse.url}${path}`, muse.token,
+        { method, ...(body === undefined ? {} : { body }), signal: s, timeout }), timeout, controller.signal)
+      check()
+      return value
+    }
+    async function health(muse) {
+      gate()
+      const value = await call(muse, '/selftest')
+      gate()
+      if (value?.busy === true || value?.composer === false) throw new Failure('busy')
+      if (value?.ok !== true || value?.composer !== true || value?.busy !== false) throw new Failure('unavailable')
+    }
+    async function pause(ms) {
+      check()
+      await new Promise((resolve, reject) => {
+        const done = () => { clearTimer(timer); controller.signal.removeEventListener('abort', cancel); resolve() }
+        const cancel = () => { clearTimer(timer); controller.signal.removeEventListener('abort', cancel); reject(controller.signal.reason) }
+        const timer = setTimer(done, Math.min(ms, end - now()))
+        controller.signal.addEventListener('abort', cancel, { once: true })
+        if (controller.signal.aborted) cancel()
       })
-      void handle.result.then(result => { entry.result = result; entry.finishedAt = now() })
-      return { id: virtualId, muse: 'queued' }
-    },
-    lookup(url) {
-      if (!base || typeof url !== 'string' || !url.startsWith(`${base}/reply/`)) return undefined
-      const job = url.slice(`${base}/reply/`.length)
-      if (!VIRTUAL_JOB.test(job)) return undefined
-      prune()
-      const entry = entries.get(job)
-      if (!entry) return undefined
-      const result = entry.result
-      return { status: result ? (result.status === 'done' ? 'done' : result.status === 'timeout' ? 'timeout' : 'error') : 'sending',
-        question: entry.question, reply: result?.status === 'done' ? result.reply : '',
-        error: result && result.status !== 'done' ? result.reason : '' }
-    },
+      check()
+    }
+    try {
+      gate()
+      observe(onStatus, { state: 'thinking' })
+      gate() // An observer may cancel synchronously before any request.
+      const target = relays.at(-1), others = relays.slice(0, -1)
+      // Direct G2 callers emit no UI diagnostics. Other relays must also be
+      // physically idle, including after the target's potentially slow probe.
+      for (const muse of others) await health(muse)
+      await health(target)
+      for (const muse of others) await health(muse)
+      await health(target)
+      gate()
+      // Exactly one attempt. A timeout/malformed receipt may have submitted;
+      // drop this snippet and never retry it on this or another relay.
+      const receipt = await call(target, '/ask', 'POST', JSON.stringify({ text }))
+      if (typeof receipt?.id !== 'string' || !/^\w{1,40}$/.test(receipt.id)) throw new Failure('unavailable')
+      for (;;) {
+        const value = await call(target, `/reply/${receipt.id}`)
+        if (value?.status === 'done' && typeof value.reply === 'string') {
+          const reply = sanitizeMuseReply(value.reply.slice(0, 65536)).text.trim().slice(0, 300)
+          return outcome('done', reply)
+        }
+        if (value?.status === 'error') throw new Failure('error')
+        if (value?.status === 'timeout') throw new Failure('timeout')
+        if (!RUNNING.has(value?.status)) throw new Failure('unavailable')
+        await pause(pollMs)
+      }
+    } catch (error) {
+      return outcome(error instanceof Failure ? error.status : 'unavailable')
+    } finally {
+      clearTimer(deadline)
+      signal?.removeEventListener('abort', aborted)
+      controller.abort()
+      inFlight = false
+    }
   }
+  return { ask }
 }

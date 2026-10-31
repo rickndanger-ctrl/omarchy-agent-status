@@ -70,6 +70,10 @@ class State:
         self.texts = {}
         self.asr_gates, self.asr_entered = {}, {}
         self.health_gates, self.health_entered = {}, {}
+        self.post_gates, self.post_entered = {}, {}
+        self.reply_gates, self.reply_entered = {}, {}
+        self.health_calls, self.reply_calls = [], []
+        self.ask_event, self.health_event, self.reply_event = threading.Event(), threading.Event(), threading.Event()
         self.redirect_hits = 0
         self.replies = ["Remember to confirm the deadline.\nStatus\nApprovals history\nAllowed once · 2h ago\n", "—", "A useful note " + "x" * 450]
 
@@ -80,13 +84,16 @@ class State:
     def complete(self, jid):
         with self.lock:
             self.jobs[jid]["ready"] = True
+            # Real Muse can finish independently of whether this client polls.
+            self.active.discard(jid)
 
     def completed(self, jid):
         with self.lock:
             return self.jobs.get(jid, {}).get("delivered", False)
 
     def release_all(self):
-        for event in list(self.asr_gates.values()) + list(self.health_gates.values()):
+        for event in (list(self.asr_gates.values()) + list(self.health_gates.values())
+                      + list(self.post_gates.values()) + list(self.reply_gates.values())):
             event.set()
         with self.lock:
             for job in self.jobs.values():
@@ -165,13 +172,21 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
                        "ready": not relay["manual"], "mode": relay["mode"], "delivered": False,
                        "accepted_t": time.monotonic()}
                 state.asks.append(job)
+                state.ask_event.set()
                 state.jobs[jid] = job
                 state.active.add(jid)
                 state.max_active = max(state.max_active, len(state.active))
+            if name in state.post_gates:
+                state.post_entered[name].set()
+                state.post_gates[name].wait(8)
             if relay["mode"] == "malformed":
                 return self.reply(200, {"accepted": True})
             if relay["mode"] == "failed-post":
                 return self.reply(500, {"error": RAW_ERROR})
+            if relay["mode"] == "forgotten":
+                with state.lock:
+                    state.jobs.pop(jid)
+                    state.active.discard(jid)
             return self.reply(200, {"id": jid})
         state.unexpected.append(self.path)
         self.reply(404, {"error": "fixture route unavailable"})
@@ -189,6 +204,8 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
                 return
             relay = state.relays[parts[0]]
             if len(parts) == 2 and parts[1] == "selftest":
+                state.health_calls.append(parts[0])
+                state.health_event.set()
                 if parts[0] in state.health_gates:
                     state.health_entered[parts[0]].set()
                     state.health_gates[parts[0]].wait(8)
@@ -196,10 +213,16 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
                     return self.reply(500, {"error": RAW_ERROR})
                 with state.lock:
                     active_here = any(state.jobs[jid]["relay"] == parts[0] for jid in state.active)
-                return self.reply(200, {"ok": True, "composer": relay["health"] == "ready" and not active_here})
+                health = {"ok": True, "composer": relay["health"] == "ready" and not active_here, "busy": active_here}
+                return self.reply(200, relay.get("health_fields", health))
             if len(parts) == 2 and parts[1] == "latest":
                 return self.reply(200, {"question": "Legacy fixture question", "reply": self.server.polluted})
             if len(parts) == 3 and parts[1] == "reply":
+                state.reply_calls.append(parts[2])
+                state.reply_event.set()
+                if parts[0] in state.reply_gates:
+                    state.reply_entered[parts[0]].set()
+                    state.reply_gates[parts[0]].wait(8)
                 with state.lock:
                     job = state.jobs.get(parts[2])
                     if not job:
@@ -210,7 +233,7 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
                         status = "error" if job["mode"] == "command-error" else "done"
                         error = "Command failed: fixture composer was not ready" if status == "error" else ""
                         return self.reply(200, {"status": status, "question": job["text"], "reply": job["reply"], "error": error})
-                    return self.reply(200, {"status": "running", "question": job["text"], "reply": "", "error": ""})
+                    return self.reply(200, {"status": "waiting", "question": job["text"], "reply": "", "error": ""})
         if self.path == "/local/v1/models":
             return self.reply(200, {"data": []})
         if self.path == "/studio":
@@ -221,7 +244,11 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
 
 class Fixture:
     def __init__(self, hub_script=None, **listen):
-        self.options = dict(snippetMs=100, minWords=25, idleMs=30000, pollMs=20, timeoutMs=5000)
+        self.options = dict(snippetMs=100, minWords=25, idleMs=30000, pollMs=20, requestMs=250, timeoutMs=1500)
+        # The public hub config keeps the original timeoutMs knob. The adapter
+        # calls the same whole-attempt limit attemptMs.
+        if "attemptMs" in listen:
+            listen["timeoutMs"] = listen.pop("attemptMs")
         self.options.update(listen)
         self.process = None
         self.state = State()
@@ -361,6 +388,20 @@ class Fixture:
 
 
 class GuardTests(unittest.TestCase):
+    def test_g2_function_and_muse_routes_match_selected_baseline_exactly(self):
+        with tempfile.TemporaryDirectory(prefix="listen-baseline-") as temp:
+            baseline = subprocess.run(["git", "-C", str(HERE.parent), "show", "56fe3b2:glasses/hud-server.mjs"],
+                                      env=clean_env(Path(temp)), cwd=temp, capture_output=True, text=True, timeout=5)
+        self.assertEqual(baseline.returncode, 0, "selected G2 baseline must be available")
+        current = (HERE / "hud-server.mjs").read_text()
+        def blocks(source):
+            start = source.index("async function askMuse(")
+            end = source.index("// Glasses id", start)
+            routes = source.index("    if (req.method === 'POST' && p === '/api/muse/ask')")
+            route_end = source.index("    if (req.method === 'GET' && p === '/api/layout')", routes)
+            return source[start:end], source[routes:route_end]
+        self.assertTrue(blocks(current) == blocks(baseline.stdout), "G2 askMuse and Muse route bodies must remain exactly56fe3b2")
+
     def test_guard_blocks_remote_live_ports_named_child_imports_and_redirects(self):
         with Fixture() as f:
             script = """
@@ -429,6 +470,190 @@ process.stdout.write(JSON.stringify({denied,redirectBlocked}));
 
 
 class ListenTests(unittest.TestCase):
+    def assert_no_more_requests(self, f, event_name, counter, seconds=.25):
+        before = counter()
+        event = getattr(f.state, event_name)
+        event.clear()
+        self.assertFalse(event.wait(seconds), "dropped Listen work must not keep sending or polling")
+        self.assertEqual(counter(), before)
+
+    def assert_g2_works(self, f, label):
+        before = f.state.count()
+        code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE " + label})
+        self.assertEqual(code, 200)
+        self.assertRegex(receipt["id"], r"^0-j\d+$")
+        self.assertEqual(receipt["muse"], "fake-a")
+        route = "/api/muse/reply?id=" + quote(receipt["id"])
+        done = wait_for(lambda: (r if (r := f.call("GET", route)[1]).get("status") == "done" else None))
+        self.assertEqual(done["reply"], "G2 fixture answer.")
+        self.assertEqual(f.state.count(), before + 1)
+        self.assertTrue(f.state.asks[-1]["g2"])
+        self.assertEqual(f.state.asks[-1]["relay"], "a")
+
+    def diag(self, f, name, detail):
+        self.assertEqual(f.call("POST", "/api/diag", {"name": name, "detail": detail}), (200, {"ok": True}))
+
+    def test_diagnostic_g2_gate_defers_and_merges_speech_then_asks_last_once(self):
+        with Fixture(snippetMs=300) as f:
+            self.diag(f, "muse.ask", "queued")
+            f.start()
+            f.chunk(0)
+            f.chunk(1)
+            wait_for(lambda: f.view()["muse"]["state"] == "busy")
+            self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.15)
+            self.assertEqual(f.state.count(), 0)
+            self.diag(f, "muse.reply", "done")
+            wait_for(lambda: f.state.count() == 1, label="merged busy speech after G2 done")
+            wait_for(lambda: len(f.view()["notes"]) == 1)
+            self.assertEqual(f.state.asks[0]["relay"], "b")
+            self.assertTrue(all(speech(i) in f.state.asks[0]["text"] for i in (1, 2)))
+            self.assert_no_more_requests(f, "ask_event", f.state.count)
+            f.stop()
+
+    def test_direct_g2_health_veto_defers_listen_without_client_diagnostics(self):
+        with Fixture(snippetMs=300) as f:
+            f.state.relays["a"]["manual"] = True
+            code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE direct busy relay"})
+            self.assertEqual(code, 200)
+            self.assertRegex(receipt["id"], r"^0-j\d+$")
+            f.start()
+            f.chunk(0)
+            wait_for(lambda: f.view()["muse"]["state"] == "busy")
+            self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.15)
+            self.assertEqual(f.state.count("b"), 0)
+            f.state.complete(f.state.asks[0]["id"])
+            route = "/api/muse/reply?id=" + quote(receipt["id"])
+            self.assertEqual(f.call("GET", route)[1]["status"], "done")
+            wait_for(lambda: f.state.count("b") == 1, label="Listen after direct G2 terminal")
+            wait_for(lambda: len(f.view()["notes"]) == 1)
+            self.assertEqual(f.state.max_active, 1)
+            self.assertEqual([a["relay"] for a in f.state.asks], ["a", "b"])
+            f.stop()
+
+    def test_g2_becoming_busy_during_last_relay_health_vetoes_listen_post(self):
+        with Fixture(snippetMs=300, requestMs=1000) as f:
+            f.state.health_gates["b"] = threading.Event()
+            f.state.health_entered["b"] = threading.Event()
+            f.start()
+            f.chunk(0)
+            self.assertTrue(f.state.health_entered["b"].wait(3))
+            f.state.relays["a"]["manual"] = True
+            code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE health race"})
+            self.assertEqual(code, 200)
+            self.assertRegex(receipt["id"], r"^0-j\d+$")
+            f.state.health_gates["b"].set()
+            wait_for(lambda: f.view()["muse"]["state"] == "busy")
+            self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.15)
+            self.assertEqual(f.state.count("b"), 0)
+            f.stop()
+
+    def test_diagnostic_gate_is_rechecked_after_last_relay_health(self):
+        with Fixture(snippetMs=300, requestMs=1000) as f:
+            f.state.health_gates["b"] = threading.Event()
+            f.state.health_entered["b"] = threading.Event()
+            f.start()
+            f.chunk(0)
+            self.assertTrue(f.state.health_entered["b"].wait(3))
+            self.diag(f, "muse.ask", "queued")
+            f.state.health_gates["b"].set()
+            wait_for(lambda: f.view()["muse"]["state"] == "busy")
+            self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.15)
+            self.assertEqual(f.state.count(), 0)
+            self.diag(f, "muse.reply", "done")
+            wait_for(lambda: len(f.view()["notes"]) == 1, label="retained speech after diagnostic gate clears")
+            self.assertEqual(f.state.count(), 1)
+            self.assertEqual(f.state.asks[0]["relay"], "b")
+            f.stop()
+
+    def test_hung_health_has_request_and_whole_attempt_deadlines_without_late_post(self):
+        for request_ms, attempt_ms in ((70, 1500), (1000, 120)):
+            with self.subTest(request_ms=request_ms, attempt_ms=attempt_ms), Fixture(requestMs=request_ms, attemptMs=attempt_ms) as f:
+                f.state.health_gates["a"] = threading.Event()
+                f.state.health_entered["a"] = threading.Event()
+                f.start()
+                before = time.monotonic()
+                f.chunk(0)
+                self.assertTrue(f.state.health_entered["a"].wait(3))
+                wait_for(lambda: f.view()["muse"]["state"] == "unavailable", seconds=.8, label="bounded hung selftest")
+                self.assertLess(time.monotonic() - before, .8)
+                self.assertEqual(f.state.count(), 0)
+                f.state.health_gates["a"].set()
+                self.assert_no_more_requests(f, "ask_event", f.state.count)
+                f.stop()
+                self.assert_g2_works(f, "after hung health")
+
+    def test_hung_accepted_post_times_out_without_retry_then_later_g2_works(self):
+        with Fixture(requestMs=70, attemptMs=500) as f:
+            f.state.post_gates["b"] = threading.Event()
+            f.state.post_entered["b"] = threading.Event()
+            f.state.relays["b"]["manual"] = True
+            f.start()
+            before = time.monotonic()
+            f.chunk(0)
+            self.assertTrue(f.state.post_entered["b"].wait(3))
+            wait_for(lambda: f.view()["muse"]["state"] == "unavailable", seconds=.8, label="bounded hung POST")
+            self.assertLess(time.monotonic() - before, .8)
+            self.assertEqual(f.state.count(), 1)
+            self.assertEqual(f.state.count("a"), 0)
+            f.state.post_gates["b"].set()
+            self.assert_no_more_requests(f, "reply_event", lambda: len(f.state.reply_calls))
+            self.assert_no_more_requests(f, "ask_event", f.state.count)
+            f.state.complete(f.state.asks[0]["id"])
+            f.stop()
+            self.assertEqual(f.view()["notes"], [])
+            self.assert_g2_works(f, "after hung accepted POST")
+
+    def test_hung_reply_times_out_and_stops_polling_without_late_note(self):
+        with Fixture(requestMs=70, attemptMs=500) as f:
+            f.state.reply_gates["b"] = threading.Event()
+            f.state.reply_entered["b"] = threading.Event()
+            f.start()
+            before = time.monotonic()
+            f.chunk(0)
+            self.assertTrue(f.state.reply_entered["b"].wait(3))
+            wait_for(lambda: f.view()["muse"]["state"] == "unavailable", seconds=.8, label="bounded hung reply")
+            self.assertLess(time.monotonic() - before, .8)
+            f.state.reply_gates["b"].set()
+            self.assert_no_more_requests(f, "reply_event", lambda: len(f.state.reply_calls))
+            self.assertEqual(f.state.count(), 1)
+            self.assertEqual(f.view()["notes"], [])
+            f.state.complete(f.state.asks[0]["id"])
+            f.stop()
+            self.assert_g2_works(f, "after hung reply")
+
+    def test_forever_404_reply_is_bounded_and_later_g2_works(self):
+        with Fixture(requestMs=70, attemptMs=200) as f:
+            f.state.relays["b"]["mode"] = "forgotten"
+            f.start()
+            before = time.monotonic()
+            f.chunk(0)
+            wait_for(lambda: len(f.state.reply_calls) >= 1)
+            wait_for(lambda: f.view()["muse"]["state"] == "unavailable", seconds=.8, label="bounded missing job")
+            self.assertLess(time.monotonic() - before, .8)
+            self.assert_no_more_requests(f, "reply_event", lambda: len(f.state.reply_calls))
+            self.assert_no_more_requests(f, "ask_event", f.state.count)
+            self.assertEqual(f.state.count(), 1)
+            self.assertEqual(f.state.count("a"), 0)
+            self.assertEqual(f.view()["notes"], [])
+            f.stop()
+            self.assert_g2_works(f, "after forgotten Listen job")
+
+    def test_waiting_reply_keeps_polling_only_until_whole_attempt_deadline(self):
+        with Fixture(requestMs=100, attemptMs=220) as f:
+            f.state.relays["b"]["manual"] = True
+            f.start()
+            before = time.monotonic()
+            f.chunk(0)
+            wait_for(lambda: len(f.state.reply_calls) >= 2, seconds=.8, label="actual waiting relay status")
+            wait_for(lambda: f.view()["muse"]["state"] == "unavailable", seconds=.8, label="whole waiting deadline")
+            self.assertLess(time.monotonic() - before, .8)
+            self.assert_no_more_requests(f, "reply_event", lambda: len(f.state.reply_calls))
+            self.assertEqual(f.state.count(), 1)
+            f.state.complete(f.state.asks[0]["id"])
+            self.assertEqual(f.view()["notes"], [])
+            f.stop()
+            self.assert_g2_works(f, "after waiting deadline")
+
     def test_three_pcm_snippets_produce_two_clean_capped_notes_on_one_clock(self):
         with Fixture() as f:
             started = f.start()
@@ -451,6 +676,8 @@ class ListenTests(unittest.TestCase):
             self.assertTrue(all(0 <= line["t"] <= view["now_t"] for line in view["lines"]))
             self.assertEqual(f.view(0)["lines"], view["lines"])
             self.assertTrue(all(speech(i) in f.state.asks[2]["text"] for i in (1, 2, 3)))
+            self.assertEqual([a["relay"] for a in f.state.asks], ["b"] * 3)
+            self.assertGreaterEqual(f.state.health_calls.count("a"), 6)
             self.assertEqual(f.state.max_active, 1)
             self.assertEqual(f.stop(), (200, {"ok": True}))
 
@@ -481,7 +708,7 @@ class ListenTests(unittest.TestCase):
 
     def test_stop_app_close_path_cancels_pending_snippets_and_late_note(self):
         with Fixture() as f:
-            f.state.relays["a"]["manual"] = True
+            f.state.relays["b"]["manual"] = True
             f.start()
             f.chunk(0)
             wait_for(lambda: f.state.count() == 1)
@@ -489,7 +716,7 @@ class ListenTests(unittest.TestCase):
             f.chunk(1)
             self.assertEqual(f.stop(), (200, {"ok": True}))
             f.state.complete(first)
-            wait_for(lambda: f.state.completed(first), label="cancelled active relay drains")
+            self.assert_no_more_requests(f, "reply_event", lambda: len(f.state.reply_calls))
             self.assertEqual(f.view()["state"], "stopped")
             self.assertEqual(f.view()["notes"], [])
             self.assertEqual(f.state.count(), 1)
@@ -504,10 +731,10 @@ class ListenTests(unittest.TestCase):
             self.assertTrue(f.state.health_entered["a"].wait(3))
             self.assertEqual(f.state.count(), 0)
             self.assertEqual(f.stop(), (200, {"ok": True}))
+            f.state.health_gates["a"].set()
             code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE after stopped health probe"})
             self.assertEqual(code, 200)
-            self.assertEqual(f.state.count(), 0)
-            f.state.health_gates["a"].set()
+            self.assertRegex(receipt["id"], r"^0-j\d+$")
             route = "/api/muse/reply?id=" + quote(receipt["id"])
             done = wait_for(lambda: (r if (r := f.call("GET", route)[1]).get("status") == "done" else None))
             self.assertEqual(done["reply"], "G2 fixture answer.")
@@ -516,7 +743,7 @@ class ListenTests(unittest.TestCase):
             self.assertEqual(f.view()["notes"], [])
 
     def test_timeout_then_stop_during_health_posts_no_listen_ask_and_g2_works(self):
-        with Fixture(timeoutMs=200) as f:
+        with Fixture(attemptMs=120, requestMs=1000) as f:
             f.state.health_gates["a"] = threading.Event()
             f.state.health_entered["a"] = threading.Event()
             f.start()
@@ -525,10 +752,10 @@ class ListenTests(unittest.TestCase):
             wait_for(lambda: f.view()["muse"]["state"] == "unavailable", label="Listen caller timeout")
             self.assertEqual(f.state.count(), 0)
             self.assertEqual(f.stop(), (200, {"ok": True}))
+            f.state.health_gates["a"].set()
             code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE after timed out health probe"})
             self.assertEqual(code, 200)
-            self.assertEqual(f.state.count(), 0)
-            f.state.health_gates["a"].set()
+            self.assertRegex(receipt["id"], r"^0-j\d+$")
             route = "/api/muse/reply?id=" + quote(receipt["id"])
             done = wait_for(lambda: (r if (r := f.call("GET", route)[1]).get("status") == "done" else None))
             self.assertEqual(done["reply"], "G2 fixture answer.")
@@ -548,62 +775,58 @@ class ListenTests(unittest.TestCase):
             wait_for(lambda: f.view()["state"] == "stopped", seconds=3, label="speech inactivity stop")
             self.assertEqual(f.state.count(), 0)
 
-    def test_g2_pending_id_is_fast_then_priority_and_no_overlap(self):
-        with Fixture() as f:
-            f.state.relays["a"]["manual"] = True
-            f.start()
-            f.chunk(0)
-            wait_for(lambda: f.state.count() == 1)
-            active = f.state.asks[0]["id"]
-            began = time.monotonic()
-            code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE priority question"})
-            self.assertEqual(code, 200)
-            self.assertLess(time.monotonic() - began, 2)
-            gid = receipt.get("id")
-            self.assertIsInstance(gid, str)
-            self.assertEqual(f.state.count(), 1)
-            for _ in range(2):
-                code, pending = f.call("GET", "/api/muse/reply?id=" + quote(gid))
-                self.assertEqual(code, 200)
-                self.assertIn(pending.get("status"), ("sending", "running", "queued"))
-            f.chunk(1)
-            f.state.relays["a"]["manual"] = False
-            f.state.complete(active)
-            wait_for(lambda: f.state.count() >= 3, seconds=6, label="priority admissions")
-            self.assertTrue(f.state.asks[1]["g2"])
-            self.assertFalse(f.state.asks[2]["g2"])
-            done = wait_for(lambda: (r if (r := f.call("GET", "/api/muse/reply?id=" + quote(gid))[1]).get("status") == "done" else None))
-            self.assertEqual(done["reply"], "G2 fixture answer.")
-            self.assertEqual(done["question"], "G2_FIXTURE priority question")
-            self.assertEqual(f.state.max_active, 1)
-            f.stop()
-
     def test_failed_or_unready_selftest_never_posts_an_ask(self):
         for health in ("failed", "unready"):
             with self.subTest(health=health), Fixture() as f:
                 for relay in f.state.relays.values(): relay["health"] = health
                 f.start()
                 f.chunk(0)
-                wait_for(lambda: f.view()["muse"]["state"] == "unavailable", label="safe unavailable state")
+                wait_for(lambda: f.view()["muse"]["state"] in ("busy", "unavailable"), label="safe dropped state")
                 self.assertEqual(f.state.count(), 0)
+                self.assert_no_more_requests(f, "ask_event", f.state.count)
                 self.assertNotIn(RAW_ERROR, json.dumps(f.view()))
                 f.stop()
 
-    def test_uncertain_post_holds_global_slot_without_second_relay_ask(self):
+    def test_strict_health_fields_on_each_relay_prevent_listen_posts(self):
+        values = ({"ok": True, "composer": True}, {"ok": True, "busy": False},
+                  {"composer": True, "busy": False}, {"ok": True, "composer": True, "busy": True},
+                  {"ok": True, "composer": "true", "busy": False}, {"ok": True, "composer": True, "busy": "false"},
+                  {"ok": True, "composer": False, "busy": False})
+        for name in ("a", "b"):
+            for value in values:
+                with self.subTest(relay=name, fields=value), Fixture(snippetMs=300) as f:
+                    f.state.relays[name]["health_fields"] = value
+                    f.start()
+                    f.chunk(0)
+                    wait_for(lambda: f.view()["muse"]["state"] in ("busy", "unavailable"), label="strict health refusal")
+                    self.assertEqual(f.state.count(), 0)
+                    self.assert_no_more_requests(f, "ask_event", f.state.count, seconds=.12)
+                    # Busy speech may be retried on the snippet cadence; it
+                    # must never be POSTed while either relay lacks evidence.
+                    f.stop()
+
+    def test_uncertain_post_is_dropped_without_retry_or_fallback(self):
         for mode in ("malformed", "failed-post"):
-            with self.subTest(mode=mode), Fixture(timeoutMs=200) as f:
-                f.state.relays["a"].update(mode=mode, manual=True)
+            with self.subTest(mode=mode), Fixture(attemptMs=200) as f:
+                f.state.relays["b"].update(mode=mode, manual=True)
                 f.start()
                 f.chunk(0)
                 wait_for(lambda: f.state.count() == 1)
-                f.chunk(1)
-                code, queued = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE after uncertain send"})
-                self.assertEqual(code, 200)
-                wait_for(lambda: f.view()["now_t"] >= 400)
+                wait_for(lambda: f.view()["muse"]["state"] == "unavailable")
+                self.assert_no_more_requests(f, "ask_event", f.state.count)
                 self.assertEqual(f.state.count(), 1)
-                self.assertEqual(f.state.count("b"), 0)
+                self.assertEqual(f.state.count("a"), 0)
                 self.assertNotIn(RAW_ERROR, json.dumps(f.view()))
                 self.assertEqual(f.state.max_active, 1)
+                # An uncertain attempt drops; it must not permanently poison
+                # the adapter after independent relay readiness is restored.
+                f.state.complete(f.state.asks[0]["id"])
+                f.state.relays["b"].update(mode="normal", manual=False)
+                self.assert_g2_works(f, "after uncertain Listen admission")
+                f.state.replies = ["Fresh useful note."]
+                f.chunk(1)
+                wait_for(lambda: len(f.view()["notes"]) == 1, label="fresh attempt after uncertainty")
+                self.assertEqual(f.state.count(), 3)
                 f.stop()
 
     def test_legacy_muse_latest_and_command_failed_fallback_are_preserved(self):
@@ -616,6 +839,8 @@ class ListenTests(unittest.TestCase):
             f.state.relays["a"]["mode"] = "command-error"
             code, receipt = f.call("POST", "/api/muse/ask", {"text": "G2_FIXTURE fallback question"})
             self.assertEqual(code, 200)
+            self.assertRegex(receipt["id"], r"^0-j\d+$")
+            self.assertEqual(receipt["muse"], "fake-a")
             route = "/api/muse/reply?id=" + quote(receipt["id"])
             done = wait_for(lambda: (r if (r := f.call("GET", route)[1]).get("status") == "done" else None), seconds=6)
             self.assertEqual(done["reply"], "G2 fixture answer.")

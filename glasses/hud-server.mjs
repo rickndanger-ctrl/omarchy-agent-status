@@ -49,7 +49,7 @@ import { helpers, think, THINK_BACKENDS } from './think.mjs'
 import { sanitizeMuseReply } from './muse-clean.mjs'
 import { createConversations, CONVERSATION_MAX_BYTES } from './conversation.mjs'
 import { createListen, LISTEN_MAX_BYTES } from './listen.mjs'
-import { createMuseQueue, createMuseBridge } from './muse-queue.mjs'
+import { createListenMuse } from './muse-queue.mjs'
 
 const run = promisify(execFile)
 // macOS keeps lsof in /usr/sbin, which launchd's default PATH leaves out.
@@ -794,51 +794,23 @@ function museReply(raw, id, partial = false) {
   return text
 }
 
-async function sendMuse(text, start = 0, { signal } = {}) {
+async function askMuse(text, start) {
   for (const [i, muse] of MUSES.entries()) {
     if (i < start) continue
-    if (signal?.aborted) return null
     try {
       const health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 })
       if (!health.ok || !health.composer) continue
-    } catch { continue /* try the next Muse */ }
-    if (signal?.aborted) return null
-    // Once a POST is attempted, failure may mean it was accepted without a receipt.
-    // Never submit the same question to another Muse under that uncertainty.
-    try {
       const r = await call(`${muse.url}/ask`, muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
-      const job = String(r?.id ?? '')
-      return /^\w{1,40}$/.test(job) ? { id: `${i}-${job}`, muse: muse.name } : { uncertain: true }
-    } catch { return { uncertain: true } }
+      return { id: `${i}-${r.id}`, muse: muse.name }
+    } catch { /* try the next Muse */ }
   }
   return null
 }
 // Glasses id → id of the same question re-asked on a later Muse.
 const museMoved = new Map()
 const museMoving = new Set() // ids being handed on right now (the glasses poll fast)
-const MUSE_QUEUE = createMuseQueue({
-  ask: sendMuse,
-  read: async id => {
-    const [, index, job] = String(id).match(/^(\d+)-(\w{1,40})$/) ?? []
-    const muse = MUSES[Number(index)]
-    if (!muse || !job) throw new Error('unknown Muse job')
-    return call(`${muse.url}/reply/${job}`, muse.token, { timeout: 6000 })
-  },
-  pollMs: HUB.listen?.pollMs,
-  timeoutMs: HUB.listen?.timeoutMs,
-})
-const MUSE_BRIDGE = createMuseBridge(MUSE_QUEUE, {
-  relayUrl: MUSES[0]?.url,
-  onAdmitted: (from, to) => {
-    museMoved.set(from, to)
-    setTimeout(() => museMoved.delete(from), 10 * 60_000).unref()
-  },
-})
-const askMuse = async (text, start = 0) => start >= MUSES.length ? null : MUSE_BRIDGE.ask(text, start)
 
 async function call(url, token, options = {}) {
-  const queued = MUSE_BRIDGE.lookup(url)
-  if (queued !== undefined) return queued
   const res = await fetch(url, {
     ...options,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -1470,9 +1442,27 @@ const CONVERSATION = createConversations({
   dir: path.join(CONFIG_DIR, 'conversations'),
   limitMs: Number(process.env.HUD_CONV_LIMIT_MS) || undefined,
 })
+
+// Listen owns only its best-effort snippets; G2's Muse paths above are unchanged.
+function listenG2Busy() {
+  if (museMoving.size) return true
+  let pending = 0
+  for (const event of diagnostics) {
+    if (event.name === 'muse.ask' && event.detail === 'queued') pending++
+    if (event.name === 'muse.reply' && /^(done|error|timeout)(\s|$)|^gave up:/.test(String(event.detail))) pending = Math.max(0, pending - 1)
+  }
+  return pending > 0
+}
+const LISTEN_MUSE = createListenMuse({
+  muses: MUSES,
+  isG2Busy: listenG2Busy,
+  pollMs: HUB.listen?.pollMs,
+  attemptMs: HUB.listen?.timeoutMs,
+  requestMs: HUB.listen?.requestMs,
+})
 const LISTEN = createListen({
   transcribe,
-  ask: ({ text, signal, onStatus }) => MUSE_QUEUE.enqueue(text, { source: 'listen', signal, onStatus }).result,
+  ask: request => LISTEN_MUSE.ask(request),
   diag: conversationDiag,
   snippetMs: HUB.listen?.snippetMs,
   minWords: HUB.listen?.minWords,

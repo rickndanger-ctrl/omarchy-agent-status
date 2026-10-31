@@ -401,3 +401,89 @@ test('two large context snippets and a new snippet fit the broker even with over
   assert.ok(prompts.every(prompt => prompt.length <= 16_000))
   f.engine.close()
 })
+
+test('proven no-POST busy/skipped attempts retain speech for one later idle send without a hot loop', async () => {
+  const requests = [], results = ['busy', 'skipped', 'done'], posts = []
+  const f = fixture({ ask: async request => {
+    requests.push(request)
+    const status = results.shift()
+    if (status === 'done') posts.push(request.text)
+    return { status, reason: 'RAW SERVICE DETAILS', reply: 'Useful after idle.' }
+  }, transcribe: async bytes => speech(25, `batch${bytes[0]}-`) })
+  await f.clock.advance(1000)
+  await f.engine.chunk(f.id, 0, pcm(1000, 0))
+  await flush()
+  assert.equal(f.engine.state(f.id).body.muse.state, 'busy')
+  assert.deepEqual(f.engine.state(f.id).body.notes, [])
+  await f.clock.advance(1000)
+  await f.engine.chunk(f.id, 1, pcm(1000, 1))
+  await f.clock.advance(43_999)
+  assert.equal(requests.length, 1)
+  await f.clock.advance(1)
+  assert.equal(requests.length, 2)
+  assert.equal(f.engine.state(f.id).body.muse.state, 'busy')
+  assert.doesNotMatch(JSON.stringify(f.engine.state(f.id)), /RAW SERVICE DETAILS/)
+  await f.clock.advance(44_999)
+  assert.equal(requests.length, 2)
+  await f.clock.advance(1)
+  assert.equal(requests.length, 3)
+  assert.equal(posts.length, 1)
+  assert.equal((posts[0].match(/batch0-0\b/g) ?? []).length, 1)
+  assert.equal((posts[0].match(/batch1-0\b/g) ?? []).length, 1)
+  assert.doesNotMatch(posts[0], /Previous snippets:/)
+  assert.equal(f.engine.state(f.id).body.muse.state, 'idle')
+  assert.deepEqual(f.engine.state(f.id).body.notes.map(note => note.text), ['Useful after idle.'])
+  await f.clock.advance(90_000)
+  assert.equal(requests.length, 3)
+  f.engine.close()
+})
+
+test('stop cancels the cadence timer holding proven unsent busy speech', async () => {
+  let attempts = 0
+  const f = fixture({ ask: async () => { attempts++; return { status: 'busy' } } })
+  await f.engine.chunk(f.id, 0, pcm())
+  await flush()
+  assert.equal(attempts, 1)
+  assert.equal(f.clock.timers.size, 2) // silence guard plus retained-speech cadence
+  f.engine.stop(f.id)
+  assert.equal(f.clock.timers.size, 0)
+  await f.clock.advance(90_000)
+  assert.equal(attempts, 1)
+  assert.deepEqual(f.engine.state(f.id).body.notes, [])
+})
+
+test('uncertain, error and timeout results never restore or retry a possibly posted snippet', async () => {
+  for (const status of ['uncertain', 'error', 'timeout']) {
+    let attempts = 0
+    const f = fixture({ ask: async () => { attempts++; return { status, reason: 'RAW UNCERTAINTY' } } })
+    await f.engine.chunk(f.id, 0, pcm())
+    await flush()
+    await f.clock.advance(90_000)
+    assert.equal(attempts, 1, status)
+    assert.equal(f.engine.state(f.id).body.muse.state, 'unavailable')
+    assert.doesNotMatch(JSON.stringify(f.engine.state(f.id)), /RAW UNCERTAINTY/)
+    f.engine.close()
+  }
+})
+
+test('cancelled and failed service results suppress late callbacks and keep errors private', async () => {
+  const requests = []
+  const f = fixture({ snippetMs: 1, ask: async request => {
+    requests.push(request)
+    if (requests.length === 1) return { status: 'cancelled', reason: 'RAW CANCEL DETAILS' }
+    throw new Error('RAW SERVICE CREDENTIAL')
+  } })
+  await f.engine.chunk(f.id, 0, pcm())
+  await flush()
+  assert.equal(f.engine.state(f.id).body.muse.state, 'idle')
+  requests[0].onStatus({ state: 'busy', reason: 'RAW LATE CALLBACK' })
+  assert.equal(f.engine.state(f.id).body.muse.state, 'idle')
+  await f.clock.advance(1)
+  await f.engine.chunk(f.id, 1, pcm())
+  await flush()
+  assert.equal(f.engine.state(f.id).body.muse.state, 'unavailable')
+  requests[1].onStatus({ state: 'thinking' })
+  assert.equal(f.engine.state(f.id).body.muse.state, 'unavailable')
+  assert.doesNotMatch(JSON.stringify(f.engine.state(f.id)), /RAW /)
+  f.engine.close()
+})

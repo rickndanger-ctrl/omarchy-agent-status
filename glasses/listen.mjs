@@ -1,4 +1,4 @@
-// Opt-in, in-memory Listen sessions. Providers, the shared Muse queue, time and
+// Opt-in, in-memory Listen sessions. Providers, the Listen Muse service, time and
 // timers are injected: this module never opens a relay or stores audio on disk.
 import { randomBytes } from 'node:crypto'
 import { sanitizeMuseReply, NO_TEXT } from './muse-clean.mjs'
@@ -22,8 +22,8 @@ const stamp = t => {
 }
 
 /**
- * ask({text, sessionId, signal, onStatus}) is the shared, lower-priority Muse
- * broker callback. Only its terminal {status:'done', reply} can create a note.
+ * ask({text, sessionId, signal, onStatus}) is the Listen-only Muse service
+ * callback. Only its terminal {status:'done', reply} can create a note.
  * All public methods return {status,body}; chunk waits for ASR, never for Muse.
  */
 export function createListen({
@@ -152,8 +152,8 @@ export function createListen({
       'New snippet:', labelled(snippet),
     ].join('\n')
     session.snippetParts = []
-    session.context.push(snippet)
-    session.context = session.context.slice(-2)
+    const priorContext = session.context
+    session.context = [...priorContext, snippet].slice(-2)
     session.lastAttempt = elapsed(session)
     session.asking = true
     session.muse = { state: 'thinking' }
@@ -178,6 +178,15 @@ export function createListen({
             if (session.notes.length > maxNotes) session.notes.shift()
           }
           session.muse = { state: 'idle' }
+        } else if (['busy', 'skipped'].includes(result?.status)) {
+          // These statuses prove the service made no POST. Restore the exact
+          // unsent snapshot before newer speech, subject to the same bounds,
+          // and leave context unchanged. finally enforces the full cadence
+          // before retry; uncertain/error/timeout results never take this path.
+          session.context = priorContext
+          session.snippetParts = [{ ...snippet }, ...session.snippetParts]
+          boundedSnippet(session)
+          session.muse = { state: 'busy', reason: 'Muse busy; speech retained' }
         } else if (result?.status === 'cancelled') session.muse = { state: 'idle' }
         else session.muse = { state: 'unavailable', reason: 'Muse unavailable' }
       } catch {
@@ -185,9 +194,9 @@ export function createListen({
         diagnostic('listen.muse_failed')
       } finally {
         acceptingStatus = false
-        // Enqueue time can precede the actual Muse send by a long G2 wait.
+        // A request can take time to complete after its actual Muse send.
         // Waiting a full interval after completion conservatively separates
-        // real sends without requiring another broker timing API.
+        // real sends without requiring another service timing API.
         session.lastAttempt = elapsed(session)
         session.asking = false
         if (active(session)) kickSnippet(session)

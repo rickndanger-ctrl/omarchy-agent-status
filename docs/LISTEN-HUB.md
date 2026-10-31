@@ -49,12 +49,12 @@ published after the cutoff. Equal-clock records can repeat. Merge/deduplicate
 lines and notes by their timestamp/text tuples, or omit `since` to obtain the
 bounded current snapshot. Do not use a note's `at_t` as a publication cursor.
 
-## Snippets and the shared Muse queue
+## Best-effort Listen snippets
 
 The first snippet becomes eligible after at least 25 new words. Later snippets
 wait at least 45 seconds after the previous request finishes. This conservative
-gap also applies after a long wait behind G2, so queueing cannot bunch actual
-Listen submissions together. The last two sent snippets are
+gap also applies after skipped or failed attempts, so retries cannot bunch
+Listen submissions together. The last two snippets are
 included as time-labelled context. The prompt requests one useful note of at
 most 25 words, or exactly `—` when there is nothing useful to add.
 
@@ -62,26 +62,35 @@ Only a finished reply can become a note. It passes through the existing
 `muse-clean.mjs`, then the note limits (25 words and 300 characters). Empty
 answers, `—`, and the cleaner's no-text placeholder are dropped. Public errors
 and Muse state reasons are fixed plain messages, never raw relay error text.
-The prompt bounds its two context snippets and new snippet to fit the shared
-queue's 16,000-character limit.
+The prompt bounds its two context snippets and new snippet to fit the
+16,000-character input limit.
 
-Both G2 OMAC and Listen enter the same queue. A question owns the slot from
-submission through a terminal relay reply, including while an active Listen
-session is stopped. Queued G2 asks take priority over queued Listen snippets;
-an already running question is not preempted. G2 receives a quick queued job id
-and continues using its existing reply-polling API, so a waiting question does
-not outlast the app's eight-second submission timeout.
+G2 OMAC's `askMuse`, relay helpers and existing `/api/muse*` paths are restored
+byte-for-byte from `56fe3b2`. Listen does not wrap, queue, alias or intercept any
+G2 request. There is no shared G2/Listen queue and no virtual G2 job id.
 
-An uncertain relay submission is not retried on another Muse: it might already
-have been accepted. The slot stays held until completion can be established;
-an unknown-id submission returns plain unavailable results to waiting/new
-clients and requires operator reconciliation before a restart can
-resume sending. Queue ownership is in this hub process, not a durable lock
-across multiple hubs or restarts. Confirm the relay is idle before restarting
-after an uncertain submission. A local
-timeout or client cancellation is not proof that Muse stopped. Stopping Listen
-cancels unsent snippets and suppresses late results without freeing a still
-active relay slot.
+Listen's own service admits at most one snippet at a time. Only the last
+configured Muse receives Listen questions. It sends only after explicit relay
+`/selftest` reports `composer: true` and `busy: false`, and its read-only G2
+gate permits it. Other relays are checked before and after the target's health
+probe. Missing or ambiguous readiness is not idle. Busy attempts return at once
+rather than waiting or blocking G2. Proven unsent speech is retained/merged for
+the next cadence attempt; it is not submitted repeatedly in a busy loop.
+
+The hub gate reads existing handoff flags and G2 client diagnostics without
+changing them. Direct API callers emit no client diagnostics, so the other
+relays' busy flags provide an additional veto. These observations are
+best-effort snapshots, not an atomic cross-client lock. The laptop join test
+keeps Listen on the last Muse and G2 on the first; its one-Muse overlap is an
+explicit known risk. G2's original admission behavior remains unchanged.
+
+Every health/send/poll request and the complete attempt have hard time limits.
+At most one POST is attempted per snippet. A failed or uncertain POST is dropped,
+never retried on the same or another Muse. Cancellation suppresses late notes;
+unknown acceptance does not poison a shared queue or stall G2. A later, distinct
+snippet must pass readiness again. Note output remains capped at 300 characters.
+Only a proven pre-send busy/skipped result permits retaining speech; errors and
+timeouts do not restore a possibly submitted snippet.
 
 Optional hub configuration (defaults shown):
 
