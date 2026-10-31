@@ -10,10 +10,9 @@ import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
 import { TerminalCache } from './terminalcache';
 import { InputQueue, type InputSource } from './inputqueue';
-import { remoteSettingsIgnored, makeHandle, TOP_SCREENS, runConversationEffect, startConversation, openSettings, runSettingsAction } from './inputflow';
+import { remoteSettingsIgnored, makeHandle, TOP_SCREENS, openSettings, runSettingsAction } from './inputflow';
 import { MENU, GLASSES_MENU, INTERNAL_MENU, setHideDone } from './menu';
 import { Latest } from './latest';
-import { ConversationSession, ConvHttpError, CONV_BACKENDS, asBackend, type Conversation, type ConvHub } from './conversation';
 import type { Desk, DeskAppId } from './desk'; // type only: desk.ts itself is loaded by import() when the Desk is opened
 import { Tiles, tileChats, DEFAULT_LAYOUT, PAGE_COUNT, availableWidgets, normalizeLayout, type Layout, type OpenTarget, type Reminder, type TileContext, type TileEffect, type UrlTile } from './tiles';
 
@@ -76,53 +75,12 @@ model.hideOldTexts = store.get('home.hideOldTexts') !== '0';
 let recording: Uint8Array[] | null = null;
 let status = 'Starting…';
 
-// The Conversation tile (docs/CONVERSATION.md): listens only after a Start. The session talks to the one hub it started on.
-function convHubFor(hub: string, tok: string): ConvHub {
-  const call = async <T>(path: string, init: RequestInit, ms: number): Promise<T> => {
-    const res = await fetch(new URL(`api/conversation${path}`, hub), { ...init, headers: { Authorization: `Bearer ${tok}`, 'Content-Type': (init.headers as Record<string, string> | undefined)?.['Content-Type'] ?? 'application/json' }, signal: AbortSignal.timeout(ms) });
-    const body = await res.json().catch(() => ({})) as T & { error?: string };
-    if (!res.ok) throw new ConvHttpError(body.error || `server said ${res.status}`, res.status);
-    return body;
-  };
-  return {
-    start: backend => call('/start', { method: 'POST', body: JSON.stringify({ backend }) }, 8000),
-    chunk: async (id, seq, pcm) => { await call(`/chunk?id=${encodeURIComponent(id)}&seq=${seq}`, { method: 'POST', body: pcm as BodyInit, headers: { 'Content-Type': 'application/octet-stream' } }, 20_000); },
-    stop: async id => { await call('/stop', { method: 'POST', body: JSON.stringify({ id }) }, 8000); },
-    get: () => call<Conversation>('', { method: 'GET' }, 8000),
-  };
-}
-const convSentKey = 'home.convSent';
-const convSent = () => { try { return JSON.parse(store.get(convSentKey) || '[]') as string[]; } catch { return []; } };
-// Built on first use, never at startup: if it cannot be made the Conversation tile says so and the rest of Home still starts.
-let convInstance: ConversationSession | null | undefined;
-function getConv(): ConversationSession | null {
-  if (convInstance !== undefined) return convInstance;
-  try {
-    convInstance = new ConversationSession({
-      hub: () => convHubFor(base, token),
-      mic: { on: () => glasses.microphone(true), off: () => glasses.microphone(false) },
-      voiceMicBusy: () => recording !== null,
-      sent: { has: id => convSent().includes(id), add: id => store.set(convSentKey, JSON.stringify([...convSent(), id].slice(-30))) },
-      diag: (name, detail = '') => diag(name, detail),
-      changed: () => paint(),
-    });
-  } catch (error) {
-    convInstance = null;
-    diag('conv.init-failed', error instanceof Error ? error.message : String(error));
-  }
-  return convInstance;
-}
-function convBackend() { try { return asBackend(store.get('home.convAi')); } catch { return asBackend(undefined); } }
-const convHost = () => {
-  const conv = getConv();
-  return conv && { conv, backend: convBackend, dispatch: (action: Action) => void run(action), flash: (text: string) => model.showFlash(text, Date.now()), paint: () => paint() };
-};
 let lastDevice = '';
 const glasses = new Glasses({
   onInput: input => handle(input, 'touch'),
   onMenu: id => inputQueue.pushMenu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
-  onForeground: on => { foreground = on; if (!on) { model.abandonTalk(); if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); void getConv()?.stop('background'); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); } },
+  onForeground: on => { foreground = on; if (!on) { model.abandonTalk(); if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); } },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
     if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
@@ -136,8 +94,6 @@ const glasses = new Glasses({
   onDrawn: text => { const ms = museShown.drawn(text, Date.now()); if (ms !== null) diag('muse.shown', ms); },
   onSlowRender: ms => diag('render.slow', `${ms} ms on ${model.screenKind}`),
   onAudio: pcm => {
-    const c = getConv();
-    if (c?.isListening()) { c.onAudio(pcm); return; }
     if (!recording) return;
     if (!recording.length) diag('mic.first-audio', pcm.length);
     if (recording.length < 4000) recording.push(pcm);
@@ -172,7 +128,6 @@ $('app').innerHTML = `
     <button data-input="back">Double-tap</button>
     <button data-input="down">▼ Swipe down</button>
   </div>
-  <label class="row">Conversation AI <select id="conv-ai">${CONV_BACKENDS.map(b => `<option value="${b.id}">${b.label}</option>`).join('')}</select></label>
   <details id="tiles-editor">
     <summary>Tiles</summary>
     <p class="muted">Five pages, two apps each. This is what the glasses show in Tiles.</p>
@@ -193,8 +148,6 @@ $('app').innerHTML = `
 </main>`;
 $<HTMLInputElement>('base').value = base;
 $<HTMLInputElement>('token').value = token;
-$<HTMLSelectElement>('conv-ai').value = convBackend();
-$<HTMLSelectElement>('conv-ai').onchange = () => store.set('home.convAi', $<HTMLSelectElement>('conv-ai').value);
 $('save').onclick = () => {
   let entered = $<HTMLInputElement>('base').value.trim() || picker.primary;
   if (!entered.endsWith('/')) entered += '/';
@@ -331,7 +284,6 @@ const tileCtx = (): TileContext => ({
     ? [{ id: 'just-added', title: justAdded.title, due: null, list: '', added: justAdded.at }, ...tileData.reminders]
     : tileData.reminders),
   url: endpoint => tileData.urls.get(endpoint) ?? null,
-  conversation: () => getConv()?.view() ?? null,
 });
 const showingTiles = () => tilesActive && !fromTiles;
 // Screens a tile opens: one double-tap there goes straight back to Tiles.
@@ -366,8 +318,6 @@ async function refreshTiles(): Promise<void> {
         } else if (need.kind === 'reminders') {
           const list = (await api<{ reminders: Reminder[] }>('reminders')).reminders;
           writes.push(() => { tileData.reminders = list; });
-        } else if (need.kind === 'conversation') {
-          await getConv()?.load(apply => writes.push(apply));
         } else if (need.kind === 'url') {
           const tile = await api<UrlTile>(`tile?url=${encodeURIComponent(need.endpoint)}`);
           writes.push(() => tileData.urls.set(need.endpoint, tile));
@@ -505,11 +455,6 @@ function runTileEffect(effect: TileEffect): void | Promise<void> {
     void refreshTerminal();
     return;
   }
-  if (effect.kind === 'conversation') {
-    const host = convHost();
-    if (!host) { model.showFlash('Conversation is not available', Date.now()); return; }
-    return runConversationEffect(host, effect.op); // the input queue waits for it (at most 3 s)
-  }
   if (effect.kind === 'reminderDone') {
     void api('reminders/done', { method: 'POST', body: JSON.stringify({ id: effect.id }) }).catch(() => {}).then(() => refreshTiles());
   } else if (effect.kind === 'urlAction') {
@@ -563,12 +508,7 @@ function backToDesk(): void {
 function openDeskApp(app: DeskAppId): void {
   if (!desk) return;
   if (app === 'reminders' || app === 'clock') { desk.note(`${app === 'clock' ? 'Clock' : 'Reminders'}: not yet`); paint(); return; }
-  if (app === 'listen') {
-    const host = convHost();
-    if (!host) { desk.note('Listen: not available'); paint(); return; }
-    void startConversation(host).then(() => { desk?.note('Listen: started'); paint(); });
-    return;
-  }
+  if (app === 'listen') { desk.note('Listen: not available'); paint(); return; }
   deskMode = 'app'; deskApp = app;
   desk.leave();
   if (app === 'tiles') enterTiles();
@@ -721,7 +661,6 @@ async function run(action: Action): Promise<void> {
       setTimeout(() => paint(), 3100); // the tile's note ends by itself
       for (const wait of [500, 1500, 3000]) setTimeout(() => void refreshTerminal(), wait);
     } else if (action.kind === 'startMic') {
-      if (getConv()?.isListening()) { model.setTranscript(null, Date.now()); model.showFlash('Stop listening first', Date.now()); paint(); return; }
       const id = recordings.next();
       recording = [];
       const on = await glasses.microphone(true);
@@ -843,9 +782,6 @@ async function run(action: Action): Promise<void> {
     } else if (action.kind === 'displayOff' || action.kind === 'brightness' || action.kind === 'closeApp' || action.kind === 'settingsBack') {
       // Quick settings: see inputflow.ts
       await runSettingsAction(settingsHost, action).job;
-    } else if (action.kind === 'startConversation') {
-      const host = convHost();
-      if (!host) model.showFlash('Conversation is not available', Date.now()); else await startConversation(host);
     } else if (action.kind === 'openTiles') {
       enterTiles();
     } else if (action.kind === 'openDesk') {
@@ -925,11 +861,6 @@ async function menu(id: number, source: InputSource = 'touch'): Promise<void> {
   if (id === MENU.agents) model.goTo('agents');
   if (id === MENU.messages) model.goTo('messages');
   if (id === MENU.muse) { model.goTo('muse'); void run({ kind: 'loadMuse' }); }
-  if (id === MENU.listen) {
-    const host = convHost();
-    if (!host) { model.showFlash('Conversation is not available', Date.now()); return; }
-    return startConversation(host);
-  }
   if (id === MENU.tiles) enterTiles();
   if (id === MENU.editPage) { if (!showingTiles()) enterTiles(); tiles.startEdit(tileCtx()); }
   if (id === MENU.tilesOn) {
@@ -942,7 +873,7 @@ async function menu(id: number, source: InputSource = 'touch'): Promise<void> {
     setHideOldTexts(!model.hideOldTexts);
     model.showFlash(model.hideOldTexts ? 'Texts older than 24 h hidden' : 'All texts shown', Date.now());
   }
-  if (id !== MENU.tiles && id !== MENU.tilesOn && ![MENU.listen, INTERNAL_MENU.settings, MENU.hideOldTexts, MENU.pause, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
+  if (id !== MENU.tiles && id !== MENU.tilesOn && ![INTERNAL_MENU.settings, MENU.hideOldTexts, MENU.pause, MENU.editPage].includes(id)) { tilesActive = false; fromTiles = false; }
   if (id === MENU.pause) {
     const paused = !model.data?.paused;
     try {
@@ -977,6 +908,6 @@ void poll();
 setInterval(() => { if (foreground) void poll(); }, POLL_MS);
 // The open agent's conversation refreshes faster than the rest, so replies show up quickly.
 setInterval(() => { if (foreground && showingDesk() && !desk!.imuOn) void desk!.resume(); }, 3000); // reconnect: tracking is back on while the Desk is in front
-setInterval(() => { void getConv()?.tick(apply => inputQueue.pushExternal('conversation', apply)); if (foreground) { void refreshTerminal(); void refreshTiles(); } }, 1200);
+setInterval(() => { if (foreground) { void refreshTerminal(); void refreshTiles(); } }, 1200);
 setInterval(() => void loadLayout(), 60_000);
 setInterval(paint, 15_000); // keep the clock current between polls

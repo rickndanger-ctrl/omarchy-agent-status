@@ -7,8 +7,6 @@
 import { MUSE_UNREACHABLE } from './musecache';
 import { clip, clock, conversationLines, museDisplay, recentChats, sessionKey, studioText, STATE_WORD, wrap } from './model';
 import type { Action, Chat, HomeData, Input, Session } from './model';
-import { clockTime, mmss } from './conversation';
-import type { ConvView } from './conversation';
 
 /** One tile is 288 px wide: 27 characters, 9 lines, title included. More lines make the glasses auto-scroll and swallow swipes. */
 export const TILE_WIDTH = 27;
@@ -18,12 +16,12 @@ export const PAGE_COUNT = 5;
 /**
  * Widget ids, as stored in the layout:
  *   agent:<machine>/<pane-or-agent>  a terminal tail; matches a pane first, else the newest session of that agent there
- *   muse | messages | approvals | studio | clock | reminders | conversation | empty
+ *   muse | messages | approvals | studio | clock | reminders | empty
  *   chat:<id> | chat:recent          one Messages thread (chat:recent = the newest thread)
  *   url:<endpoint>                   a plug-in: GET returns UrlTile; an action is POSTed back (through the hub)
  */
 export type WidgetId = string;
-export type WidgetKind = 'agent' | 'muse' | 'chat' | 'messages' | 'approvals' | 'studio' | 'clock' | 'reminders' | 'conversation' | 'url' | 'empty';
+export type WidgetKind = 'agent' | 'muse' | 'chat' | 'messages' | 'approvals' | 'studio' | 'clock' | 'reminders' | 'url' | 'empty';
 
 export interface PageLayout { left: WidgetId; right: WidgetId }
 export interface Layout { pages: PageLayout[] } // always PAGE_COUNT pages
@@ -63,8 +61,6 @@ export interface TileContext {
   muse(): { question: string; reply: string } | null;
   reminders(): Reminder[] | null;
   url(endpoint: string): UrlTile | null;
-  /** The Conversation tile's state. Optional: without it the tile says it is not available. */
-  conversation?(): ConvView | null;
   /** Which hub Home talks to, for the clock tile ("via Mini 1"); down = no allowed hub answers. Optional. */
   hub?: { name: string | null; down: boolean };
   /** What was just sent to the agent in this pane ("sent to Claude"), for a few seconds. Optional. */
@@ -77,7 +73,6 @@ export type TileNeed =
   | { kind: 'chat'; id: number }
   | { kind: 'muse' }
   | { kind: 'reminders' }
-  | { kind: 'conversation' }
   | { kind: 'url'; endpoint: string };
 
 /** A full Home screen a tile can open (then double-tap there returns to Tiles). */
@@ -93,7 +88,6 @@ export type TileEffect =
   | { kind: 'action'; action: Action }
   | { kind: 'open'; target: OpenTarget }
   | { kind: 'reminderDone'; id: string }
-  | { kind: 'conversation'; op: 'start' | 'stop' | 'sendMuse' }
   | { kind: 'urlAction'; endpoint: string; id: string };
 
 export interface TileAction { id: string; label: string }
@@ -425,70 +419,6 @@ function remindersWidget(): Widget {
   };
 }
 
-/** Conversation: listens only after a Start; hints while listening, then the summary. See docs/CONVERSATION.md. */
-function conversationWidget(): Widget {
-  const view = (ctx: TileContext) => ctx.conversation?.() ?? null;
-  const fallbackLine = (v: ConvView, width: number) => (v.fallback ? wrap(v.fallback, width) : []);
-  return {
-    id: 'conversation', kind: 'conversation',
-    title: ctx => {
-      const v = view(ctx);
-      if (!v) return 'Conversation';
-      if (v.phase === 'listening') return `● Listening ${mmss(v.elapsedMs)}`;
-      if (v.phase === 'starting') return 'Starting…';
-      if (v.phase === 'stopping' || v.phase === 'summarizing') return 'Summarizing…';
-      if (v.phase === 'done') return `Summary · ${clockTime(v.stoppedAt)}`;
-      return 'Conversation';
-    },
-    body: (ctx, width) => {
-      const v = view(ctx);
-      if (!v) return wrap('Conversation is not available here.', width);
-      const note = [...(v.notice ? [...wrap(v.notice, width), ''] : []), ...(v.warning ? [...wrap(v.warning, width), ''] : [])];
-      const missed = v.skipped > 0 ? [`${v.skipped} piece${v.skipped === 1 ? '' : 's'} missed`] : [];
-      switch (v.phase) {
-        case 'starting': return [...note, 'Starting…'];
-        case 'listening': {
-          const hints = v.hints.length ? v.hints.flatMap(h => wrap(`• ${h}`, width)) : wrap('Listening… hints appear after about 10 seconds.', width);
-          return [...note, ...(v.error ? [...wrap(v.error, width), ''] : []), ...hints, ...(v.fallback ? ['', ...fallbackLine(v, width)] : []), ...(missed.length ? ['', ...missed] : []), '', 'Tap to stop.'];
-        }
-        case 'stopping': case 'summarizing': return [...note, 'Summarizing…', ...(missed.length ? ['', ...missed] : []), ...(v.fallback ? ['', ...fallbackLine(v, width)] : [])];
-        case 'done': {
-          const lines = [...note, ...v.summary.flatMap(l => wrap(l, width))];
-          if (v.actions.length) lines.push('', 'Action items:', ...v.actions.flatMap(a => wrap(`- ${a}`, width)));
-          if (v.fallback) lines.push('', ...fallbackLine(v, width));
-          if (missed.length) lines.push('', ...missed);
-          return lines.length ? lines : ['(Nothing was said.)'];
-        }
-        case 'error': return [...note, ...wrap(v.error || 'Something went wrong.', width), '', 'Tap to start again.'];
-        default: return [...note, 'Tap to start listening.', '', 'Nothing is heard until you do.'];
-      }
-    },
-    tap: ctx => {
-      const v = view(ctx);
-      if (!v) return null;
-      if (v.phase === 'listening' || v.phase === 'starting') return { kind: 'conversation', op: 'stop' };
-      return v.phase === 'idle' || v.phase === 'error' ? { kind: 'conversation', op: 'start' } : null;
-    },
-    actions: ctx => {
-      const v = view(ctx);
-      if (!v) return [];
-      if (v.phase === 'listening' || v.phase === 'starting') return [{ id: 'stop', label: 'Stop listening' }];
-      if (v.phase === 'done') return [{ id: 'start', label: 'Start new' }, v.sent ? { id: 'sent', label: 'Sent to Muse' } : { id: 'muse', label: 'Send summary to Muse' }];
-      if (v.phase === 'idle' || v.phase === 'error') return [{ id: 'start', label: 'Start listening' }];
-      return [{ id: 'wait', label: 'Summarizing…' }];
-    },
-    act: (actionId, ctx) => {
-      const v = view(ctx);
-      if (!v) return null;
-      if (actionId === 'stop' && (v.phase === 'listening' || v.phase === 'starting')) return { kind: 'conversation', op: 'stop' };
-      if (actionId === 'start' && (v.phase === 'idle' || v.phase === 'error' || v.phase === 'done')) return { kind: 'conversation', op: 'start' };
-      if (actionId === 'muse' && v.phase === 'done' && !v.sent) return { kind: 'conversation', op: 'sendMuse' };
-      return null;
-    },
-    needs: () => [{ kind: 'conversation' }],
-  };
-}
-
 function urlWidget(id: WidgetId): Widget {
   const endpoint = id.slice('url:'.length);
   return {
@@ -512,7 +442,6 @@ export function widgetFor(id: WidgetId): Widget {
     case 'studio': return studioWidget();
     case 'clock': return clockWidget();
     case 'reminders': return remindersWidget();
-    case 'conversation': return conversationWidget();
     default: return empty('empty', 'empty', 'Empty');
   }
 }
@@ -521,7 +450,7 @@ export function widgetFor(id: WidgetId): Widget {
 export function availableWidgets(data: HomeData | null): { id: WidgetId; label: string }[] {
   const out: { id: WidgetId; label: string }[] = [
     { id: 'muse', label: 'Muse' }, { id: 'messages', label: 'Messages' }, { id: 'approvals', label: 'Needs you' },
-    { id: 'studio', label: 'Studio' }, { id: 'orchestrator', label: 'Orchestrator' }, { id: 'reminders', label: 'Reminders' }, { id: 'clock', label: 'Clock' }, { id: 'conversation', label: 'Conversation' }, { id: 'empty', label: 'Empty' },
+    { id: 'studio', label: 'Studio' }, { id: 'orchestrator', label: 'Orchestrator' }, { id: 'reminders', label: 'Reminders' }, { id: 'clock', label: 'Clock' }, { id: 'empty', label: 'Empty' },
   ];
   if (data) {
     const seen = new Set<string>();
@@ -540,7 +469,7 @@ export function availableWidgets(data: HomeData | null): { id: WidgetId; label: 
   return out;
 }
 
-const KNOWN = /^(agent:[^/]+\/.+|chat:(recent|\d+)|url:.+|muse|messages|approvals|studio|clock|reminders|conversation|orchestrator|empty)$/;
+const KNOWN = /^(agent:[^/]+\/.+|chat:(recent|\d+)|url:.+|muse|messages|approvals|studio|clock|reminders|orchestrator|empty)$/;
 
 /** A layout from the hub, repaired: always PAGE_COUNT pages, unknown ids become 'empty'. */
 export function normalizeLayout(raw: unknown): Layout {

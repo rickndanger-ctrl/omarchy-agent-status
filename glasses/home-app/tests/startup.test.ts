@@ -9,7 +9,8 @@ import {
   isValidMenuItemID, isMenuNameWithinLimit, type EvenAppBridge,
 } from '@evenrealities/even_hub_sdk';
 import { Glasses } from '../src/glasses';
-import { GLASSES_MENU, GLASSES_MENU_MAX, MENU } from '../src/menu';
+import { GLASSES_MENU, GLASSES_MENU_MAX, MENU, setHideDone } from '../src/menu';
+import { HomeModel } from '../src/model';
 
 test('the long-press menu has at most 10 items, valid unique ids and names', () => {
   assert.ok(GLASSES_MENU.length <= GLASSES_MENU_MAX, `${GLASSES_MENU.length} items`);
@@ -19,6 +20,11 @@ test('the long-press menu has at most 10 items, valid unique ids and names', () 
     assert.ok(isMenuNameWithinLimit(m.name), `name ${m.name}`);
   }
   assert.deepEqual(Object.values(MENU).sort((a, b) => a - b), GLASSES_MENU.map(m => m.id).sort((a, b) => a - b)); // nothing in MENU is missing from the menu
+});
+
+test('the long-press menu has nine items after removing Conversation Listen', () => {
+  assert.equal(GLASSES_MENU.length, 9);
+  assert.equal(GLASSES_MENU.some(m => m.name === 'Listen'), false);
 });
 
 test('main.ts builds the glasses with that menu list', () => {
@@ -76,7 +82,7 @@ test('startup reaches the first glasses frame, and every page it builds (single 
 });
 
 test('the harness catches the 0.4.9 failure: 11 menu items are refused and the app reports it', async () => {
-  const { g, connected, errors, statuses } = await boot([...GLASSES_MENU, { id: 11, name: 'Listen' }]);
+  const { g, connected, errors, statuses } = await boot([...GLASSES_MENU, { id: 11, name: 'Extra one' }, { id: 13, name: 'Extra two' }]);
   try {
     assert.equal(connected, false);
     assert.match(errors.join(' '), /TOO_MANY_MENU_ITEMS|11 menuItems/);
@@ -114,4 +120,19 @@ test('Close app asks the glasses to confirm (shutDownPageContainer exit mode 1)'
     assert.equal(await g.shutDown(), true);
     assert.deepEqual(shutdowns, [1]);
   } finally { g.dispose(); }
+});
+
+test('the phone checkbox "Hide finished agents" flips hideDone and remembers it', () => {
+  const stored: Record<string, string> = {};
+  const model = { hideDone: false };
+  const store = { set: (k: string, v: string) => { stored[k] = v; } };
+  setHideDone(model, store, true);
+  assert.equal(model.hideDone, true);
+  assert.equal(stored['home.hideDone'], '1');
+  setHideDone(model, store, false);
+  assert.equal(model.hideDone, false);
+  assert.equal(stored['home.hideDone'], '0');
+  const real = new HomeModel(); // the real model reads the same flag
+  setHideDone(real, store, true);
+  assert.equal(real.hideDone, true);
 });

@@ -49,7 +49,6 @@ export type Action =
   | { kind: 'startAgent'; machine: string; agent: string; folder: string; text: string }
   | { kind: 'openTiles' }
   | { kind: 'openDesk' }
-  | { kind: 'startConversation' }
   | { kind: 'displayOff' }
   | { kind: 'brightness'; value: number }
   | { kind: 'closeApp' }
@@ -67,7 +66,6 @@ type Screen =
   | { kind: 'studio' }
   | { kind: 'tiles' }
   | { kind: 'desk' } // only a Home row's target, like tiles: the Desk is drawn by src/desk.ts
-  | { kind: 'conversation' } // only a Home row's target: selecting it starts listening, it is not a screen
   | { kind: 'settings' }
   | { kind: 'workspaces'; machine?: string }
   | { kind: 'needs' }
@@ -713,7 +711,6 @@ export class HomeModel {
       rows.push({ id: 'home:messages', text: clip(`Messages${unread ? ` · ${unread} new` : ''} · ${latest}`, WIDTH - 2), open: { kind: 'messages' } });
     }
     if (d.muse) rows.push({ text: 'Muse · latest reply', open: { kind: 'muse' } });
-    rows.push({ text: 'Listen · Conversation', open: { kind: 'conversation' } });
     rows.push({ text: 'Settings · display, brightness', open: { kind: 'settings' } });
     if (d.studio) {
       const busy = d.studio.machines.filter(m => m.busy);
@@ -1065,7 +1062,6 @@ export class HomeModel {
     if (!target) return null;
     if (target.kind === 'tiles') return { kind: 'openTiles' };
     if (target.kind === 'desk') return { kind: 'openDesk' };
-    if (target.kind === 'conversation') return { kind: 'startConversation' };
     if (target.kind === 'agent') this.notices = this.notices.filter(n => n.key !== target.key);
     // An approval answered from Needs you comes back to Needs you.
     if (target.kind === 'approval') this.returnTo = s;

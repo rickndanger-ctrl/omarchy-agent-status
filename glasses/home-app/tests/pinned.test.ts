@@ -46,7 +46,7 @@ test('Home: one row per pin with the bar symbol and the bar words, then the norm
   const labels = seen.map(l => l.slice(2));
   assert.deepEqual(labels.slice(0, 7).map(l => l.replace(/^\S+ /, '').split(' · ').slice(0, 2).join(' · ')), PINS.map(p => p.label));
   assert.match(labels.at(-1)!, /^All agents · 4 on 4 computers/);
-  assert.ok(labels.findIndex(l => /^Listen/.test(l)) > 6, 'the normal rows come after the pins');
+  assert.ok(labels.findIndex(l => /^Settings/.test(l)) > 6, 'the normal rows come after the pins');
 });
 
 test('a pin on an offline computer shows offline, with no session on an online one not running; neither opens anything', () => {

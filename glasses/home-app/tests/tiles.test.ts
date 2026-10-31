@@ -442,3 +442,23 @@ test('orchestrator tile: after a reply the title says sent to Claude for a few s
   note = null;
   assert.match(w.title(ctx({ data: up, sent: () => note })), /^Orchestrator/);
 });
+
+
+test('a saved conversation layout loads as an empty tile without changing its neighbors', () => {
+  const saved = { pages: [{ left: 'conversation', right: 'clock' }, { left: 'muse', right: 'conversation' }] };
+  const layout = normalizeLayout(saved);
+  assert.deepEqual(layout.pages.slice(0, 2), [{ left: 'empty', right: 'clock' }, { left: 'muse', right: 'empty' }]);
+  assert.equal(layout.pages.length, PAGE_COUNT);
+  const tiles = new Tiles();
+  tiles.setLayout(saved);
+  const frame = tiles.render(ctx());
+  assert.match(frame.left, /^1\/5 Empty/);
+  assert.doesNotMatch(frame.left, /Conversation|Listening|not available/);
+  assert.match(frame.right, /Clock/);
+  const old = widgetFor('conversation');
+  assert.equal(old.kind, 'empty');
+  assert.deepEqual(old.needs(ctx()), []);
+  assert.deepEqual(old.actions(ctx()), []);
+  assert.equal(old.act('start', ctx()), null);
+  assert.equal(availableWidgets(data).some(w => w.id === 'conversation'), false);
+});

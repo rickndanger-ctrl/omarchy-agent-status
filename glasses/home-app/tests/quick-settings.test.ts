@@ -77,7 +77,7 @@ test('the remote parses "settings" like the other buttons and it goes through th
 test('Home row "Settings" opens it, from touch and from remote presses', async () => {
   for (const source of ['touch', 'remote'] as const) {
     const r = rig();
-    r.press(source, 'down', 'down', 'select'); // Agents, Listen, Settings (no Messages/Muse in this data)
+    r.press(source, 'down', 'select'); // Agents, Settings (no Messages/Muse in this data)
     await r.idle();
     assert.equal(r.model.screenKind, 'settings', source);
   }

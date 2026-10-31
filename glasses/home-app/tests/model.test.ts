@@ -19,7 +19,7 @@ test('home shows time and an Agents page summary; the page lists each session', 
   const text = m.render(NOW, 'America/Los_Angeles');
   assert.match(text.split('\n')[0], /^Mon Oct 26 · 11:42 AM/);
   assert.match(text, /^AGENTS │ 1 busy · 1 done$/m);
-  assert.doesNotMatch(text, /^MENU$/m); // the title line makes room for the Listen row
+  assert.doesNotMatch(text, /^MENU$/m); // Home does not add a separate menu heading
   assert.match(text, /> Agents · 2 on 2 computers/);
   m.input('select', NOW);
   assert.equal(m.screenKind, 'agents');
@@ -490,8 +490,8 @@ test('home keeps the menu first; waiting items are one row that opens the Needs 
   while (m.screenKind !== 'home') m.input('back', NOW); // dismiss the pop-ups
   const text = m.render(NOW);
   assert.match(text, /^─+\n> Agents/m);
-  assert.match(text, /Muse · latest reply\n  Listen · Conversation\n  Settings · display, brightness/ );
-  for (let i = 0; i < 5; i++) m.input('down', NOW);
+  assert.match(text, /Muse · latest reply\n  Settings · display, brightness/ );
+  for (let i = 0; i < 4; i++) m.input('down', NOW);
   assert.match(m.render(NOW), /> ! Needs you · 3 \(2 approvals\)/); // scrolled into the window
   m.input('select', NOW);
   assert.equal(m.screenKind, 'needs');
@@ -576,7 +576,7 @@ test('studio row opens a scrolling page of computers and the conversation', () =
   m.update(base({ sessions: [], studio }));
   assert.match(m.render(NOW), /  Studio · 1 working · Laptop: Reverser · step 5/);
   m.input('down', NOW);
-  m.input('down', NOW); // (Listen · Conversation and Settings sit before Studio)
+  // Settings sits before Studio.
   m.input('down', NOW);
   m.input('select', NOW);
   assert.equal(m.screenKind, 'studio');
@@ -627,7 +627,6 @@ test('a pop-up and Later return you to the same highlighted row', () => {
 test('the highlight stays on the same item when a row is added above it', () => {
   const m = new HomeModel();
   m.update(withChat());
-  m.input('down', NOW);
   m.input('down', NOW);
   m.input('down', NOW);
   m.input('down', NOW); // Settings
