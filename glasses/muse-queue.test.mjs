@@ -332,6 +332,34 @@ test('every later G2 activity restarts the full 60s pause', async () => {
   assert.equal((await f.ask()).status, 'done')
 })
 
+test('configured positive G2 pause admits only at its exact boundary after every route', async () => {
+  for (const [method, path] of [['POST', '/api/muse/ask'], ['GET', '/api/muse/reply'],
+    ['GET', '/api/muse'], ['POST', '/api/transcribe']]) {
+    const f = fixture({ g2PauseMs: 2000 })
+    f.client.noteG2(method, path)
+    await f.tick(1999)
+    assert.equal((await f.ask()).status, 'busy')
+    assert.equal(f.calls.length, 0)
+    f.client.noteG2(method, path)
+    await f.tick(1999)
+    assert.equal((await f.ask()).status, 'busy')
+    await f.tick(1)
+    assert.equal((await f.ask()).status, 'done')
+  }
+})
+
+test('zero, negative, nonfinite and wrong-type G2 pause retain safe60000ms default', async () => {
+  for (const g2PauseMs of [0, -1, Infinity, NaN, '2000', null, false, {}]) {
+    const f = fixture({ g2PauseMs })
+    f.client.noteG2('POST', '/api/muse/ask')
+    await f.tick(59_999)
+    assert.equal((await f.ask()).status, 'busy')
+    assert.equal(f.calls.length, 0)
+    await f.tick(1)
+    assert.equal((await f.ask()).status, 'done')
+  }
+})
+
 test('Listen and unrelated or wrong-method requests never establish G2 activity', async () => {
   const f = fixture()
   for (const [method, path] of [['GET', '/api/listen'], ['POST', '/api/listen/chunk'],

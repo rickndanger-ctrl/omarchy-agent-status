@@ -19,10 +19,11 @@ function fixture(options = {}) {
   return { handle, added, snapshots, set: value => { data = value } }
 }
 
-function request({ method = 'GET', path = '/listen/live.html', headers = {}, address = '127.0.0.1', body = '', chunks, stream } = {}) {
+function request({ method = 'GET', path = '/listen/live.html', headers = {}, rawHeaders, address = '127.0.0.1', body = '', chunks, stream } = {}) {
   const req = stream ?? Readable.from(chunks ?? (body ? [Buffer.from(body)] : []))
   req.method = method; req.url = path
   req.headers = { host: '127.0.0.1:5182', ...headers }
+  req.rawHeaders = rawHeaders === undefined ? Object.entries(req.headers).flat() : rawHeaders
   req.socket = { remoteAddress: address, localPort: 5182 }
   return req
 }
@@ -130,7 +131,7 @@ test('IPv4 mapped loopback works while every other socket is refused even with a
     req.headers.authorization = 'Bearer fixture-valid-token'
     const response = { writeHead(status) { this.status = status }, end() {} }
     await f.handle(req, response)
-    assert.equal(response.status, 403)
+    assert.equal(response.status, 404)
   }
   assert.equal(f.snapshots.length, 1)
 })
@@ -145,7 +146,7 @@ test('forwarding and nonlocal Host or Origin never bypass loopback with tokens',
     { 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' },
   ]) {
     const result = await call(f.handle, json({ text: 'Blocked' }, { headers: { ...headers, authorization: 'Bearer fixture-valid-token' } }))
-    assert.equal(result.status, 403, JSON.stringify(headers))
+    assert.equal(result.status, 404, JSON.stringify(headers))
   }
   assert.equal(f.snapshots.length, 0)
   assert.equal(f.added.length, 0)
@@ -153,9 +154,9 @@ test('forwarding and nonlocal Host or Origin never bypass loopback with tokens',
 })
 
 test('optional loopback hook is only an additional veto', async () => {
-  assert.equal((await call(fixture({ loopback: () => false }).handle)).status, 403)
-  assert.equal((await call(fixture({ loopback: () => { throw new Error('private') } }).handle)).status, 403)
-  assert.equal((await call(fixture({ loopback: () => true }).handle, { address: '192.0.2.10' })).status, 403)
+  assert.equal((await call(fixture({ loopback: () => false }).handle)).status, 404)
+  assert.equal((await call(fixture({ loopback: () => { throw new Error('private') } }).handle)).status, 404)
+  assert.equal((await call(fixture({ loopback: () => true }).handle, { address: '192.0.2.10' })).status, 404)
 })
 
 test('all forwarded and Tailscale identity metadata variants are rejected even on loopback', async () => {
@@ -165,13 +166,137 @@ test('all forwarded and Tailscale identity metadata variants are rejected even o
     const result = await call(f.handle, json({ text: 'Must not admit proxy note' }, {
       headers: { [header]: 'fixture-proxy', authorization: 'Bearer fixture-valid-token' },
     }))
-    assert.equal(result.status, 403, header)
+    assert.equal(result.status, 404, header)
   }
   assert.equal(f.snapshots.length, 0)
   assert.equal(f.added.length, 0)
   assert.equal((await call(f.handle, json({ text: 'Direct browser note' }, {
     headers: { origin: 'http://127.0.0.1:5182', 'sec-fetch-site': 'same-origin' },
   }))).status, 200)
+})
+
+test('Host uses exact raw strings, never URL-normalized loopback aliases or padding', async () => {
+  const f = fixture()
+  const rejected = ['127.1:5182', '0177.0.0.1:5182', '2130706433:5182', '0x7f000001:5182',
+    '127.0.0.1', 'localhost', '127.0.0.1:05182', 'localhost.:5182', '[::1]:5182',
+    ' localhost:5182', 'localhost:5182 ', 'localhost:5182\n', '127.0.0.1:5182/path', 'localhoſt:5182']
+  for (const host of rejected) {
+    for (const path of ['/listen/live.txt', '/listen/live.html', '/listen/note']) {
+      const options = path.endsWith('/note') ? json({ text: 'REFUSED NOTE' }) : {}
+      const result = await call(f.handle, { ...options, path, headers: { ...options.headers, host, authorization: 'Bearer fixture-token' } })
+      assert.equal(result.status, 404, host)
+      assert.equal(result.body, '{"error":"Not found"}')
+      assert.doesNotMatch(result.body, /fixture-session|transcript|REFUSED NOTE/)
+    }
+  }
+  assert.equal(f.snapshots.length, 0)
+  assert.equal(f.added.length, 0)
+  for (const host of ['127.0.0.1:5182', 'localhost:5182', 'LOCALHOST:5182']) {
+    assert.equal((await call(f.handle, { headers: { host } })).status, 200)
+  }
+})
+
+test('raw duplicate Host or Origin is refused even when Node normalized only the first value', async () => {
+  const f = fixture()
+  const host = ['Host', '127.0.0.1:5182']
+  for (const rawHeaders of [[], null, [...host, 'unpaired'],
+    [...host, 'hOsT', '127.0.0.1:5182'], [...host, 'Host', 'host.invalid'],
+    [...host, 'Origin', 'http://127.0.0.1:5182', 'oRiGiN', 'http://127.0.0.1:5182'],
+    [...host, 'Origin', 'http://127.0.0.1:5182', 'Origin', 'http://host.invalid'], [...host, 'Origin', '']]) {
+    for (const path of ['/listen/live.txt', '/listen/live.html', '/listen/note']) {
+      const result = await call(f.handle, { ...(path.endsWith('/note') ? json({ text: 'REFUSED' }) : {}), path, rawHeaders })
+      assert.equal(result.status, 404, JSON.stringify(rawHeaders))
+      assert.equal(result.body, '{"error":"Not found"}')
+    }
+  }
+  assert.equal(f.snapshots.length, 0)
+  assert.equal(f.added.length, 0)
+})
+
+test('Via and proxy raw-header presence is refused when empty, duplicated or absent from normalized headers', async () => {
+  const f = fixture()
+  const host = ['Host', '127.0.0.1:5182']
+  for (const proxy of [['Via', '1.1 fixture'], ['vIa', ''], ['Via', '', 'VIA', '1.1 fixture'],
+    ['X-Forwarded-For', ''], ['Forwarded', ''], ['Tailscale-User-Login', ''], ['X-Forwarded-Custom', '']]) {
+    for (const path of ['/listen/live.txt', '/listen/live.html', '/listen/note']) {
+      const result = await call(f.handle, { ...(path.endsWith('/note') ? json({ text: 'REFUSED' }) : {}), path, rawHeaders: [...host, ...proxy] })
+      assert.equal(result.status, 404, JSON.stringify(proxy))
+      assert.equal(result.body, '{"error":"Not found"}')
+    }
+  }
+  assert.equal((await call(f.handle, { headers: { Via: '' } })).status, 404)
+  assert.equal(f.snapshots.length, 0)
+  assert.equal(f.added.length, 0)
+})
+
+test('no-session pages are explicit 200 responses and notes fail 409 without any write', async () => {
+  let writes = 0
+  const handle = createListenPage({ listen: { snapshot: () => ({ status: 404, body: { error: 'Session not found' } }),
+    addNote() { writes++; throw new Error('must not write') } } })
+  for (const path of ['/listen/live.txt', '/listen/live.html']) {
+    const result = await call(handle, { path })
+    assert.equal(result.status, 200)
+    assert.match(result.body, /no Listen session on this hub/)
+    assert.equal(result.headers['Cache-Control'], 'no-store')
+    assert.match(result.headers['Content-Security-Policy'], /default-src 'none'/)
+  }
+  for (const options of [json({ text: 'Too early' }), form({ note: 'Too early' })]) {
+    const result = await call(handle, options)
+    assert.equal(result.status, 409)
+    assert.match(JSON.parse(result.body).error, /no Listen session on this hub/)
+  }
+  assert.equal(writes, 0)
+})
+
+test('plain text has CSP and HTML script remains nonce-only with matching script nonce', async () => {
+  const f = fixture()
+  const txt = await call(f.handle, { path: '/listen/live.txt' })
+  assert.match(txt.headers['Content-Security-Policy'], /default-src 'none'/)
+  assert.equal(txt.headers['X-Frame-Options'], 'DENY')
+  const page = await call(f.handle)
+  const csp = page.headers['Content-Security-Policy']
+  const scriptSource = csp.match(/(?:^|;)\s*script-src\s+([^;]*)/)[1]
+  const nonce = scriptSource.match(/'nonce-([^']+)'/)[1]
+  assert.equal(scriptSource.trim(), `'nonce-${nonce}'`)
+  assert.doesNotMatch(scriptSource, /unsafe-inline/)
+  assert.match(page.body, /<noscript><meta http-equiv="refresh" content="2">/)
+  const scripts = [...page.body.matchAll(/<script\b([^>]*)>/g)]
+  assert.ok(scripts.length > 0)
+  assert.ok(scripts.every(([, attributes]) => attributes.includes(`nonce="${nonce}"`)))
+})
+
+test('optional form or JSON id is bound exactly when present and absent uses current session', async () => {
+  const f = fixture()
+  for (const options of [form({ note: 'No id' }), form({ note: 'Right id', id: 'fixture-session', about: '' }),
+    json({ text: 'No id' }), json({ text: 'Right id', id: 'fixture-session' })]) {
+    const response = await call(f.handle, options)
+    assert.ok(response.status >= 200 && response.status < 400)
+  }
+  const admitted = f.added.length
+  for (const id of ['old-session', '', null, 0, false, {}]) {
+    assert.equal((await call(f.handle, json({ text: 'Wrong id', id }))).status, 409)
+  }
+  assert.equal((await call(f.handle, form({ note: 'Wrong id', id: 'old-session' }))).status, 409)
+  assert.equal(f.added.length, admitted)
+})
+
+test('4096-byte inclusive boundary applies to declared and chunked UTF8 request bytes', async () => {
+  assert.equal(NOTE_BODY_BYTES, 4096)
+  const f = fixture()
+  const overhead = Buffer.byteLength(JSON.stringify({ text: '' }))
+  const exact = JSON.stringify({ text: 'x'.repeat(4096 - overhead) })
+  assert.equal(Buffer.byteLength(exact), 4096)
+  const allowed = await call(f.handle, { ...json({}), body: exact, headers: { 'content-type': 'application/json', 'content-length': '4096' } })
+  assert.equal(allowed.status, 200)
+  const oversized = Buffer.from(exact + ' ')
+  const variants = [
+    { ...json({}), body: exact + ' ', headers: { 'content-type': 'application/json', 'content-length': '4097' } },
+    { ...json({}), body: '', chunks: [oversized.subarray(0, 2000), oversized.subarray(2000)] },
+    json({ text: 'é'.repeat(3000) }),
+  ]
+  for (const options of variants) assert.equal((await call(f.handle, options)).status, 413)
+  assert.equal(f.added.length, 1)
+  assert.equal(f.snapshots.length, 1)
 })
 
 test('stale form session, stopped sessions and chat mode do not admit notes', async () => {

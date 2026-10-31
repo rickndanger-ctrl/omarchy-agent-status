@@ -2,11 +2,13 @@
 // transcript logging, disk persistence, app/window control or shared auth bypass.
 import { randomBytes } from 'node:crypto'
 
-export const NOTE_BODY_BYTES = 16 * 1024
+export const NOTE_BODY_BYTES = 4096
 const LOOPBACK = new Set(['127.0.0.1', '::ffff:127.0.0.1'])
-const PROXY_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'true-client-ip']
+const PROXY_HEADERS = ['forwarded', 'via', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'true-client-ip']
 const HEADERS = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
-  'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY' }
+  'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY',
+  'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'" }
+const NO_SESSION = 'no Listen session on this hub'
 const oneLine = value => String(value ?? '').replace(/[\u0000-\u001f\u007f\s]+/gu, ' ').trim()
 const finiteTime = value => typeof value === 'number' && Number.isFinite(value) && value >= 0
 export const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g,
@@ -51,25 +53,31 @@ export function transcriptText(snapshot) {
 }
 
 function authority(req) {
-  const proxyMetadata = Object.keys(req.headers ?? {}).some(key => {
+  // Node's normalized headers discard later Host occurrences. Admission must
+  // use the complete raw list, before reading any session or request body.
+  if (!Array.isArray(req.rawHeaders) || req.rawHeaders.length % 2
+      || req.rawHeaders.some(value => typeof value !== 'string')) return null
+  const raw = []
+  for (let i = 0; i < req.rawHeaders.length; i += 2) raw.push([req.rawHeaders[i].toLowerCase(), req.rawHeaders[i + 1]])
+  const proxyMetadata = [...Object.keys(req.headers ?? {}), ...raw.map(([key]) => key)].some(key => {
     const name = key.toLowerCase()
     return PROXY_HEADERS.includes(name) || name.startsWith('x-forwarded-') || name.startsWith('tailscale-')
   })
   if (!LOOPBACK.has(req.socket?.remoteAddress) || proxyMetadata) return null
-  const host = req.headers?.host
-  if (typeof host !== 'string' || /[\s\\/@?#]/.test(host)) return null
+  const hosts = raw.filter(([key]) => key === 'host').map(([, value]) => value)
+  const origins = raw.filter(([key]) => key === 'origin').map(([, value]) => value)
+  const port = req.socket.localPort
+  if (hosts.length !== 1 || origins.length > 1 || !Number.isInteger(port) || port < 1 || port > 65535) return null
+  const host = hosts[0]
+  // No URL parsing here: abbreviated/octal IPv4, omitted/padded ports,
+  // whitespace, trailing dots, userinfo and IPv6 aliases must never normalize in.
+  if (host !== `127.0.0.1:${port}` && (!/^[\x00-\x7f]*$/.test(host) || host.toLowerCase() !== `localhost:${port}`)) return null
   const scheme = req.socket?.encrypted ? 'https:' : 'http:'
-  try {
-    const url = new URL(`${scheme}//${host}`)
-    const port = Number(url.port || (scheme === 'https:' ? 443 : 80))
-    if (!['127.0.0.1', 'localhost'].includes(url.hostname) || !Number.isInteger(req.socket.localPort)
-        || port !== req.socket.localPort) return null
-    const origin = req.headers.origin
-    if (origin !== undefined && (typeof origin !== 'string' || origin !== url.origin)) return null
-    const site = req.headers['sec-fetch-site']
-    if (site !== undefined && !['same-origin', 'none'].includes(site)) return null
-    return url.origin
-  } catch { return null }
+  const expectedOrigin = `${scheme}//${host.toLowerCase()}`
+  if (origins.length && origins[0] !== expectedOrigin) return null
+  const site = req.headers?.['sec-fetch-site']
+  if (site !== undefined && !['same-origin', 'none'].includes(site)) return null
+  return expectedOrigin
 }
 
 function readBody(req, timeoutMs) {
@@ -118,7 +126,7 @@ function parseNote(body, type) {
     if ([...form.keys()].some(key => !['note', 'about', 'id'].includes(key) || form.getAll(key).length !== 1)) throw new Error('Invalid note')
     value = { text: form.get('note'), about: form.get('about') ?? undefined, id: form.get('id') ?? undefined }
   }
-  if (typeof value.text !== 'string' || !value.text.trim() || value.id !== undefined && typeof value.id !== 'string') throw new Error('Invalid note')
+  if (typeof value.text !== 'string' || !value.text.trim()) throw new Error('Invalid note')
   const at_t = parseAbout(value.about)
   return { text: value.text, ...(at_t === undefined ? {} : { at_t }), ...(value.id === undefined ? {} : { id: value.id }) }
 }
@@ -137,10 +145,10 @@ if(!note?.value.trim()&&!about?.value.trim()){const id=document.querySelector('i
 function html(snapshot, mode, nonce) {
   const active = snapshot?.state === 'listening'
   const enabled = active && mode !== 'chat'
-  const text = snapshot ? transcriptText(snapshot) : 'No active Listen session.\n'
+  const text = snapshot ? transcriptText(snapshot) : NO_SESSION + '\n'
   const notes = (Array.isArray(snapshot?.notes) ? snapshot.notes : []).filter(note => finiteTime(note?.t) && finiteTime(note.at_t) && typeof note.text === 'string').slice(-20)
   const noteHTML = notes.length ? `<ol>${notes.map(note => `<li>[${escapeHTML(formatSessionTime(note.t))}] about [${escapeHTML(formatSessionTime(note.at_t))}] ${escapeHTML(note.text)}</li>`).join('')}</ol>` : '<p>No notes yet.</p>'
-  const status = active ? 'Live' : snapshot ? 'Stopped' : 'No active session'
+  const status = active ? 'Live' : snapshot ? 'Stopped' : NO_SESSION
   const availability = !active ? 'Start a Listen session to add notes.' : mode === 'chat' ? 'Page notes are unavailable in chat mode.' : 'Write a short note; about is optional.'
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Muse Listen</title><noscript><meta http-equiv="refresh" content="2"></noscript><style>body{max-width:60rem;margin:2rem auto;padding:0 1rem;font:16px system-ui;line-height:1.5}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:55vh;overflow:auto;padding:1rem;background:#f3f4f6}textarea{display:block;width:95%;min-height:6rem}label{display:block;margin:.6rem 0}li{margin:.5rem 0}</style></head><body><h1>Muse Listen</h1><p id="session-state">${status}</p><pre id="transcript">${escapeHTML(text)}</pre><h2>Note box</h2><p id="note-availability">${escapeHTML(availability)}</p><form method="post" action="/listen/note"><fieldset${enabled ? '' : ' disabled'}><input type="hidden" name="id" value="${escapeHTML(snapshot?.id ?? '')}"><label>Note<textarea name="note" required></textarea></label><label>About (mm:ss or h:mm:ss, optional)<input name="about" placeholder="00:00" inputmode="numeric"></label><button type="submit">Send</button></fieldset></form><h2>Recent notes</h2><section id="recent-notes">${noteHTML}</section><script nonce="${nonce}">${REFRESH_SCRIPT}</script></body></html>`
 }
@@ -160,7 +168,7 @@ export function createListenPage({ listen, loopback, notesFrom = 'page', bodyTim
     if (path !== '/listen' && !path.startsWith('/listen/')) return false
     let local = authority(req) !== null
     if (local && loopback !== undefined) { try { local = typeof loopback === 'function' && loopback(req) === true } catch { local = false } }
-    if (!local) { send(res, 403, { error: 'Direct loopback access only' }); return true }
+    if (!local) { send(res, 404, { error: 'Not found' }); return true }
     if (!['/listen/live.txt', '/listen/live.html', '/listen/note', '/listen'].includes(path)) { send(res, 404, { error: 'Listen page not found' }); return true }
     if (path === '/listen' && req.method === 'GET') { send(res, 303, '', 'text/plain; charset=utf-8', { Location: '/listen/live.html' }); return true }
     if (path === '/listen/note' ? req.method !== 'POST' : req.method !== 'GET') { send(res, 405, { error: 'Method not allowed' }); return true }
@@ -169,8 +177,8 @@ export function createListenPage({ listen, loopback, notesFrom = 'page', bodyTim
         const view = await listen.snapshot()
         const snapshot = view?.status === 200 && view.body && typeof view.body.id === 'string' ? view.body : null
         if (!snapshot && view?.status !== 404) { send(res, 503, { error: 'Listen page unavailable' }); return true }
-        const status = !snapshot ? 404 : snapshot.state === 'listening' ? 200 : 410
-        if (path.endsWith('.txt')) send(res, status, snapshot ? transcriptText(snapshot) : 'No active Listen session.\n', 'text/plain; charset=utf-8')
+        const status = !snapshot ? 200 : snapshot.state === 'listening' ? 200 : 410
+        if (path.endsWith('.txt')) send(res, status, snapshot ? transcriptText(snapshot) : NO_SESSION + '\n', 'text/plain; charset=utf-8')
         else send(res, status, html(snapshot, snapshot?.notesFrom ?? notesFrom, nonce), 'text/html; charset=utf-8', {
           'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
         })
@@ -187,7 +195,8 @@ export function createListenPage({ listen, loopback, notesFrom = 'page', bodyTim
     catch (error) { send(res, error?.status ?? 400, { error: error?.reason ?? 'Invalid note data' }, undefined, { Connection: 'close' }); return true }
     try {
       const view = await listen.snapshot()
-      if (view?.status !== 200 || !view.body || typeof view.body.id !== 'string') { send(res, 404, { error: 'No active Listen session' }); return true }
+      if (view?.status === 404) { send(res, 409, { error: NO_SESSION }); return true }
+      if (view?.status !== 200 || !view.body || typeof view.body.id !== 'string') { send(res, 503, { error: 'Listen note unavailable' }); return true }
       if (view.body.state !== 'listening') { send(res, 410, { error: 'Listen session stopped' }); return true }
       if (value.id !== undefined && value.id !== view.body.id) { send(res, 409, { error: 'Listen session changed; refresh the page' }); return true }
       if ((view.body.notesFrom ?? notesFrom) === 'chat') { send(res, 409, { error: 'Page notes unavailable in chat mode' }); return true }

@@ -11,8 +11,11 @@ has an optional **about** time (`mm:ss`); leaving it blank links the note to the
 newest transcript line. Press **Send** to add it. Recent notes appear below the
 box and become available immediately through the Listen API.
 
-Use `127.0.0.1` on that Mac, not a phone, tailnet address or proxy. No hub token
-is needed. Remote requests are refused even with a token. The plain-text page
+Select Mini 1 (the Mac running Muse) as the phone/glasses Listen hub.
+Use the exact `127.0.0.1:5182` address on that Mac, not a shortened IP, phone,
+tailnet address or proxy. If the page says "no Listen session on this hub",
+start a session first. No hub token is needed. Remote requests are refused even
+with a token. The plain-text page
 is `http://127.0.0.1:5182/listen/live.txt`.
 
 Default `notesFrom: "page"` sends Muse no automatic questions and makes no

@@ -81,7 +81,7 @@ test('page notes sanitize and cap300 characters without imposing chat25word limi
 test('page admission rejects invalid notes/anchors and stale sessions without side effects', () => {
   const f = fixture({ notesFrom: 'page' })
   for (const text of ['', ' ', null, 42, '—']) assert.equal(f.engine.addNote(f.id, { text }).status, 400)
-  for (const at_t of [-1, Infinity, NaN, '00:01', 1]) {
+  for (const at_t of [-1, Infinity, NaN, '00:01', 0.5, Number.MAX_SAFE_INTEGER + 1]) {
     assert.equal(f.engine.addNote(f.id, { text: 'Useful', at_t }).status, 400)
   }
   assert.equal(f.engine.addNote('other', { text: 'Wrong session' }).status, 404)
@@ -97,6 +97,18 @@ test('page admission rejects invalid notes/anchors and stale sessions without si
   f.engine.close()
 })
 
+test('early manual03 anchor is preserved without advancing actual arrival or session clocks', async () => {
+  const f = fixture({ notesFrom: 'page' })
+  await f.clock.advance(1300)
+  const result = f.engine.addNote(f.id, { text: 'About three seconds', at_t: 3000 })
+  assert.deepEqual(result, { status: 200, body: { note: { t: 1300, at_t: 3000, text: 'About three seconds' } } })
+  const snapshot = f.engine.snapshot().body
+  assert.equal(snapshot.now_t, 1300)
+  assert.deepEqual(snapshot.notes, [result.body.note])
+  assert.equal(f.asks.length, 0)
+  f.engine.close()
+})
+
 test('both mode merges page and automatic notes with one bounded ordered timeline', async () => {
   const f = fixture({ notesFrom: 'both', maxNotes: 2 })
   assert.equal(f.engine.snapshot().body.notesFrom, 'both')
@@ -109,6 +121,55 @@ test('both mode merges page and automatic notes with one bounded ordered timelin
   assert.deepEqual(notes.map(note => note.text), ['Check the deadline.', 'Page last'])
   assert.ok(notes[1].t > notes[0].t)
   f.engine.close()
+})
+
+test('start chooses per-session notesFrom with metadata and independent page/chat gates', async () => {
+  for (const configured of ['page', 'chat', 'both']) {
+    const f = fixture({ notesFrom: configured })
+    for (const mode of ['page', 'chat', 'both']) {
+      f.engine.stop(f.engine.snapshot().body.id)
+      const input = { backend: 'muse', notesFrom: mode }
+      const started = f.engine.start(input)
+      const id = started.body.id
+      input.notesFrom = 'changed'
+      assert.equal(started.status, 200)
+      assert.equal(started.body.notesFrom, mode)
+      assert.equal(f.engine.snapshot().body.notesFrom, mode)
+      assert.equal(f.engine.state(id).body.notesFrom, mode)
+      const before = f.asks.length
+      await f.engine.chunk(id, 0, pcm())
+      await flush()
+      assert.equal(f.asks.length - before, mode === 'page' ? 0 : 1)
+      assert.equal(f.engine.addNote(id, { text: 'Manual note' }).status, mode === 'chat' ? 409 : 200)
+    }
+    f.engine.stop(f.engine.snapshot().body.id)
+    assert.equal(f.engine.start().body.notesFrom, configured, 'Override never mutates configured default')
+    f.engine.close()
+  }
+})
+
+test('invalid explicit start mode returns400 before active conflict and leaves current session unchanged', () => {
+  const f = fixture({ notesFrom: 'page' })
+  for (const notesFrom of [undefined, null, '', 'invalid', 1, true, {}, ['chat']]) {
+    assert.deepEqual(f.engine.start({ notesFrom }), { status: 400, body: { error: 'notesFrom must be page, chat or both' } })
+    assert.equal(f.engine.snapshot().body.id, f.id)
+    assert.equal(f.engine.snapshot().body.notesFrom, 'page')
+  }
+  assert.equal(f.engine.start({ notesFrom: 'both' }).status, 409)
+  f.engine.stop(f.id)
+  assert.equal(f.engine.start({ notesFrom: 'invalid' }).status, 400)
+  assert.equal(f.engine.snapshot().body.state, 'stopped')
+  f.engine.close()
+})
+
+test('page-only provider setup refuses chat override without invoking any callback', () => {
+  const clock = new Clock()
+  const engine = createListen({ transcribe: async () => '', now: clock.now,
+    setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+  assert.equal(engine.start({ notesFrom: 'chat' }).status, 503)
+  assert.equal(engine.snapshot().status, 404)
+  assert.equal(engine.start({ notesFrom: 'page' }).status, 200)
+  engine.close()
 })
 
 class Clock {

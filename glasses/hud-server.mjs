@@ -1455,6 +1455,7 @@ const LISTEN_MUSE = createListenMuse({
   pollMs: HUB.listen?.pollMs,
   attemptMs: HUB.listen?.timeoutMs,
   requestMs: HUB.listen?.requestMs,
+  g2PauseMs: HUB.listen?.g2PauseMs,
 })
 const LISTEN = createListen({
   transcribe,

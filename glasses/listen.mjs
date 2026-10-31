@@ -24,7 +24,8 @@ const stamp = t => {
 /**
  * ask({text, sessionId, signal, onStatus}) is the Listen-only Muse service
  * callback. Only its terminal {status:'done', reply} can create a note.
- * notesFrom defaults (including invalid values) to page: no automatic asks.
+ * Configured notesFrom defaults (including invalid config values) to page.
+ * start({notesFrom}) overrides it per session; invalid overrides return400.
  * snapshot() reads the current session; addNote(id,{text,at_t?}) admits a
  * sanitized page note in page/both mode. at_t is session milliseconds.
  * All public methods return {status,body}; chunk waits for ASR, never for Muse.
@@ -39,8 +40,7 @@ export function createListen({
   maxSnippetWords = 400, maxSnippetChars = 6000,
 } = {}) {
   if (!['page', 'chat', 'both'].includes(notesFrom)) notesFrom = 'page'
-  const automaticNotes = notesFrom !== 'page'
-  if (typeof transcribe !== 'function' || (automaticNotes && typeof ask !== 'function')) throw new TypeError('Listen callbacks required')
+  if (typeof transcribe !== 'function' || (notesFrom !== 'page' && typeof ask !== 'function')) throw new TypeError('Listen callbacks required')
   snippetMs = positive(snippetMs, 45_000)
   idleMs = positive(idleMs, 30 * 60_000)
   gapMs = positive(gapMs, 8000)
@@ -146,7 +146,7 @@ export function createListen({
     return { ...note }
   }
   const kickSnippet = session => {
-    if (!automaticNotes || !active(session) || session.asking) return
+    if (session.notesFrom === 'page' || !active(session) || session.asking) return
     const text = boundedSnippet(session)
     if (words(text) < minWords) return
     const delay = session.lastAttempt === undefined ? 0 : snippetMs - (elapsed(session) - session.lastAttempt)
@@ -255,7 +255,7 @@ export function createListen({
           resultLines.push({ t: start, text })
           session.lastSpeechAt = Math.max(session.lastSpeechAt, entry.end)
           armIdle(session)
-          if (automaticNotes) {
+          if (session.notesFrom !== 'page') {
             session.snippetParts.push({ start, end, text })
             boundedSnippet(session)
             kickSnippet(session)
@@ -279,27 +279,35 @@ export function createListen({
       const session = known(id)
       if (!session) return fail(404, 'Listen session not found')
       if (!active(session)) return fail(410, 'Listen session stopped')
-      if (notesFrom === 'chat') return fail(409, 'Page notes disabled')
+      if (session.notesFrom === 'chat') return fail(409, 'Page notes disabled')
       const text = noteText(value?.text, Infinity)
       if (!text) return fail(400, 'Invalid Listen note')
       const at_t = value?.at_t ?? session.lines.at(-1)?.t ?? 0
-      if (typeof at_t !== 'number' || !Number.isFinite(at_t) || at_t < 0 || at_t > elapsed(session)) return fail(400, 'Invalid Listen note anchor')
+      if (!Number.isSafeInteger(at_t) || at_t < 0) return fail(400, 'Invalid Listen note anchor')
       return response(200, { note: appendNote(session, text, at_t) })
     },
     start(backend = 'muse') {
-      if (backend && typeof backend === 'object' && !Array.isArray(backend)) backend = backend.backend ?? 'muse'
+      let mode = notesFrom
+      if (backend && typeof backend === 'object' && !Array.isArray(backend)) {
+        if (Object.hasOwn(backend, 'notesFrom')) {
+          if (!['page', 'chat', 'both'].includes(backend.notesFrom)) return fail(400, 'notesFrom must be page, chat or both')
+          mode = backend.notesFrom
+        }
+        backend = backend.backend ?? 'muse'
+      }
       if (backend !== 'muse') return fail(400, 'Unsupported Listen backend')
+      if (mode !== 'page' && typeof ask !== 'function') return fail(503, 'Listen chat unavailable')
       if (current && active(current)) return fail(409, 'Listen session already active')
       const startedAt = now()
       const id = idFactory()
       if (!Number.isFinite(startedAt) || typeof id !== 'string' || !id) return fail(503, 'Listen unavailable')
-      current = { id, startedAt, clockT: 0, state: 'listening', controller: new AbortController(),
+      current = { id, startedAt, notesFrom: mode, clockT: 0, state: 'listening', controller: new AbortController(),
         nextSeq: 0, pending: new Map(), completed: new Map(), pendingCount: 0, pendingBytes: 0,
         pumping: false, processing: undefined, lines: [], notes: [], snippetParts: [], context: [],
         lastSpeechAt: 0, lastChunkStart: -1, lastChunkEnd: 0, lastNoteT: -1, asking: false, muse: { state: 'idle' } }
       armIdle(current)
       diagnostic('listen.started')
-      return response(200, { id, startedAt })
+      return response(200, { id, startedAt, notesFrom: mode })
     },
     async chunk(id, seq, pcm) {
       const session = known(id)
@@ -339,7 +347,7 @@ export function createListen({
       const now_t = elapsed(session)
       // since is a publication watermark, not the estimated speech start. Use
       // the previous now_t inclusively and deduplicate returned (t,text) pairs.
-      return response(200, { id: session.id, state: session.state, startedAt: session.startedAt, now_t, notesFrom,
+      return response(200, { id: session.id, state: session.state, startedAt: session.startedAt, now_t, notesFrom: session.notesFrom,
         lines: session.lines.filter(line => since === undefined || line.published_t >= since).map(({ t, text }) => ({ t, text })),
         notes: session.notes.filter(note => since === undefined || note.t >= since).map(note => ({ ...note })),
         muse: { ...session.muse } })

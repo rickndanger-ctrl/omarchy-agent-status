@@ -3,7 +3,6 @@
 import { sanitizeMuseReply } from './muse-clean.mjs'
 
 const RUNNING = new Set(['queued', 'sending', 'waiting', 'running', 'pending', 'thinking'])
-const G2_PAUSE_MS = 60_000
 const REASONS = Object.freeze({
   busy: 'Muse is busy', unavailable: 'No Muse is ready right now',
   cancelled: 'Muse request cancelled', timeout: 'Muse took too long',
@@ -35,13 +34,14 @@ function relay(value) {
  */
 export function createListenMuse({ muses = [], isG2Busy = () => true, request,
   fetch: fetchImpl = globalThis.fetch, pollMs = 700, requestMs = 6000,
-  attemptMs, timeoutMs, maxBodyBytes = 65536, now = () => Date.now(),
+  attemptMs, timeoutMs, g2PauseMs = 60_000, maxBodyBytes = 65536, now = () => Date.now(),
   setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   const relays = Array.isArray(muses) ? muses.map(relay) : []
   pollMs = positive(pollMs, 700, 6000)
   requestMs = positive(requestMs, 6000, 30_000)
   attemptMs = positive(attemptMs, positive(timeoutMs, 150_000, 150_000), 150_000)
   maxBodyBytes = Math.floor(positive(maxBodyBytes, 65536, 65536))
+  g2PauseMs = typeof g2PauseMs === 'number' && Number.isFinite(g2PauseMs) && g2PauseMs > 0 ? g2PauseMs : 60_000
   let inFlight = false
   let lastG2At = -Infinity
   let held = null
@@ -151,7 +151,7 @@ export function createListenMuse({ muses = [], isG2Busy = () => true, request,
     }
     function gate() {
       check()
-      if (now() - lastG2At < G2_PAUSE_MS) throw new Failure('busy')
+      if (now() - lastG2At < g2PauseMs) throw new Failure('busy')
       let busy = true
       try { busy = isG2Busy() !== false } catch { /* Unknown gate is a veto. */ }
       if (busy) throw new Failure('busy')
