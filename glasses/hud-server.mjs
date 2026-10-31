@@ -44,6 +44,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { helpers } from './think.mjs'
 import { sanitizeMuseReply } from './muse-clean.mjs'
+import { createListen, LISTEN_MAX_BYTES } from './listen.mjs'
+import { createListenMuse } from './muse-queue.mjs'
+import { isListenG2Busy } from './listen-g2.mjs'
+import { createListenPage } from './listen-page.mjs'
 
 const run = promisify(execFile)
 // macOS keeps lsof in /usr/sbin, which launchd's default PATH leaves out.
@@ -793,7 +797,7 @@ async function askMuse(text, start) {
     if (i < start) continue
     try {
       const health = await call(`${muse.url}/selftest`, muse.token, { timeout: 8000 })
-      if (!health.ok || !health.composer) continue
+      if (!health.ok || (!health.composer && !LISTEN_MUSE.holds(i))) continue
       const r = await call(`${muse.url}/ask`, muse.token, { method: 'POST', body: JSON.stringify({ text }), timeout: 10_000 })
       return { id: `${i}-${r.id}`, muse: muse.name }
     } catch { /* try the next Muse */ }
@@ -1397,6 +1401,35 @@ async function serveStatic(res, pathname) {
 }
 
 // ---- tiles: the pages (layout.json), Reminders and url: plug-in tiles -----------------------
+// Diagnostics for Muse Listen: names and counts or timings only, never transcript text.
+const listenDiag = (name, detail) => {
+  diagnostics.push({ at: new Date().toISOString(), name, detail: clip(detail, 160) })
+  if (diagnostics.length > 1000) diagnostics.shift()
+}
+
+// Listen owns only its best-effort snippets; G2's Muse paths above are unchanged.
+function listenG2Busy() {
+  return isListenG2Busy(diagnostics, Date.now(), museMoving.size > 0)
+}
+const LISTEN_MUSE = createListenMuse({
+  muses: MUSES,
+  isG2Busy: listenG2Busy,
+  pollMs: HUB.listen?.pollMs,
+  attemptMs: HUB.listen?.timeoutMs,
+  requestMs: HUB.listen?.requestMs,
+  g2PauseMs: HUB.listen?.g2PauseMs,
+})
+const LISTEN = createListen({
+  transcribe,
+  ask: request => LISTEN_MUSE.ask(request),
+  diag: listenDiag,
+  snippetMs: HUB.listen?.snippetMs,
+  minWords: HUB.listen?.minWords,
+  idleMs: HUB.listen?.idleMs,
+  notesFrom: HUB.listen?.notesFrom,
+})
+const LISTEN_PAGE = createListenPage({ listen: LISTEN, loopback })
+
 // Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl", "remindersTokenFile", "remindersList").
 const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
 const REMINDERS_TOKEN = HUB.remindersTokenFile ? tokenFrom(HUB.remindersTokenFile) : ''
@@ -1562,6 +1595,8 @@ function overInputRate() {
 async function handle(req, res) {
   const url = new URL(req.url, 'http://x')
   const p = url.pathname.replace(/^\/hud(?=\/|$)/, '') || '/'
+  LISTEN_MUSE.noteG2(req.method, p)
+  if (p === '/listen' || p.startsWith('/listen/')) return LISTEN_PAGE(req, res, p)
   if (req.method === 'OPTIONS') return send(res, 204, {})
   if (!p.startsWith('/api/')) return req.method === 'GET' ? serveStatic(res, p) : send(res, 405, {})
   if (p === '/api/health') return send(res, 200, { ok: true, mode: MODE, machine: MACHINE })
@@ -1710,6 +1745,28 @@ async function handle(req, res) {
       if (appThread) return send(res, 200, { lines: await codexThreadView(appThread, stamps) })
       const lines = await terminalView(pane, window, stamps)
       return lines ? send(res, 200, { lines }) : send(res, 404, { error: 'agent not found' })
+    }
+    if (p === '/api/listen' || p.startsWith('/api/listen/')) {
+      if (MODE !== 'hub') return send(res, 404, { error: 'Listen is unavailable on this node' })
+      if (req.method === 'GET' && p === '/api/listen') {
+        const raw = url.searchParams.get('since')
+        const r = LISTEN.state(url.searchParams.get('id'), raw === null ? undefined : raw.trim() ? Number(raw) : NaN)
+        return send(res, r.status, r.body)
+      }
+      if (req.method === 'POST' && p === '/api/listen/chunk') {
+        const pcm = await readRaw(req, LISTEN_MAX_BYTES).catch(() => null)
+        if (!pcm) return send(res, 413, { error: 'chunk too large' })
+        const seq = url.searchParams.get('seq')
+        const r = await LISTEN.chunk(url.searchParams.get('id'), seq?.trim() ? Number(seq) : NaN, pcm)
+        return send(res, r.status, r.body)
+      }
+      if (req.method === 'POST' && (p === '/api/listen/start' || p === '/api/listen/stop')) {
+        const b = await readBody(req).catch(() => null)
+        if (!b || typeof b !== 'object' || Array.isArray(b)) return send(res, 400, { error: 'invalid request' })
+        const r = p.endsWith('/start') ? LISTEN.start(b) : LISTEN.stop(b.id)
+        return send(res, r.status, r.body)
+      }
+      return send(res, 404, { error: 'unknown Listen endpoint' })
     }
     if (req.method === 'POST' && p === '/api/transcribe') {
       const pcm = await readRaw(req, 4_000_000) // ~2 minutes of 16 kHz audio
