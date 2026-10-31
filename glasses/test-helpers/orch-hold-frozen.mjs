@@ -36,7 +36,7 @@ for (const name of [...whole].sort()) check(name, () => equal(original(name), wo
 // Files the removal had to change are pinned to their reviewed post-removal bytes instead (sha256), so any
 // later change still needs review. Their Muse parts are proved byte-identical to 56fe3b2 by test-muse-frozen.sh.
 const REMOVAL_PINS = {
-  'glasses/hud-server.mjs': '756d582d7ebc808b8ad6a8fb978fd20677001cf9827ff110274d8946903b9c81',
+  'glasses/hud-server.mjs': '07c20c02b88bcc2eb4dcc3b6380972b3f1f4a8cbe80c86f04e100c72ea3e3064',
   'glasses/home-app/tests/small-0427.test.ts': '6e37890bc3cf2dfb1957200f6b96e92f21db799834620b6426c9ed522ad5d348',
 };
 for (const [name, digest] of Object.entries(REMOVAL_PINS)) {

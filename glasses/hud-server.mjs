@@ -1397,7 +1397,6 @@ async function serveStatic(res, pathname) {
 }
 
 // ---- tiles: the pages (layout.json), Reminders and url: plug-in tiles -----------------------
-
 // Apple Reminders: the Mini 1 relay, configured like the Messages relay (hub.json "remindersUrl", "remindersTokenFile", "remindersList").
 const REMINDERS_URL = HUB.remindersUrl ? String(HUB.remindersUrl).replace(/\/$/, '') : ''
 const REMINDERS_TOKEN = HUB.remindersTokenFile ? tokenFrom(HUB.remindersTokenFile) : ''
