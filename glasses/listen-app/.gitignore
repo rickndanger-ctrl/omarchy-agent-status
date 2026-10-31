@@ -1,0 +1,6 @@
+node_modules/
+dist/
+app.json
+.env
+.env.local
+*.ehpk
