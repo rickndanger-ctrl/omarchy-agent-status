@@ -26,6 +26,8 @@ import { SettleWaiters, Serial, type SettleResult } from './settle';
 export interface MenuItem { id: number; name: string }
 export interface GlassesOptions {
   onInput: (input: Input) => void;
+  /** A distinct physical hold; taps remain suppressed until its release. */
+  onLongPress?: () => void;
   onMenu: (id: number) => void;
   onStatus: (status: string) => void;
   onForeground: (foreground: boolean) => void;
@@ -236,7 +238,7 @@ export class Glasses {
     try {
       this.sdk = await bounded((this.options.bridge ?? waitForEvenAppBridge)(), stage);
       if (epoch !== this.epoch) return false;
-      this.sdk.onEvenHubEvent(event => this.onEvent(event));
+      this.sdk.onEvenHubEvent(event => { if (epoch === this.epoch) this.onEvent(event); });
       this.sdk.onDeviceStatusChanged(status => this.options.onDevice({ battery: status.batteryLevel, wearing: status.isWearing, raw: JSON.stringify(status) }));
       // The status push may only come on a change, so also ask now and every minute (battery drains quietly).
       const ask = () => this.sdk?.getDeviceInfo().then(info => {
@@ -455,8 +457,13 @@ export class Glasses {
       .map(envelope => envelope!.eventType ?? OsEventTypeList.CLICK_EVENT);
     // Press and release are tracked before any other check: a release swallowed by the quiet window or
     // while Home was behind the glasses menu left `pressing` stuck and every later tap was dropped.
-    if (types.includes(OsEventTypeList.LONG_PRESS_EVENT)) { this.pressing = true; return; }
     if (types.includes(OsEventTypeList.LONG_PRESS_RELEASE_EVENT)) { this.pressing = false; return; }
+    if (types.includes(OsEventTypeList.LONG_PRESS_EVENT)) {
+      const first = !this.pressing;
+      this.pressing = true;
+      if (first && this.connected && this.foreground && Date.now() >= this.quietUntil) this.options.onLongPress?.();
+      return;
+    }
     if (!this.connected || !this.foreground) return;
     if (Date.now() < this.quietUntil) { this.options.onLifecycle?.('input-ignored (just came to front)'); return; }
     if (this.pressing) { this.options.onLifecycle?.('input-ignored (long press held)'); return; }

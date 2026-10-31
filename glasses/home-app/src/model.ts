@@ -265,7 +265,8 @@ export class HomeModel {
   private notices: { key: string; text: string; at: number }[] = [];
   private terminal: { key: string; lines: string[] } | null = null;
   /** A voice reply typed into the terminal page: listening, turning speech into text, or the heard text waiting for a tap. */
-  private talk: { key: string; phase: 'listening' | 'thinking' | 'ready'; text: string } | null = null;
+  private talk: { key: string; phase: 'listening' | 'thinking' | 'ready'; text: string; touch: boolean; target: Readonly<Session>; attempt: object; stop: object; send: object } | null = null;
+  private agentConfirm: { key: string; target: Readonly<Session>; send: object; deadline: number } | null = null;
   private termScroll = 0;
   private alerts: Alert[] = [];
   private returnTo: Screen | null = null;
@@ -316,6 +317,8 @@ export class HomeModel {
   update(data: HomeData): void {
     const held = this.data && LIST_SCREENS.includes(this.screen.kind) ? this.selectedRow() : null;
     this.data = data;
+    const voice = this.agentConfirm ?? this.talk;
+    if (voice && !this.agentTargetCurrent(voice.target)) this.abandonTalk();
     if (held !== null) this.followRow(held);
     this.error = '';
     const quiet = this.firstUpdate; // what's already there when Home opens isn't news
@@ -431,16 +434,78 @@ export class HomeModel {
   }
 
   /** Start a voice reply on the open terminal page. Always starts the mic; without voice on this hub it says why instead. */
-  private startTalk(x: Session, key: string, nowMs: number): Action | null {
+  private startTalk(x: Session, key: string, nowMs: number, source: 'touch' | 'remote' = 'touch'): Action | null {
     if (!this.data?.voice) { this.showFlash(`Voice not set up on this hub${this.data?.hub ? ` (${this.data.hub})` : ''}`, nowMs); return null; }
-    this.talk = { key, phase: 'listening', text: '' };
+    this.talk = { key, phase: 'listening', text: '', touch: source !== 'remote', target: Object.freeze({ ...x }), attempt: Object.freeze({}), stop: Object.freeze({}), send: Object.freeze({}) };
     return { kind: 'startMic' };
   }
 
   /** True while the microphone should be open: a voice reply on the terminal page or the listen screen. */
   micWanted(): boolean { return Boolean(this.talk && this.talk.phase !== 'ready') || this.screen.kind === 'listen'; }
   /** Drop an unfinished voice reply (left the front); the caller closes the mic. */
-  abandonTalk(): void { this.talk = null; }
+  abandonTalk(): void {
+    const confirm = this.agentConfirm;
+    const voice = confirm ?? this.talk;
+    const current = voice && this.agentTargetCurrent(voice.target);
+    this.talk = null;
+    this.agentConfirm = null;
+    if (confirm) this.goBack(current ? { kind: 'agent', key: confirm.key } : { kind: 'agents' });
+    else if (voice && !current && this.screen.kind === 'agent') this.go({ kind: 'agents' });
+  }
+
+  private agentTargetCurrent(target: Readonly<Session>): boolean {
+    return this.data?.machines.find(m => m.name === target.machine)?.online !== false && Boolean(this.data?.sessions.some(x =>
+      sessionKey(x) === sessionKey(target) && x.session === target.session && x.machine === target.machine && x.agent === target.agent
+      && x.pane === target.pane && x.window === target.window && x.appThread === target.appThread
+      && x.tmux === target.tmux && x.desktopSession === target.desktopSession));
+  }
+  private agentPrompt(target: Readonly<Session>, text: string): Action {
+    return { kind: 'prompt', machine: target.machine, pane: target.pane ?? '', ...(target.window ? { window: target.window } : {}), ...(target.appThread ? { appThread: target.appThread } : {}), text };
+  }
+  /** Stable opaque identity for this recording and STOP/SEND purpose; never eligible during transcription. */
+  agentHoldToken(): unknown | null {
+    if (this.screen.kind === 'confirm' && this.agentConfirm && this.agentTargetCurrent(this.agentConfirm.target)) return this.agentConfirm.send;
+    const t = this.talk;
+    if (this.screen.kind !== 'agent' || !t || this.screen.key !== t.key || !this.agentTargetCurrent(t.target)) return null;
+    return t.phase === 'listening' ? t.stop : t.phase === 'ready' ? t.send : null;
+  }
+  agentHoldWanted(): boolean { return this.agentHoldToken() !== null; }
+  /** Capture before asynchronous STT; only that thinking attempt can accept its result. */
+  agentTranscriptToken(): unknown | null {
+    return this.talk?.phase === 'thinking' && this.screen.kind === 'agent' && this.screen.key === this.talk.key
+      && this.agentTargetCurrent(this.talk.target) ? this.talk.attempt : null;
+  }
+  agentConfirmDeadline(): number | null { return this.screen.kind === 'confirm' ? this.agentConfirm?.deadline ?? null : null; }
+  expireAgentConfirm(nowMs: number): boolean {
+    const deadline = this.agentConfirmDeadline();
+    if (deadline === null || nowMs < deadline) return false;
+    this.abandonTalk();
+    return true;
+  }
+  /** A separate SDK hold path: never a generic Input or a Tiles/Desk gesture. */
+  hold(nowMs: number, token?: unknown): Action | null {
+    if (this.expireAgentConfirm(nowMs)) return null;
+    const voice = this.agentConfirm ?? this.talk;
+    if (voice && !this.agentTargetCurrent(voice.target)) { this.abandonTalk(); return null; }
+    const wanted = this.agentHoldToken();
+    if (wanted === null || (token !== undefined && token !== wanted)) return null;
+    const c = this.agentConfirm;
+    if (c && this.screen.kind === 'confirm') {
+      const text = this.screen.text;
+      this.goBack({ kind: 'agent', key: c.key });
+      this.showFlash('Sending…', nowMs);
+      return this.agentPrompt(c.target, text);
+    }
+    const t = this.talk!;
+    if (t.phase === 'listening') {
+      this.talk = { ...t, phase: 'thinking', touch: true };
+      this.flash = { text: '', until: 0 };
+      return { kind: 'stopMic' };
+    }
+    this.talk = null;
+    this.showFlash('Sending…', nowMs);
+    return this.agentPrompt(t.target, t.text);
+  }
 
   /** The prompt went out (or not): the header says Sent. */
   promptDone(ok: boolean, stopped: boolean, nowMs: number, pane?: string): void {
@@ -454,14 +519,23 @@ export class HomeModel {
   sentTo(pane: string, nowMs: number): string | null { return this.sentNote && this.sentNote.pane === pane && nowMs < this.sentNote.until ? this.sentNote.text : null; }
 
   /** Speech-to-text result for the listen screen; empty or null means nothing usable. */
-  setTranscript(text: string | null, nowMs: number): void {
+  setTranscript(text: string | null, nowMs: number, token?: unknown): void {
     const s = this.screen;
     if (this.talk && s.kind === 'agent' && s.key === this.talk.key) {
-      if (text) this.talk = { ...this.talk, phase: 'ready', text };
+      const t = this.talk;
+      if (!this.agentTargetCurrent(t.target)) { this.abandonTalk(); return; }
+      if (t.phase !== 'thinking' || token !== t.attempt) return;
+      if (text && t.touch) {
+        this.go({ kind: 'confirm', key: t.key, text });
+        this.agentConfirm = { key: t.key, target: t.target, send: t.send, deadline: nowMs + 20_000 };
+        this.flash = { text: '', until: 0 };
+      } else if (text) this.talk = { ...t, phase: 'ready', text };
       else { this.talk = null; this.showFlash(text === null ? 'Voice failed. Try again' : "Didn't catch that", nowMs); }
       return;
     }
+    if (token !== undefined) return; // An agent STT result never populates another voice surface.
     if (s.kind !== 'listen') return;
+    if (!s.chat && !s.muse && !s.reminder && !s.start) return; // No unbound legacy agent transcript.
     if (text) this.go({ kind: 'confirm', key: s.key, text, ...(s.chat ? { chat: s.chat } : {}), ...(s.muse ? { muse: true as const } : {}), ...(s.tile ? { tile: true as const } : {}), ...(s.reminder ? { reminder: true as const } : {}), ...(s.start ? { start: s.start } : {}) });
     else {
       this.showFlash(text === null ? 'Voice failed. Try again' : "Didn't catch that", nowMs);
@@ -482,7 +556,7 @@ export class HomeModel {
    * Open a full screen from a Tiles action. Voice steps fall back to the quick-reply lists when the
    * microphone is not available, as they do from the full screens.
    */
-  openTarget(target: OpenTarget): Action | null {
+  openTarget(target: OpenTarget, source: 'touch' | 'remote' = 'touch'): Action | null {
     this.returnTo = null;
     if (target.kind === 'home' || target.kind === 'messages' || target.kind === 'needs' || target.kind === 'studio') {
       this.go({ kind: target.kind });
@@ -509,7 +583,7 @@ export class HomeModel {
     }
     this.notices = this.notices.filter(n => n.key !== target.key);
     const x = this.data?.sessions.find(y => sessionKey(y) === target.key);
-    if (target.then === 'listen' && x && talkable(x)) { this.go({ kind: 'agent', key: target.key }); return this.startTalk(x, target.key, Date.now()); }
+    if (target.then === 'listen' && x && talkable(x)) { this.go({ kind: 'agent', key: target.key }); return this.startTalk(x, target.key, Date.now(), source); }
     this.go(target.then && x && this.replyChoices(x).length ? { kind: 'reply', key: target.key } : { kind: 'agent', key: target.key });
     return null;
   }
@@ -632,6 +706,7 @@ export class HomeModel {
     this.remember();
     this.generation++;
     this.talk = null;
+    this.agentConfirm = null;
     this.screen = screen;
     this.cursor = 0;
     this.scroll = 0;
@@ -854,8 +929,20 @@ export class HomeModel {
   }
 
   /** Apply one tap or swipe. Returns work for the network layer, if any. */
-  input(input: Input, nowMs: number): Action | null {
+  input(input: Input, nowMs: number, source: 'touch' | 'remote' = 'touch'): Action | null {
+    if (this.expireAgentConfirm(nowMs)) return null;
+    const voice = this.agentConfirm ?? this.talk;
+    if (voice && !this.agentTargetCurrent(voice.target)) { this.abandonTalk(); return null; }
     const s = this.screen;
+    if (s.kind === 'confirm' && this.agentConfirm) {
+      this.agentConfirm.deadline = nowMs + 20_000;
+      if (input === 'back' || (input === 'select' && source !== 'remote')) { this.abandonTalk(); return null; }
+      return input === 'select' ? this.hold(nowMs, this.agentHoldToken()) : null;
+    }
+    if ((s.kind === 'confirm' || s.kind === 'listen') && !s.chat && !s.muse && !s.reminder && !s.start) {
+      this.goBack({ kind: 'agent', key: s.key }); // Unbound legacy speech must be captured again.
+      return s.kind === 'listen' ? { kind: 'cancelMic' } : null;
+    }
     const selectedAt = this.lastSelectAt;
     if (input === 'select') this.lastSelectAt = nowMs;
     if (s.kind === 'alert') {
@@ -1005,11 +1092,17 @@ export class HomeModel {
       const total = this.terminalLines()?.length ?? 0;
       const t = this.talk && this.talk.key === s.key ? this.talk : null;
       if (t) {
+        if (input === 'select' && source !== 'remote') {
+          if (t.phase === 'ready') { this.talk = null; return null; }
+          this.talk = { ...t, touch: true };
+          if (t.phase === 'listening') this.showFlash('Hold to stop', nowMs);
+          return null;
+        }
         if (t.phase === 'listening' && input === 'select') { this.talk = { ...t, phase: 'thinking' }; return { kind: 'stopMic' }; }
         if (t.phase === 'ready' && input === 'select') {
           this.talk = null;
           this.showFlash('Sending…', nowMs);
-          return { kind: 'prompt', machine: x.machine, pane: x.pane ?? '', ...(x.window ? { window: x.window } : {}), ...(x.appThread ? { appThread: x.appThread } : {}), text: t.text };
+          return this.agentPrompt(t.target, t.text);
         }
         if (input !== 'up') return null;
       }
@@ -1023,7 +1116,7 @@ export class HomeModel {
         this.showFlash('Opening it on the glasses…', nowMs);
         return { kind: 'continueSession', machine: x.machine, session: x.desktopSession };
       }
-      if (talkable(x)) return this.startTalk(x, s.key, nowMs);
+      if (talkable(x)) return this.startTalk(x, s.key, nowMs, source);
       if (this.replyChoices(x).length) this.go({ kind: 'reply', key: s.key });
       return null;
     }
@@ -1043,7 +1136,7 @@ export class HomeModel {
       if (s.kind === 'reply') {
         const text = this.replyChoices(session)[this.cursor];
         this.goBack({ kind: 'agent', key: s.key });
-        if (text === 'Speak') return this.startTalk(session, s.key, nowMs);
+        if (text === 'Speak') return this.startTalk(session, s.key, nowMs, source);
         if (!text || text === 'Back') return null;
         if (text.startsWith('Show on screen')) return { kind: 'focus', machine: session.machine, workspace: session.workspace };
         return text === 'Stop (Esc)' ? { ...target, key: 'Escape' } : { ...target, text };
@@ -1142,7 +1235,7 @@ export class HomeModel {
         } else {
           const all = this.terminalLines();
           const tk = this.talk && this.talk.key === s.key ? this.talk : null;
-          if (tk) lines[0] = clip(tk.phase === 'listening' ? 'Listening… tap to send' : tk.phase === 'thinking' ? 'Turning speech into text…' : 'Tap to send · double-tap cancels');
+          if (tk) lines[0] = clip(tk.phase === 'listening' ? (tk.touch ? 'Listening… hold to stop' : 'Listening… tap to send') : tk.phase === 'thinking' ? 'Turning speech into text…' : 'Tap to send · double-tap cancels');
           if (all === null) lines.push('Loading…');
           else {
             // A full-screen terminal: 9 lines of tail under the header; scrolled back, the last line says how far back you are (still 10 lines).
@@ -1229,7 +1322,8 @@ export class HomeModel {
       } else {
         lines[0] = clip(`SEND TO ${who.toUpperCase()}?`);
         lines.push(...wrap(`"${s.text}"`).slice(0, 4), '');
-        lines.push(...this.list(this.listRows(nowMs)));
+        if (this.agentConfirm) lines.push('Hold to send.', 'Tap/double-tap cancels.', 'Cancels after 20s without input.');
+        else lines.push(...this.list(this.listRows(nowMs)));
       }
     } else if (s.kind === 'messages') {
       lines[0] = 'HOME › MESSAGES';

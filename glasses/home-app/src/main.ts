@@ -10,7 +10,8 @@ import { MuseCache } from './musecache';
 import { RemoteInput } from './remote';
 import { TerminalCache } from './terminalcache';
 import { InputQueue, type InputSource } from './inputqueue';
-import { remoteSettingsIgnored, makeHandle, TOP_SCREENS, openSettings, runSettingsAction } from './inputflow';
+import { remoteSettingsIgnored, makeHandle, makeHoldHandle, TOP_SCREENS, openSettings, runSettingsAction } from './inputflow';
+import { AgentVoice, AgentConfirmExpiry } from './agent-voice';
 import { MENU, GLASSES_MENU, INTERNAL_MENU, setHideDone } from './menu';
 import { Latest } from './latest';
 import type { Desk, DeskAppId } from './desk'; // type only: desk.ts itself is loaded by import() when the Desk is opened
@@ -73,14 +74,34 @@ model.brightness = savedBrightness();
 // Texts older than 24 h are hidden on the glasses unless switched off (phone checkbox or the glasses menu).
 model.hideOldTexts = store.get('home.hideOldTexts') !== '0';
 let recording: Uint8Array[] | null = null;
+const agentConfirmExpiry = new AgentConfirmExpiry({
+  deadline: () => model.agentConfirmDeadline(), expire: now => model.expireAgentConfirm(now), now: () => Date.now(),
+  enqueue: run => inputQueue.pushExternal('agent-confirm-expiry', run), changed: () => paint(),
+});
+
+/** Only an actual model input changes the deadline; repainting cannot extend it. */
+function syncAgentConfirmExpiry(): void {
+  agentConfirmExpiry.sync();
+}
+
+function abandonAgentVoice(): void {
+  const cancel = agentVoice.abandon();
+  if (cancel) void cancel;
+  syncAgentConfirmExpiry();
+}
+
+function visibleAgentHoldToken(): unknown | null {
+  return foreground && !blank && !showingTiles() && !showingDesk() ? model.agentHoldToken() : null;
+}
 let status = 'Starting…';
 
 let lastDevice = '';
 const glasses = new Glasses({
   onInput: input => handle(input, 'touch'),
+  onLongPress: () => { if (visibleAgentHoldToken() !== null) inputQueue.pushHold(); },
   onMenu: id => inputQueue.pushMenu(id),
   onStatus: text => { status = text; diag('status', text); paint(); },
-  onForeground: on => { foreground = on; if (!on) { model.abandonTalk(); if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); } },
+  onForeground: on => { foreground = on; if (!on) { model.abandonTalk(); const cancel = agentVoice.run({ kind: 'cancelMic' }); if (cancel) void cancel; if (recording !== null) void run({ kind: 'cancelMic' }); inputQueue.clear('left the front'); syncAgentConfirmExpiry(); } remote.sync(); if (on) { void poll(); if (showingDesk()) void desk!.resume(true); } },
   onDevice: d => {
     // Log what the Even app reports when it changes (once signed in to a hub), so a missing battery can be traced.
     if (d.raw !== lastDevice && token) { lastDevice = d.raw; diag('device', d.raw.slice(0, 300)); }
@@ -436,6 +457,7 @@ async function saveLayout(layout: Layout): Promise<void> {
 }
 
 function enterTiles(startup = false): void {
+  abandonAgentVoice();
   model.abandonListen(); // Tiles in front must not leave a listening screen (and its open microphone) behind
   museTile.resetPage();
   tilesActive = true;
@@ -446,11 +468,11 @@ function enterTiles(startup = false): void {
 }
 
 /** Do what a tile's action asked for. */
-function runTileEffect(effect: TileEffect): void | Promise<void> {
+function runTileEffect(effect: TileEffect, source: InputSource = 'touch'): void | Promise<void> {
   if (effect.kind === 'action') { void run(effect.action); return; }
   if (effect.kind === 'open') {
     fromTiles = true;
-    const action = model.openTarget(effect.target as OpenTarget);
+    const action = model.openTarget(effect.target as OpenTarget, source);
     if (action) void run(action);
     void refreshTerminal();
     return;
@@ -472,6 +494,7 @@ let deskApp: DeskAppId | null = null;
 let deskArrivals: number[] = [];
 const showingDesk = () => deskMode === 'desk' && desk !== null;
 async function openDesk(): Promise<void> {
+  abandonAgentVoice();
   try {
     if (!desk) {
       const mod = await import('./desk');
@@ -540,7 +563,7 @@ const museShown = new ShownWatch();
 let blank = false;
 function wake(): void { blank = false; diag('display', 'on'); paint(); }
 const settingsHost = {
-  model, isBlank: () => blank, wake, setBlank: () => { blank = true; diag('display', 'off'); },
+  model, isBlank: () => blank, wake, setBlank: () => { abandonAgentVoice(); blank = true; diag('display', 'off'); },
   showingTiles: () => showingTiles(), markOpenedFromTile: () => { fromTiles = true; },
   returnToTiles: () => { if (tilesActive && fromTiles) { fromTiles = false; void refreshTiles(); } },
   saveBrightness: (value: number) => { store.set('home.brightness', String(value)); glasses.setBrightness(value); diag('brightness', value); },
@@ -548,6 +571,7 @@ const settingsHost = {
   paint: () => paint(),
 };
 function paint(): void {
+  if (blank || showingTiles() || showingDesk()) abandonAgentVoice();
   // The microphone is open only while a voice reply is on screen and in front: leaving the page (menu, Home, Desk) closes it.
   if (recording !== null && !(model.micWanted() && foreground && !showingDesk())) void run({ kind: 'cancelMic' });
   // A reminder that was added or cancelled (or whose voice failed) ends on Home: that is back in Tiles.
@@ -575,6 +599,7 @@ function paint(): void {
   }
   $('glass').textContent = preview;
   $('status').textContent = status;
+  syncAgentConfirmExpiry();
 }
 
 /** Pair without a code: the hubs recognize Rick's own Tailscale login and hand over the token. */
@@ -640,9 +665,26 @@ async function refreshTerminal(): Promise<void> {
 /** Only the newest chat load / microphone start counts: an older answer arriving late is ignored. */
 const chatLoads = new Latest();
 const recordings = new Latest();
+const agentVoice = new AgentVoice({
+  model, latest: recordings, recording: () => recording, setRecording: value => { recording = value; },
+  microphone: on => glasses.microphone(on), now: () => Date.now(), diag,
+  changed: () => paint(), failed: () => { status = 'Voice: agent transcript unavailable'; },
+  transcribe: async (audio, signal) => {
+    const res = await fetch(new URL('api/transcribe', base), {
+      method: 'POST', body: new Uint8Array(audio),
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]),
+    });
+    const body = await res.json() as { text?: string };
+    if (!res.ok || typeof body.text !== 'string') throw new Error('agent transcript unavailable');
+    return body.text;
+  },
+});
 const FLASH = { allow: 'Allowed', deny: 'Denied', desk: 'Left for the desk' };
 async function run(action: Action): Promise<void> {
   try {
+    const agentJob = agentVoice.run(action);
+    if (agentJob) { await agentJob; paint(); return; }
     if (action.kind === 'decide') {
       const r = await api<{ ok: boolean }>('decide', { method: 'POST', body: JSON.stringify(action) });
       model.showFlash(r.ok ? FLASH[action.behavior] : 'Already answered', Date.now());
@@ -802,19 +844,21 @@ async function run(action: Action): Promise<void> {
 }
 
 /** What a press does (src/inputflow.ts), given the pieces of this file. */
-const applyInput = makeHandle({
+const inputHost = {
   model, tiles, tileCtx, showingTiles,
   inOpenedScreen: () => tilesActive && fromTiles,
   leaveTiles: () => { if (deskMode === 'app') { backToDesk(); return; } tilesActive = false; model.goHome(); paint(); },
   showingDesk, deskInput, inDeskApp: () => deskMode === 'app' && !tilesActive, backToDesk,
-  backToTiles: () => { fromTiles = false; paint(); void refreshTiles(); },
+  backToTiles: () => { abandonAgentVoice(); fromTiles = false; paint(); void refreshTiles(); },
   paint, isBlank: () => blank, wake, runTileEffect,
-  runModelAction: action => run(action),
-  saveLayout: layout => void saveLayout(layout),
+  runModelAction: (action: Action) => run(action),
+  saveLayout: (layout: Layout) => void saveLayout(layout),
   refreshTiles: () => void refreshTiles(),
   refreshTerminal: () => void refreshTerminal(),
   now: () => Date.now(),
-});
+};
+const applyInput = makeHandle(inputHost);
+const applyHold = makeHoldHandle(inputHost);
 /** Changes whenever the screen does: the model's screen plus Tiles shown/hidden (seen at each call). */
 let tilesFlips = 0;
 let wasShowingTiles = false;
@@ -829,6 +873,8 @@ function screenGeneration(): number {
 /** Touchpad and phone remote share this one queue: a press is applied once the glasses show the one before. */
 const inputQueue = new InputQueue({
   apply: applyInput,
+  holdToken: visibleAgentHoldToken,
+  hold: token => { if (visibleAgentHoldToken() !== null) return applyHold(token); },
   menu: (id, source) => menu(id, source),
   foreground: () => foreground,
   generation: screenGeneration,

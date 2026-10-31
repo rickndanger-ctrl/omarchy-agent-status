@@ -206,18 +206,18 @@ test('orchestrator pin: first on Home, then the six Mac pins and Dell window, th
   assert.match(seen.at(-1)!, /^All agents/);
 });
 
-test('orchestrator: select starts the mic, the heard text goes to the hub as a prompt, the header says sent to Claude; no Stop (Esc)', () => {
+test('orchestrator: remote select starts the mic, the heard text goes to the hub as a prompt, the header says sent to Claude; no Stop (Esc)', () => {
   const orch = sess('Laptop', 'claude', 'idle', { name: 'Orchestrator', session: 'orchestrator', page: 'Orchestrator', pane: 'orchestrator', tmux: 'orchestrator' });
   const m = new HomeModel();
   m.update(data({ voice: true, pinned: [{ label: 'Claude · Orchestrator', machine: 'Laptop', agent: 'claude', session: 'orchestrator' }], machines: [{ name: 'Laptop', online: true }], sessions: [orch] }));
-  m.input('select', NOW);
+  m.input('select', NOW, 'remote');
   assert.equal(m.screenKind, 'agent');
   assert.deepEqual(m.terminalTarget(), { machine: 'Laptop', pane: 'orchestrator', key: 'Laptop/orchestrator' });
   m.setTerminal('Laptop/orchestrator', ['Done: the build passes.']);
-  assert.deepEqual(m.input('select', NOW), { kind: 'startMic' });
-  m.input('select', NOW);
-  m.setTranscript('start the release', NOW);
-  assert.deepEqual(m.input('select', NOW), { kind: 'prompt', machine: 'Laptop', pane: 'orchestrator', text: 'start the release' });
+  assert.deepEqual(m.input('select', NOW, 'remote'), { kind: 'startMic' });
+  m.input('select', NOW, 'remote');
+  m.setTranscript('start the release', NOW, m.agentTranscriptToken());
+  assert.deepEqual(m.input('select', NOW, 'remote'), { kind: 'prompt', machine: 'Laptop', pane: 'orchestrator', text: 'start the release' });
   m.promptDone(true, false, NOW);
   assert.match(m.render(NOW), /^sent to Claude\n/);
   m.input('down', NOW);

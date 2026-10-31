@@ -22,7 +22,11 @@ export const STUCK_MS = 5000;
 
 export interface QueueHost {
   /** Apply one press (the app's handle flow). May return a promise to be awaited (microphone changes). */
-  apply(input: Input): void | Promise<void>;
+  apply(input: Input, source: InputSource): void | Promise<void>;
+  /** Opaque identity of the current agent target, recording and stop/send stage. */
+  holdToken?(): unknown | null;
+  /** A separate touch hold; never synthesized as an ordinary select. */
+  hold?(token: unknown): void | Promise<void>;
   /** Apply one long-press menu choice. May return a promise (Pause waits for the hub). */
   menu(id: number, source?: InputSource): void | Promise<void>;
   /** The screen the model is on, for the log. */
@@ -49,9 +53,10 @@ export interface QueueHost {
 type Up = { at: number; undo?: () => void; generation?: number; cancelled?: boolean; discarded?: boolean; release?: () => void };
 type Entry =
   | { kind: 'input'; input: Input; source: InputSource; stamp: number; up?: Up }
+  | { kind: 'hold'; source: 'touch'; stamp: number; token: unknown }
   | { kind: 'menu'; id: number; source: InputSource; up?: Up }
   | { kind: 'external'; name: string; run: () => void; since: number };
-const label = (e: Entry) => (e.kind === 'input' ? `${e.input} from ${e.source}` : e.kind === 'menu' ? `menu ${e.id} from ${e.source}` : `update ${e.name}`);
+const label = (e: Entry) => (e.kind === 'input' ? `${e.input} from ${e.source}` : e.kind === 'hold' ? 'hold from touch' : e.kind === 'menu' ? `menu ${e.id} from ${e.source}` : `update ${e.name}`);
 
 export class InputQueue {
   private pending: Entry[] = [];
@@ -84,6 +89,16 @@ export class InputQueue {
     if (up) up.cancelled = true;
     prev?.release?.();
     if (!this.add({ kind: 'menu', id, source, up }) && up) up.cancelled = false;
+  }
+
+  pushHold(): void {
+    if (!this.host.foreground()) { this.host.log('input.ignored', 'hold from touch (not in front)'); return; }
+    const token = this.host.holdToken?.();
+    if (!this.host.hold || token == null) { this.host.log('input.ignored', 'hold from touch (no agent voice context)'); return; }
+    this.previousUp?.release?.();
+    this.previousUp = null;
+    this.host.trace?.('input.queued', 'hold from touch');
+    this.add({ kind: 'hold', source: 'touch', stamp: this.unsolicited(), token });
   }
 
   /**
@@ -140,12 +155,16 @@ export class InputQueue {
     this.running = true;
     try {
       for (let next = this.takeNext(); next; next = this.takeNext()) {
-        if (next.kind === 'input' && next.stamp !== this.unsolicited()) {
+        if ((next.kind === 'input' || next.kind === 'hold') && next.stamp !== this.unsolicited()) {
           // An alert (or anything else) changed the screen after this press was queued: it was meant for another screen.
           this.host.log('input.stale', `${label(next)} on ${this.host.screen()}`);
           continue;
         }
-        if (next.kind !== 'external') this.host.log(next.kind, next.kind === 'input' ? `${label(next)} on ${this.host.screen()}` : `${next.id} from ${next.source} on ${this.host.screen()}`);
+        if (next.kind === 'hold') {
+          if (!this.host.foreground()) { this.host.log('input.ignored', 'hold from touch (not in front)'); continue; }
+          if (!Object.is(next.token, this.host.holdToken?.())) { this.host.log('input.stale', `hold from touch on ${this.host.screen()}`); continue; }
+        }
+        if (next.kind !== 'external') this.host.log(next.kind, next.kind === 'input' || next.kind === 'hold' ? `${label(next)} on ${this.host.screen()}` : `${next.id} from ${next.source} on ${this.host.screen()}`);
         if (next.kind === 'input' && next.up && this.host.holdRemoteUp?.()) {
           const up = next.up;
           const remaining = Math.max(0, REMOTE_HOLD_MS - (Date.now() - up.at));
@@ -164,9 +183,10 @@ export class InputQueue {
         try {
           if (next.kind === 'input') {
             if (next.up) next.up.undo = this.host.captureRemoteUp?.();
-            job = this.host.apply(next.input);
+            job = this.host.apply(next.input, next.source);
             if (next.up) next.up.generation = this.host.generation();
           }
+          else if (next.kind === 'hold') job = this.host.hold?.(next.token);
           else if (next.kind === 'menu') {
             if (next.up?.undo && next.up.generation === this.host.generation()) next.up.undo();
             job = this.host.menu(next.id, next.source);
